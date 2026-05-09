@@ -1,0 +1,39 @@
+{
+  "name": "effect-auth",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for effect-auth.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsgo -p tsconfig.build.json",
+    "check": "tsgo -p tsconfig.json --noEmit",
+    "format": "oxfmt --write .",
+    "format:check": "oxfmt --check .",
+    "lint": "oxlint .",
+    "test": "vitest run",
+    "prepare": "effect-tsgo patch"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.64"
+  },
+  "devDependencies": {
+    "@effect/tsgo": "0.5.2",
+    "@effect/vitest": "^4.0.0-beta.64",
+    "@types/bun": "latest",
+    "@typescript/native-preview": "latest",
+    "oxfmt": "^0.48.0",
+    "oxlint": "^1.63.0",
+    "vitest": "^4.1.5"
+  }
+}
