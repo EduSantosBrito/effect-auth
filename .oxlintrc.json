@@ -1,3 +1,4 @@
 {
-  "ignorePatterns": ["dist/**", "node_modules/**"]
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": ["dist/**", "node_modules/**", ".repos/**"]
 }

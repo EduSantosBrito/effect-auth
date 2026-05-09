@@ -1,6 +1,12 @@
 [submodule "effect"]
-	path = effect
+	path = .repos/effect
 	url = https://github.com/Effect-TS/effect-smol
 [submodule "better-auth"]
-	path = better-auth
+	path = .repos/better-auth
 	url = https://github.com/better-auth/better-auth
+[submodule "opencode"]
+	path = .repos/opencode
+	url = https://github.com/anomalyco/opencode
+[submodule "t3code"]
+	path = .repos/t3code
+	url = https://github.com/pingdotgg/t3code
