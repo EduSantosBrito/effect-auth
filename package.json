@@ -18,7 +18,7 @@
   },
   "scripts": {
     "build": "bun --bun tsgo -p tsconfig.build.json",
-    "check": "bun --bun tsgo -p tsconfig.json --noEmit",
+    "check": "bun --bun tsgo -p tsconfig.json --noEmit && bun run lint",
     "format": "bun --bun oxfmt --ignore-path .oxfmtignore --write .",
     "format:check": "bun --bun oxfmt --ignore-path .oxfmtignore --check .",
     "lint": "bun --bun oxlint -c .oxlintrc.json .",
@@ -31,6 +31,7 @@
   "devDependencies": {
     "@effect/tsgo": "0.5.2",
     "@effect/vitest": "^4.0.0-beta.64",
+    "@oxlint/plugins": "^1.63.0",
     "@types/bun": "latest",
     "@typescript/native-preview": "latest",
     "oxfmt": "^0.48.0",
