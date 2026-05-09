@@ -33,11 +33,11 @@
           "nodeBuiltinImport": "error",
           "preferSchemaOverJson": "error",
           "processEnv": "error",
-          "processEnvInEffect": "error",
-        },
-      },
-    ],
+          "processEnvInEffect": "error"
+        }
+      }
+    ]
   },
   "include": ["src/**/*.ts", "test/**/*.ts"],
-  "$schema": "https://raw.githubusercontent.com/Effect-TS/tsgo/refs/heads/main/schema.json",
+  "$schema": "https://raw.githubusercontent.com/Effect-TS/tsgo/refs/heads/main/schema.json"
 }

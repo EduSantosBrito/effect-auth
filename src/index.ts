@@ -1,3 +1,7 @@
+export type { PublicAuthError } from "./domain/index.js";
+
+export const packageName = "effect-auth";
+
 export type EffectAuthClientOptions = {
   readonly baseUrl: URL;
 };
