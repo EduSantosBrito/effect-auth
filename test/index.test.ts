@@ -3,12 +3,26 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as Cookies from "effect/unstable/http/Cookies";
 import {
   AuthBoundary,
   AuthBoundaryLive,
+  invalidCredentials,
+  rateLimited,
+  unauthorized,
   normalizeEmail,
   normalizePassword,
 } from "../src/domain/index";
+import {
+  AuthApiEndpoints,
+  checkTrustedOrigin,
+  checkTrustedRequestOrigin,
+  clearSessionCookie,
+  jsonWithCookieInstruction,
+  makeSessionCookie,
+  mapPublicHttpError,
+  TrustedOrigins,
+} from "../src/http/index";
 import { createEffectAuthClient } from "../src/index";
 import {
   NativeScryptPasswordHasher,
@@ -426,3 +440,67 @@ it.effect("password reset revokes sessions and password change rotates current s
     assert.strictEqual(currentNew.session.userId, current.user.id);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("http helpers preserve cookie defaults and public error mapping", () => {
+  const { layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const tokenService = yield* AuthToken;
+    const session = yield* tokenService.makeSessionToken;
+    const setCookie = makeSessionCookie(session.token);
+    const clearCookie = clearSessionCookie();
+
+    assert.strictEqual(setCookie.name, "effect_auth_session");
+    assert.strictEqual(setCookie.httpOnly, true);
+    assert.strictEqual(setCookie.sameSite, "Lax");
+    assert.strictEqual(setCookie.path, "/");
+    assert.strictEqual(setCookie.secure, true);
+    assert.strictEqual(clearCookie.maxAge, 0);
+    assert.deepStrictEqual(
+      Cookies.toSetCookieHeaders(jsonWithCookieInstruction(null, setCookie).cookies),
+      [
+        `effect_auth_session=${Redacted.value(session.token)}; Path=/; HttpOnly; Secure; SameSite=Lax`,
+      ],
+    );
+    assert.deepStrictEqual(
+      Cookies.toSetCookieHeaders(jsonWithCookieInstruction(null, clearCookie).cookies),
+      ["effect_auth_session=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax"],
+    );
+    assert.deepStrictEqual(mapPublicHttpError(rateLimited), { status: 429, body: rateLimited });
+    assert.deepStrictEqual(mapPublicHttpError(unauthorized), { status: 401, body: unauthorized });
+    assert.deepStrictEqual(mapPublicHttpError(invalidCredentials), {
+      status: 400,
+      body: invalidCredentials,
+    });
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("trusted origin policy rejects untrusted state-changing requests", () =>
+  Effect.gen(function* () {
+    yield* checkTrustedOrigin(new URL("https://app.example.com"));
+    yield* checkTrustedRequestOrigin({ headers: {} });
+    yield* checkTrustedRequestOrigin({ headers: { origin: "https://app.example.com" } });
+    const rejected = yield* Effect.exit(checkTrustedOrigin(new URL("https://evil.example.com")));
+    const rejectedRequest = yield* Effect.exit(
+      checkTrustedRequestOrigin({ headers: { origin: "https://evil.example.com" } }),
+    );
+
+    assert.strictEqual(rejected._tag, "Failure");
+    assert.strictEqual(rejectedRequest._tag, "Failure");
+  }).pipe(Effect.provide(TrustedOrigins([new URL("https://app.example.com")]))),
+);
+
+it.effect("auth api endpoint inventory matches the ICD paths", () =>
+  Effect.sync(() => {
+    assert.deepStrictEqual(AuthApiEndpoints, [
+      ["POST", "/auth/sign-up/email"],
+      ["POST", "/auth/verify-email"],
+      ["POST", "/auth/resend-verification"],
+      ["POST", "/auth/sign-in/email"],
+      ["GET", "/auth/session"],
+      ["POST", "/auth/sign-out"],
+      ["POST", "/auth/password-reset/request"],
+      ["POST", "/auth/password-reset/complete"],
+      ["POST", "/auth/password/change"],
+    ]);
+  }),
+);

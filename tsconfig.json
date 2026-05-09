@@ -3,6 +3,18 @@
     "target": "ES2022",
     "module": "ESNext",
     "moduleResolution": "Bundler",
+    "paths": {
+      "effect-auth": ["./src/index.ts"],
+      "effect-auth/domain": ["./src/domain/index.ts"],
+      "effect-auth/email/mock": ["./src/email/mock.ts"],
+      "effect-auth/http": ["./src/http/index.ts"],
+      "effect-auth/password": ["./src/password/index.ts"],
+      "effect-auth/rate-limit": ["./src/rate-limit/index.ts"],
+      "effect-auth/storage": ["./src/storage/index.ts"],
+      "effect-auth/storage/dev-memory": ["./src/storage/dev-memory.ts"],
+      "effect-auth/token": ["./src/token/index.ts"],
+      "effect-auth/workflows": ["./src/workflows/index.ts"]
+    },
     "lib": ["ES2022"],
     "types": ["bun"],
     "strict": true,
