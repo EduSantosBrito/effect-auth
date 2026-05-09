@@ -4,6 +4,10 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Cookies from "effect/unstable/http/Cookies";
+import * as HttpEffect from "effect/unstable/http/HttpEffect";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
+import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -15,9 +19,18 @@ import {
 } from "../src/domain/index";
 import {
   AuthApiEndpoints,
+  AuthHttpAdapter,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
   clearSessionCookie,
+  handleChangePassword,
+  handleCompletePasswordReset,
+  handleCurrentSession,
+  handleRequestPasswordReset,
+  handleSignInEmail,
+  handleSignOut,
+  handleSignUpEmail,
+  handleVerifyEmail,
   jsonWithCookieInstruction,
   makeSessionCookie,
   mapPublicHttpError,
@@ -25,19 +38,27 @@ import {
 } from "../src/http/index";
 import { createEffectAuthClient } from "../src/index";
 import {
+  makeNativeScryptPasswordHasher,
   NativeScryptPasswordHasher,
   PasswordHash,
   PasswordHasher,
+  type PasswordHasherShape,
   PasswordPolicy,
   SecureDefaultPasswordPolicy,
 } from "../src/password/index";
-import { makeBoundedDevRateLimiter, PermissiveDevRateLimiter } from "../src/rate-limit/index";
+import {
+  deriveRateLimitKey,
+  makeBoundedDevRateLimiter,
+  PermissiveDevRateLimiter,
+  RateLimiter,
+  RateLimitExceeded,
+} from "../src/rate-limit/index";
 import {
   makeDevMemoryStorage,
   makeDevMemoryStorageState,
   DevMemoryAuthStorage,
 } from "../src/storage/dev-memory";
-import { AuthToken, AuthTokenLive } from "../src/token/index";
+import { AuthToken, AuthTokenLive, type SessionToken } from "../src/token/index";
 import {
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
@@ -46,7 +67,12 @@ import {
   SessionWorkflows,
   SessionWorkflowsLive,
 } from "../src/workflows/index";
-import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
+import {
+  AuthEmail,
+  AuthEmailFailure,
+  makeMockAuthEmailState,
+  MockAuthEmail,
+} from "../src/email/mock";
 
 const makeWorkflowLayer = () => {
   const storageState = makeDevMemoryStorageState();
@@ -141,6 +167,21 @@ it.effect("native scrypt hasher verifies correct passwords and rejects wrong pas
   }),
 );
 
+it.effect("native scrypt hasher fails explicitly on unsupported runtimes", () =>
+  Effect.gen(function* () {
+    const password = yield* normalizePassword("correct horse battery staple");
+    const hasher = makeNativeScryptPasswordHasher({});
+    const placeholder = yield* Schema.decodeUnknownEffect(PasswordHash)(
+      "$effect-auth-scrypt$N=16384,r=16,p=1,dkLen=64$c2FsdA$ZGVyaXZlZA",
+    );
+    const hashFailure = yield* Effect.flip(hasher.hash(password));
+    const verifyFailure = yield* Effect.flip(hasher.verify({ password, hash: placeholder }));
+
+    assert.strictEqual(hashFailure.reason, "UnsupportedRuntime");
+    assert.strictEqual(verifyFailure.reason, "UnsupportedRuntime");
+  }),
+);
+
 it.effect("auth token service returns redacted 32-byte base64url tokens and SHA-256 hashes", () =>
   Effect.gen(function* () {
     const tokenService = yield* Effect.gen(function* () {
@@ -172,6 +213,47 @@ it.effect("rate limiter derives bounded retry-after failures", () =>
     const exit = yield* Effect.exit(limiter.check({ bucket: "SignIn", ip: "127.0.0.1" }));
 
     assert.strictEqual(exit._tag, "Failure");
+  }),
+);
+
+it.effect("rate limiter key derivation covers default and custom bucket semantics", () =>
+  Effect.gen(function* () {
+    const email = yield* normalizeEmail("USER@example.com");
+    assert.strictEqual(
+      deriveRateLimitKey({ bucket: "SignIn", email, ip: "127.0.0.1" }),
+      "SignIn|email:user@example.com|ip:127.0.0.1",
+    );
+    assert.strictEqual(
+      deriveRateLimitKey({ bucket: "SignIn", email }),
+      "SignIn|email:user@example.com",
+    );
+    assert.strictEqual(
+      deriveRateLimitKey({ bucket: "SignUp", ip: "127.0.0.1" }),
+      "SignUp|ip:127.0.0.1",
+    );
+
+    const defaultLimiter = makeBoundedDevRateLimiter();
+    for (let index = 0; index < 100; index++) {
+      yield* defaultLimiter.check({ bucket: "SignIn", email });
+    }
+    const defaultLimited = yield* Effect.exit(defaultLimiter.check({ bucket: "SignIn", email }));
+
+    const customLimiter = makeBoundedDevRateLimiter({ limit: 2, windowMillis: 60_000 });
+    yield* customLimiter.check({ bucket: "SignIn", email });
+    yield* customLimiter.check({ bucket: "SignIn", email });
+    const customLimited = yield* Effect.exit(customLimiter.check({ bucket: "SignIn", email }));
+    const otherBucket = yield* Effect.exit(customLimiter.check({ bucket: "SignUp", email }));
+    const otherIp = yield* Effect.exit(
+      customLimiter.check({ bucket: "SignIn", email, ip: "127.0.0.1" }),
+    );
+
+    assert.strictEqual(defaultLimited._tag, "Failure");
+    assert.strictEqual(customLimited._tag, "Failure");
+    assert.strictEqual(otherBucket._tag, "Success");
+    assert.strictEqual(otherIp._tag, "Success");
+    const customFailure = yield* Effect.flip(customLimiter.check({ bucket: "SignIn", email }));
+    assert.strictEqual(customFailure.bucket, "SignIn");
+    assert.equal(customFailure.retryAfterMillis > 0, true);
   }),
 );
 
@@ -326,6 +408,238 @@ it.effect("email password workflows verify email before issuing sessions", () =>
   }).pipe(Effect.provide(layer));
 });
 
+it.effect(
+  "sign-up covers duplicate emails, typed delivery failure, and redacted email tokens",
+  () => {
+    const { emailState, layer } = makeWorkflowLayer();
+    return Effect.gen(function* () {
+      const emailPassword = yield* EmailPasswordWorkflows;
+      yield* emailPassword.signUp({
+        email: "duplicate@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      });
+      const duplicate = yield* Effect.flip(
+        emailPassword.signUp({
+          email: "duplicate@example.com",
+          password: "correct horse battery staple",
+          verificationCallbackUrl: new URL("https://app.example.com/verify"),
+        }),
+      );
+      const sent = emailState.sent[0];
+      if (!sent) return yield* Effect.die("missing verification email");
+
+      assert.strictEqual(duplicate._tag, "AuthStorageFailure");
+      assert.equal("reason" in duplicate, true);
+      if ("reason" in duplicate) assert.strictEqual(duplicate.reason, "Conflict");
+      assert.equal(String(sent.token).includes(Redacted.value(sent.token)), false);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("auth email port preserves typed delivery failures", () => {
+  const failingEmail = Layer.succeed(AuthEmail)({
+    sendEmailVerification: () =>
+      Effect.fail(new AuthEmailFailure({ reason: "DeliveryUnavailable" })),
+    sendPasswordReset: () => Effect.fail(new AuthEmailFailure({ reason: "InvalidRecipient" })),
+  });
+  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive, PasswordRecoveryWorkflowsLive).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthBoundaryLive,
+        SecureDefaultPasswordPolicy,
+        NativeScryptPasswordHasher,
+        AuthTokenLive,
+        DevMemoryAuthStorage(makeDevMemoryStorageState()),
+        failingEmail,
+        PermissiveDevRateLimiter,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const failed = yield* Effect.flip(
+      emailPassword.signUp({
+        email: "delivery@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+
+    assert.strictEqual(failed._tag, "AuthEmailFailure");
+    assert.equal("reason" in failed, true);
+    if ("reason" in failed) assert.strictEqual(failed.reason, "DeliveryUnavailable");
+    const resendFailed = yield* Effect.flip(
+      emailPassword.resendVerification({
+        email: "delivery@example.com",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+    assert.strictEqual(resendFailed._tag, "AuthEmailFailure");
+    assert.equal("reason" in resendFailed, true);
+    if ("reason" in resendFailed) assert.strictEqual(resendFailed.reason, "DeliveryUnavailable");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("verify and resend cover expired tokens and already-verified no-op", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    yield* emailPassword.signUp({
+      email: "verify-expired@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    for (const [key, token] of storageState.tokensByHash) {
+      storageState.tokensByHash.set(key, { ...token, expiresAt: 0 });
+    }
+    const expired = yield* Effect.flip(emailPassword.verifyEmail({ token: verification.token }));
+    assert.equal("code" in expired, true);
+    if ("code" in expired) assert.strictEqual(expired.code, "InvalidToken");
+
+    yield* emailPassword.signUp({
+      email: "verified@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verifiedToken = emailState.sent[1];
+    if (!verifiedToken) return yield* Effect.die("missing second verification email");
+    yield* emailPassword.verifyEmail({ token: verifiedToken.token });
+    yield* emailPassword.resendVerification({
+      email: "verified@example.com",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    assert.strictEqual(emailState.sent.length, 2);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("workflow rate-limit failures become equivalent public RateLimited errors", () => {
+  const limited = Layer.succeed(RateLimiter)({
+    check: (attempt) =>
+      Effect.fail(new RateLimitExceeded({ bucket: attempt.bucket, retryAfterMillis: 1_000 })),
+  });
+  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive, PasswordRecoveryWorkflowsLive).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthBoundaryLive,
+        SecureDefaultPasswordPolicy,
+        NativeScryptPasswordHasher,
+        AuthTokenLive,
+        DevMemoryAuthStorage(makeDevMemoryStorageState()),
+        MockAuthEmail(makeMockAuthEmailState()),
+        limited,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const recovery = yield* PasswordRecoveryWorkflows;
+    const signUp = yield* Effect.flip(
+      emailPassword.signUp({
+        email: "limited@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+    const signIn = yield* Effect.flip(
+      emailPassword.signIn({
+        email: "limited@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    const resend = yield* Effect.flip(
+      emailPassword.resendVerification({
+        email: "limited@example.com",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+    const reset = yield* Effect.flip(
+      recovery.requestPasswordReset({
+        email: "limited@example.com",
+        resetCallbackUrl: new URL("https://app.example.com/reset"),
+      }),
+    );
+
+    assert.equal("code" in signUp, true);
+    assert.equal("code" in signIn, true);
+    assert.equal("code" in resend, true);
+    assert.equal("code" in reset, true);
+    if ("code" in signUp) assert.strictEqual(signUp.code, "RateLimited");
+    if ("code" in signIn) assert.strictEqual(signIn.code, "RateLimited");
+    if ("code" in resend) assert.strictEqual(resend.code, "RateLimited");
+    if ("code" in reset) assert.strictEqual(reset.code, "RateLimited");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("sign-in uses equivalent public errors and dummy hash work for missing accounts", () => {
+  const { emailState, storageState } = makeWorkflowLayer();
+  let hashCalls = 0;
+  let verifyCalls = 0;
+  const countingHasher: PasswordHasherShape = {
+    hash: (password) =>
+      Effect.gen(function* () {
+        hashCalls++;
+        const hasher = yield* PasswordHasher;
+        return yield* hasher.hash(password);
+      }).pipe(Effect.provide(NativeScryptPasswordHasher)),
+    verify: (input) =>
+      Effect.gen(function* () {
+        verifyCalls++;
+        const hasher = yield* PasswordHasher;
+        return yield* hasher.verify(input);
+      }).pipe(Effect.provide(NativeScryptPasswordHasher)),
+  };
+  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthBoundaryLive,
+        SecureDefaultPasswordPolicy,
+        Layer.succeed(PasswordHasher)(countingHasher),
+        AuthTokenLive,
+        DevMemoryAuthStorage(storageState),
+        MockAuthEmail(emailState),
+        PermissiveDevRateLimiter,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    yield* emailPassword.signUp({
+      email: "enumeration@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+
+    const missing = yield* Effect.flip(
+      emailPassword.signIn({
+        email: "missing-enumeration@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    const wrong = yield* Effect.flip(
+      emailPassword.signIn({
+        email: "enumeration@example.com",
+        password: "wrong correct horse battery",
+      }),
+    );
+
+    assert.equal("code" in missing, true);
+    assert.equal("code" in wrong, true);
+    if ("code" in missing) assert.strictEqual(missing.code, "InvalidCredentials");
+    if ("code" in wrong) assert.strictEqual(wrong.code, "InvalidCredentials");
+    assert.strictEqual(hashCalls, 2);
+    assert.strictEqual(verifyCalls, 1);
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("session workflow rotates stale sessions and sign-out revokes them", () => {
   const { emailState, storageState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
@@ -441,6 +755,163 @@ it.effect("password reset revokes sessions and password change rotates current s
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("password reset rejects expired and consumed tokens", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const recovery = yield* PasswordRecoveryWorkflows;
+    yield* emailPassword.signUp({
+      email: "reset-token@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+
+    yield* recovery.requestPasswordReset({
+      email: "reset-token@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+    const expiredEmail = emailState.sent[1];
+    if (!expiredEmail) return yield* Effect.die("missing reset email");
+    for (const [key, token] of storageState.tokensByHash) {
+      if (token.purpose === "PasswordReset")
+        storageState.tokensByHash.set(key, { ...token, expiresAt: 0 });
+    }
+    const expired = yield* Effect.flip(
+      recovery.resetPassword({
+        token: expiredEmail.token,
+        password: "new correct horse battery",
+      }),
+    );
+
+    yield* recovery.requestPasswordReset({
+      email: "reset-token@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+    const consumedEmail = emailState.sent[2];
+    if (!consumedEmail) return yield* Effect.die("missing consumed reset email");
+    yield* recovery.resetPassword({
+      token: consumedEmail.token,
+      password: "new correct horse battery",
+    });
+    const consumed = yield* Effect.flip(
+      recovery.resetPassword({
+        token: consumedEmail.token,
+        password: "another correct horse battery",
+      }),
+    );
+
+    assert.equal("code" in expired, true);
+    assert.equal("code" in consumed, true);
+    if ("code" in expired) assert.strictEqual(expired.code, "InvalidToken");
+    if ("code" in consumed) assert.strictEqual(consumed.code, "InvalidToken");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect(
+  "password change rejects unauthenticated, wrong password, weak policy, and rate limits",
+  () => {
+    const { emailState, storageState, layer } = makeWorkflowLayer();
+    return Effect.gen(function* () {
+      const emailPassword = yield* EmailPasswordWorkflows;
+      const recovery = yield* PasswordRecoveryWorkflows;
+      const tokenService = yield* AuthToken;
+      yield* emailPassword.signUp({
+        email: "change-failures@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      });
+      const verification = emailState.sent[0];
+      if (!verification) return yield* Effect.die("missing verification email");
+      yield* emailPassword.verifyEmail({ token: verification.token });
+      const signedIn = yield* emailPassword.signIn({
+        email: "change-failures@example.com",
+        password: "correct horse battery staple",
+      });
+      const missingToken = yield* tokenService.makeSessionToken;
+      const unauthenticated = yield* Effect.flip(
+        recovery.changePassword({
+          sessionToken: missingToken.token,
+          currentPassword: "correct horse battery staple",
+          newPassword: "changed correct horse battery",
+        }),
+      );
+      const wrongPassword = yield* Effect.flip(
+        recovery.changePassword({
+          sessionToken: signedIn.sessionToken,
+          currentPassword: "wrong correct horse battery",
+          newPassword: "changed correct horse battery",
+        }),
+      );
+      const weakPassword = yield* Effect.flip(
+        recovery.changePassword({
+          sessionToken: signedIn.sessionToken,
+          currentPassword: "correct horse battery staple",
+          newPassword: "too short",
+        }),
+      );
+      for (const [key, session] of storageState.sessionsByHash) {
+        storageState.sessionsByHash.set(key, { ...session, expiresAt: 0 });
+      }
+      const expiredSession = yield* Effect.flip(
+        recovery.changePassword({
+          sessionToken: signedIn.sessionToken,
+          currentPassword: "correct horse battery staple",
+          newPassword: "changed correct horse battery",
+        }),
+      );
+
+      assert.equal("code" in unauthenticated, true);
+      assert.equal("code" in wrongPassword, true);
+      assert.equal("reason" in weakPassword, true);
+      assert.equal("code" in expiredSession, true);
+      if ("code" in unauthenticated) assert.strictEqual(unauthenticated.code, "Unauthorized");
+      if ("code" in wrongPassword) assert.strictEqual(wrongPassword.code, "InvalidCredentials");
+      if ("reason" in weakPassword) assert.strictEqual(weakPassword.reason, "TooShort");
+      if ("code" in expiredSession) assert.strictEqual(expiredSession.code, "Unauthorized");
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect("password change checks rate limits before session lookup", () => {
+  const limited = Layer.succeed(RateLimiter)({
+    check: (attempt) =>
+      Effect.fail(new RateLimitExceeded({ bucket: attempt.bucket, retryAfterMillis: 1_000 })),
+  });
+  const layer = PasswordRecoveryWorkflowsLive.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthBoundaryLive,
+        SecureDefaultPasswordPolicy,
+        NativeScryptPasswordHasher,
+        AuthTokenLive,
+        DevMemoryAuthStorage(makeDevMemoryStorageState()),
+        MockAuthEmail(makeMockAuthEmailState()),
+        limited,
+      ),
+    ),
+  );
+
+  return Effect.gen(function* () {
+    const recovery = yield* PasswordRecoveryWorkflows;
+    const tokenService = yield* AuthToken;
+    const token = yield* tokenService.makeSessionToken;
+    const limited = yield* Effect.flip(
+      recovery.changePassword({
+        sessionToken: token.token,
+        currentPassword: "correct horse battery staple",
+        newPassword: "changed correct horse battery",
+        ip: "127.0.0.1",
+      }),
+    );
+
+    assert.equal("code" in limited, true);
+    if ("code" in limited) assert.strictEqual(limited.code, "RateLimited");
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("http helpers preserve cookie defaults and public error mapping", () => {
   const { layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
@@ -472,6 +943,363 @@ it.effect("http helpers preserve cookie defaults and public error mapping", () =
       body: invalidCredentials,
     });
   }).pipe(Effect.provide(layer));
+});
+
+it.effect("http adapter appends rotated session cookies to handled responses", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const adapter = yield* AuthHttpAdapter;
+    yield* emailPassword.signUp({
+      email: "http-cookie@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const signedIn = yield* emailPassword.signIn({
+      email: "http-cookie@example.com",
+      password: "correct horse battery staple",
+    });
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+
+    const setCookieHeaders: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* adapter.currentSession({ sessionToken: signedIn.sessionToken });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          setCookieHeaders.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.get("https://auth.example.com")),
+      ),
+    );
+
+    assert.strictEqual(setCookieHeaders.length, 1);
+    assert.equal(setCookieHeaders[0]?.includes("effect_auth_session="), true);
+    assert.equal(setCookieHeaders[0]?.includes("HttpOnly"), true);
+    assert.equal(setCookieHeaders[0]?.includes("SameSite=Lax"), true);
+    assert.equal(setCookieHeaders[0]?.includes(Redacted.value(signedIn.sessionToken)), false);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("http adapter appends sign-in and sign-out session cookie instructions", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const adapter = yield* AuthHttpAdapter;
+    yield* emailPassword.signUp({
+      email: "http-sign-in-out@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+
+    const signInCookies: Array<string> = [];
+    let signedInToken: SessionToken | undefined;
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        const result = yield* adapter.signInEmail({
+          email: "http-sign-in-out@example.com",
+          password: "correct horse battery staple",
+        });
+        signedInToken = result.sessionToken;
+        return HttpServerResponse.jsonUnsafe(result);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          signInCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+    if (!signedInToken) return yield* Effect.die("missing signed-in token");
+    const sessionToken = signedInToken;
+
+    const signOutCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* adapter.signOut({ sessionToken });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          signOutCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+
+    assert.strictEqual(signInCookies.length, 1);
+    assert.equal(signInCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(signInCookies[0]?.includes("HttpOnly"), true);
+    assert.equal(signInCookies[0]?.includes("Max-Age=0"), false);
+    assert.strictEqual(signOutCookies.length, 1);
+    assert.equal(signOutCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(signOutCookies[0]?.includes("Max-Age=0"), true);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("http adapter delegates password reset and password change behavior", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const adapter = yield* AuthHttpAdapter;
+    const sessions = yield* SessionWorkflows;
+
+    yield* emailPassword.signUp({
+      email: "http-adapter@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* adapter.verifyEmail({ token: verification.token });
+
+    yield* adapter.requestPasswordReset({
+      email: "http-adapter@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+    const reset = emailState.sent[1];
+    if (!reset) return yield* Effect.die("missing reset email");
+    assert.strictEqual(reset.kind, "PasswordReset");
+
+    yield* adapter.completePasswordReset({
+      token: reset.token,
+      password: "new correct horse battery",
+    });
+    const signedIn = yield* emailPassword.signIn({
+      email: "http-adapter@example.com",
+      password: "new correct horse battery",
+    });
+    const changed = yield* adapter
+      .changePassword({
+        sessionToken: signedIn.sessionToken,
+        currentPassword: "new correct horse battery",
+        newPassword: "changed correct horse battery",
+      })
+      .pipe(
+        Effect.provideService(
+          HttpServerRequest.HttpServerRequest,
+          HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+        ),
+      );
+    const current = yield* sessions.currentSession({
+      sessionToken: changed.currentSessionToken,
+    });
+
+    assert.strictEqual(current.session.userId, signedIn.user.id);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("http handler functions exercise auth and session endpoints", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  const request = { headers: { origin: "https://app.example.com" } };
+  const trustedLayer = Layer.mergeAll(layer, TrustedOrigins([new URL("https://app.example.com")]));
+  return Effect.gen(function* () {
+    yield* handleSignUpEmail({
+      request,
+      payload: {
+        email: "http-handler@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      },
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* handleVerifyEmail({
+      request,
+      payload: { token: Redacted.value(verification.token) },
+    });
+
+    const signInCookies: Array<string> = [];
+    let sessionTokenText: string | undefined;
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        const result = yield* handleSignInEmail({
+          request,
+          payload: {
+            email: "http-handler@example.com",
+            password: "correct horse battery staple",
+          },
+        });
+        sessionTokenText = Redacted.value(result.sessionToken);
+        return HttpServerResponse.jsonUnsafe(result);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          signInCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+    if (!sessionTokenText) return yield* Effect.die("missing handler session token");
+    const sessionTokenTextValue = sessionTokenText;
+
+    const unchangedCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* handleCurrentSession({ query: { sessionToken: sessionTokenTextValue } });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          unchangedCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.get("https://auth.example.com")),
+      ),
+    );
+
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const rotatedCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* handleCurrentSession({ query: { sessionToken: sessionTokenTextValue } });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          rotatedCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.get("https://auth.example.com")),
+      ),
+    );
+    const rotatedTokenText = rotatedCookies[0]?.match(/^effect_auth_session=([^;]+)/u)?.[1];
+    if (!rotatedTokenText) return yield* Effect.die("missing rotated handler cookie");
+
+    const signOutCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* handleSignOut({ request, payload: { sessionToken: rotatedTokenText } });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          signOutCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+
+    assert.strictEqual(signInCookies.length, 1);
+    assert.strictEqual(unchangedCookies.length, 0);
+    assert.strictEqual(rotatedCookies.length, 1);
+    assert.equal(rotatedCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(rotatedCookies[0]?.includes(sessionTokenTextValue), false);
+    assert.strictEqual(signOutCookies.length, 1);
+    assert.equal(signOutCookies[0]?.includes("Max-Age=0"), true);
+  }).pipe(Effect.provide(trustedLayer));
+});
+
+it.effect("http handler functions exercise password reset and change endpoints", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  const request = { headers: { origin: "https://app.example.com" } };
+  const trustedLayer = Layer.mergeAll(layer, TrustedOrigins([new URL("https://app.example.com")]));
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const sessions = yield* SessionWorkflows;
+    yield* emailPassword.signUp({
+      email: "http-handler-password@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* handleVerifyEmail({
+      request,
+      payload: { token: Redacted.value(verification.token) },
+    });
+
+    yield* handleRequestPasswordReset({
+      request,
+      payload: {
+        email: "http-handler-password@example.com",
+        resetCallbackUrl: new URL("https://app.example.com/reset"),
+      },
+    });
+    const reset = emailState.sent[1];
+    if (!reset) return yield* Effect.die("missing reset email");
+    yield* handleCompletePasswordReset({
+      request,
+      payload: {
+        token: Redacted.value(reset.token),
+        password: "new correct horse battery",
+      },
+    });
+
+    const signedIn = yield* emailPassword.signIn({
+      email: "http-handler-password@example.com",
+      password: "new correct horse battery",
+    });
+    const changeCookies: Array<string> = [];
+    let changedToken: SessionToken | undefined;
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        const result = yield* handleChangePassword({
+          request,
+          payload: {
+            sessionToken: Redacted.value(signedIn.sessionToken),
+            currentPassword: "new correct horse battery",
+            newPassword: "changed correct horse battery",
+          },
+        });
+        changedToken = result.currentSessionToken;
+        return HttpServerResponse.jsonUnsafe(result);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          changeCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+    if (!changedToken) return yield* Effect.die("missing changed handler session token");
+    const current = yield* sessions.currentSession({ sessionToken: changedToken });
+
+    assert.strictEqual(current.session.userId, signedIn.user.id);
+    assert.strictEqual(changeCookies.length, 1);
+    assert.equal(changeCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(changeCookies[0]?.includes(Redacted.value(signedIn.sessionToken)), false);
+  }).pipe(Effect.provide(trustedLayer));
 });
 
 it.effect("trusted origin policy rejects untrusted state-changing requests", () =>

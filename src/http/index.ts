@@ -378,73 +378,134 @@ const changePasswordInput = (
   ...(payload.ip === undefined ? {} : { ip: payload.ip }),
 });
 
+export const handleSignUpEmail = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof SignUpEmailPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    return yield* adapter.signUpEmail(signUpInput(payload));
+  });
+
+export const handleVerifyEmail = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof VerifyEmailPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    const token = yield* decodeVerificationToken(payload.token);
+    return yield* adapter.verifyEmail({ token });
+  });
+
+export const handleResendVerification = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof ResendVerificationPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    return yield* adapter.resendVerification(resendVerificationInput(payload));
+  });
+
+export const handleSignInEmail = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof SignInEmailPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    return yield* adapter.signInEmail(signInInput(payload));
+  });
+
+export const handleCurrentSession = ({
+  query,
+}: {
+  readonly query: typeof CurrentSessionQuery.Type;
+}) =>
+  Effect.gen(function* () {
+    const adapter = yield* AuthHttpAdapter;
+    const sessionToken = yield* decodeSessionToken(query.sessionToken);
+    return yield* adapter.currentSession({ sessionToken });
+  });
+
+export const handleSignOut = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof SessionTokenPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+    return yield* adapter.signOut({ sessionToken });
+  });
+
+export const handleRequestPasswordReset = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof RequestPasswordResetPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    return yield* adapter.requestPasswordReset(requestPasswordResetInput(payload));
+  });
+
+export const handleCompletePasswordReset = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof CompletePasswordResetPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    const token = yield* decodeVerificationToken(payload.token);
+    return yield* adapter.completePasswordReset({ token, password: payload.password });
+  });
+
+export const handleChangePassword = ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof ChangePasswordPayload.Type;
+  readonly request: OriginRequest;
+}) =>
+  Effect.gen(function* () {
+    yield* checkTrustedRequestOrigin(request);
+    const adapter = yield* AuthHttpAdapter;
+    const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+    return yield* adapter.changePassword(changePasswordInput(payload, sessionToken));
+  });
+
 export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handlers) =>
   handlers
-    .handle("signUpEmail", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        return yield* adapter.signUpEmail(signUpInput(payload));
-      }),
-    )
-    .handle("verifyEmail", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        const token = yield* decodeVerificationToken(payload.token);
-        return yield* adapter.verifyEmail({ token });
-      }),
-    )
-    .handle("resendVerification", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        return yield* adapter.resendVerification(resendVerificationInput(payload));
-      }),
-    )
-    .handle("signInEmail", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        return yield* adapter.signInEmail(signInInput(payload));
-      }),
-    )
-    .handle("currentSession", ({ query }) =>
-      Effect.gen(function* () {
-        const adapter = yield* AuthHttpAdapter;
-        const sessionToken = yield* decodeSessionToken(query.sessionToken);
-        return yield* adapter.currentSession({ sessionToken });
-      }),
-    )
-    .handle("signOut", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        const sessionToken = yield* decodeSessionToken(payload.sessionToken);
-        return yield* adapter.signOut({ sessionToken });
-      }),
-    )
-    .handle("requestPasswordReset", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        return yield* adapter.requestPasswordReset(requestPasswordResetInput(payload));
-      }),
-    )
-    .handle("completePasswordReset", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        const token = yield* decodeVerificationToken(payload.token);
-        return yield* adapter.completePasswordReset({ token, password: payload.password });
-      }),
-    )
-    .handle("changePassword", ({ payload, request }) =>
-      Effect.gen(function* () {
-        yield* checkTrustedRequestOrigin(request);
-        const adapter = yield* AuthHttpAdapter;
-        const sessionToken = yield* decodeSessionToken(payload.sessionToken);
-        return yield* adapter.changePassword(changePasswordInput(payload, sessionToken));
-      }),
-    ),
+    .handle("signUpEmail", handleSignUpEmail)
+    .handle("verifyEmail", handleVerifyEmail)
+    .handle("resendVerification", handleResendVerification)
+    .handle("signInEmail", handleSignInEmail)
+    .handle("currentSession", handleCurrentSession)
+    .handle("signOut", handleSignOut)
+    .handle("requestPasswordReset", handleRequestPasswordReset)
+    .handle("completePasswordReset", handleCompletePasswordReset)
+    .handle("changePassword", handleChangePassword),
 );

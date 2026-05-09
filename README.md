@@ -6,7 +6,11 @@ TypeScript SDK for `effect-auth`, built with Bun.
 
 ```ts
 import { AuthBoundaryLive, PublicAuthError } from "effect-auth/domain";
-import { NativeScryptPasswordHasher, SecureDefaultPasswordPolicy } from "effect-auth/password";
+import {
+  makeNativeScryptPasswordHasher,
+  NativeScryptPasswordHasher,
+  SecureDefaultPasswordPolicy,
+} from "effect-auth/password";
 import { AuthTokenLive } from "effect-auth/token";
 import { AuthStorage } from "effect-auth/storage";
 import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
@@ -28,6 +32,6 @@ schemas, public errors, workflow layers, and explicitly named dev/mock layers.
 ```sh
 bun install
 bun run check
-bun test
+bun run test
 bun run build
 ```
