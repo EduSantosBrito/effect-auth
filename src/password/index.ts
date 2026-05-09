@@ -1,5 +1,9 @@
 import { Context, Effect, Layer, Redacted, Schema } from "effect";
-import { randomBytes, scrypt, timingSafeEqual } from "node:crypto";
+import {
+  randomBytes as nodeRandomBytes,
+  scrypt as nodeScrypt,
+  timingSafeEqual as nodeTimingSafeEqual,
+} from "node:crypto";
 import type { NormalizedEmail, PasswordText } from "../domain/index.js";
 
 export const PasswordHash = Schema.RedactedFromValue(Schema.String, { label: "PasswordHash" });
@@ -49,7 +53,31 @@ const params: {
   readonly maxmem: number;
 } = { N: 16384, r: 16, p: 1, dkLen: 64, maxmem: 128 * 1024 * 1024 };
 
+export interface NativeScryptRuntime {
+  readonly randomBytes?: (size: number) => Buffer;
+  readonly scrypt?: typeof nodeScrypt;
+  readonly timingSafeEqual?: (left: Buffer, right: Buffer) => boolean;
+}
+
+const nodeScryptRuntime: NativeScryptRuntime = {
+  randomBytes: nodeRandomBytes,
+  scrypt: nodeScrypt,
+  timingSafeEqual: nodeTimingSafeEqual,
+};
+
+const requireNativeScryptRuntime = (
+  runtime: NativeScryptRuntime,
+): Effect.Effect<Required<NativeScryptRuntime>, PasswordHashFailure> =>
+  runtime.randomBytes && runtime.scrypt && runtime.timingSafeEqual
+    ? Effect.succeed({
+        randomBytes: runtime.randomBytes,
+        scrypt: runtime.scrypt,
+        timingSafeEqual: runtime.timingSafeEqual,
+      })
+    : Effect.fail(new PasswordHashFailure({ reason: "UnsupportedRuntime" }));
+
 const scryptEffect = (
+  scrypt: typeof nodeScrypt,
   password: string,
   salt: Buffer,
   options: {
@@ -117,27 +145,43 @@ const parseHash = (hash: PasswordHash) => {
   };
 };
 
-export const NativeScryptPasswordHasher = Layer.succeed(PasswordHasher)({
+export const makeNativeScryptPasswordHasher = (
+  runtime: NativeScryptRuntime = nodeScryptRuntime,
+): PasswordHasherShape => ({
   hash: (password) =>
     Effect.gen(function* () {
-      const salt = randomBytes(16);
-      const derived = yield* scryptEffect(Redacted.value(password), salt, params, params.dkLen);
+      const native = yield* requireNativeScryptRuntime(runtime);
+      const salt = native.randomBytes(16);
+      const derived = yield* scryptEffect(
+        native.scrypt,
+        Redacted.value(password),
+        salt,
+        params,
+        params.dkLen,
+      );
       return yield* Schema.decodeUnknownEffect(PasswordHash)(
         `$effect-auth-scrypt$N=${params.N},r=${params.r},p=${params.p},dkLen=${params.dkLen}$${salt.toString("base64url")}$${derived.toString("base64url")}`,
       ).pipe(Effect.mapError(() => new PasswordHashFailure({ reason: "HashingFailed" })));
     }),
   verify: ({ password, hash }) =>
     Effect.gen(function* () {
+      const native = yield* requireNativeScryptRuntime(runtime);
       const parsed = parseHash(hash);
       if (!parsed) return yield* new PasswordHashFailure({ reason: "MalformedHash" });
       const derived = yield* scryptEffect(
+        native.scrypt,
         Redacted.value(password),
         parsed.salt,
         parsed,
         parsed.dkLen,
       );
       return (
-        derived.length === parsed.derivedKey.length && timingSafeEqual(derived, parsed.derivedKey)
+        derived.length === parsed.derivedKey.length &&
+        native.timingSafeEqual(derived, parsed.derivedKey)
       );
     }),
 });
+
+export const NativeScryptPasswordHasher = Layer.succeed(PasswordHasher)(
+  makeNativeScryptPasswordHasher(),
+);
