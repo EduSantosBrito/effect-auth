@@ -31,9 +31,9 @@
   "devDependencies": {
     "@effect/tsgo": "0.5.2",
     "@effect/vitest": "^4.0.0-beta.64",
-    "@oxlint/plugins": "^1.63.0",
     "@types/bun": "latest",
     "@typescript/native-preview": "latest",
+    "effect-rules": "0.1.0",
     "oxfmt": "^0.48.0",
     "oxlint": "^1.63.0",
     "vitest": "^4.1.5"
