@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import {
@@ -16,9 +17,42 @@ import {
   PasswordPolicy,
   SecureDefaultPasswordPolicy,
 } from "../src/password/index";
-import { makeBoundedDevRateLimiter } from "../src/rate-limit/index";
-import { makeDevMemoryStorage } from "../src/storage/dev-memory";
+import { makeBoundedDevRateLimiter, PermissiveDevRateLimiter } from "../src/rate-limit/index";
+import {
+  makeDevMemoryStorage,
+  makeDevMemoryStorageState,
+  DevMemoryAuthStorage,
+} from "../src/storage/dev-memory";
 import { AuthToken, AuthTokenLive } from "../src/token/index";
+import {
+  EmailPasswordWorkflows,
+  EmailPasswordWorkflowsLive,
+  PasswordRecoveryWorkflows,
+  PasswordRecoveryWorkflowsLive,
+  SessionWorkflows,
+  SessionWorkflowsLive,
+} from "../src/workflows/index";
+import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
+
+const makeWorkflowLayer = () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const coreLayer = Layer.mergeAll(
+    AuthBoundaryLive,
+    SecureDefaultPasswordPolicy,
+    NativeScryptPasswordHasher,
+    AuthTokenLive,
+    DevMemoryAuthStorage(storageState),
+    MockAuthEmail(emailState),
+    PermissiveDevRateLimiter,
+  );
+  const layer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+  ).pipe(Layer.provideMerge(coreLayer));
+  return { storageState, emailState, layer };
+};
 
 it.effect("creates effect-auth client", () =>
   Effect.sync(() => {
@@ -241,3 +275,154 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
     assert.strictEqual(newLookup.session.id, rotated.id);
   }),
 );
+it.effect("email password workflows verify email before issuing sessions", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    yield* emailPassword.signUp({
+      email: " USER@example.COM ",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+
+    assert.strictEqual(emailState.sent.length, 1);
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    assert.strictEqual(verification.kind, "EmailVerification");
+
+    const unverified = yield* Effect.exit(
+      emailPassword.signIn({
+        email: "user@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    assert.strictEqual(unverified._tag, "Failure");
+
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const consumedAgain = yield* Effect.exit(
+      emailPassword.verifyEmail({ token: verification.token }),
+    );
+    assert.strictEqual(consumedAgain._tag, "Failure");
+
+    const signedIn = yield* emailPassword.signIn({
+      email: "user@example.com",
+      password: "correct horse battery staple",
+    });
+    assert.strictEqual(signedIn.user.email, "user@example.com");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("session workflow rotates stale sessions and sign-out revokes them", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const sessions = yield* SessionWorkflows;
+    yield* emailPassword.signUp({
+      email: "session@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const signedIn = yield* emailPassword.signIn({
+      email: "session@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const unchanged = yield* sessions.currentSession({ sessionToken: signedIn.sessionToken });
+    assert.strictEqual(unchanged.tokenRotation._tag, "Unchanged");
+
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const rotated = yield* sessions.currentSession({ sessionToken: signedIn.sessionToken });
+    assert.strictEqual(rotated.tokenRotation._tag, "Rotated");
+    if (rotated.tokenRotation._tag !== "Rotated") return yield* Effect.die("missing rotation");
+
+    yield* sessions.signOut({ sessionToken: rotated.tokenRotation.token });
+    const signedOut = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: rotated.tokenRotation.token }),
+    );
+    assert.strictEqual(signedOut._tag, "Failure");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("password reset revokes sessions and password change rotates current session", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const recovery = yield* PasswordRecoveryWorkflows;
+    const sessions = yield* SessionWorkflows;
+    yield* emailPassword.signUp({
+      email: "reset@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* Effect.die("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const firstSession = yield* emailPassword.signIn({
+      email: "reset@example.com",
+      password: "correct horse battery staple",
+    });
+
+    yield* recovery.requestPasswordReset({
+      email: "missing@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+    assert.strictEqual(emailState.sent.length, 1);
+
+    yield* recovery.requestPasswordReset({
+      email: "reset@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+    const resetEmail = emailState.sent[1];
+    if (!resetEmail) return yield* Effect.die("missing reset email");
+    const weakReset = yield* Effect.exit(
+      recovery.resetPassword({
+        token: resetEmail.token,
+        password: "too short",
+      }),
+    );
+    assert.strictEqual(weakReset._tag, "Failure");
+    yield* recovery.resetPassword({
+      token: resetEmail.token,
+      password: "new correct horse battery",
+    });
+    const revoked = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: firstSession.sessionToken }),
+    );
+    assert.strictEqual(revoked._tag, "Failure");
+
+    const current = yield* emailPassword.signIn({
+      email: "reset@example.com",
+      password: "new correct horse battery",
+    });
+    const other = yield* emailPassword.signIn({
+      email: "reset@example.com",
+      password: "new correct horse battery",
+    });
+    const changed = yield* recovery.changePassword({
+      sessionToken: current.sessionToken,
+      currentPassword: "new correct horse battery",
+      newPassword: "changed correct horse battery",
+    });
+    const currentOld = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: current.sessionToken }),
+    );
+    const otherRevoked = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: other.sessionToken }),
+    );
+    const currentNew = yield* sessions.currentSession({
+      sessionToken: changed.currentSessionToken,
+    });
+
+    assert.strictEqual(currentOld._tag, "Failure");
+    assert.strictEqual(otherRevoked._tag, "Failure");
+    assert.strictEqual(currentNew.session.userId, current.user.id);
+  }).pipe(Effect.provide(layer));
+});
