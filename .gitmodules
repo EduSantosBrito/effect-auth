@@ -1,0 +1,6 @@
+[submodule "effect"]
+	path = effect
+	url = https://github.com/Effect-TS/effect-smol
+[submodule "better-auth"]
+	path = better-auth
+	url = https://github.com/better-auth/better-auth
