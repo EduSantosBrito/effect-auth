@@ -526,6 +526,131 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
   }).pipe(Effect.provide(authLayer));
 });
 
+it.effect("AuthHttp.mount serves email, session, sign-out, and password routes", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: ["https://app.example.com"],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const json = (body: unknown, cookie?: string) => ({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.com",
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+      body: JSON.stringify(body),
+    });
+    const call = (path: string, init?: RequestInit) =>
+      Effect.promise(() => web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()));
+
+    const signUp = yield* call(
+      "/api/auth/sign-up/email",
+      json({
+        email: "mounted-flow@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: "https://app.example.com/verify",
+      }),
+    );
+    assert.strictEqual(signUp.status, 200);
+
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    const verified = yield* call(
+      "/api/auth/verify-email",
+      json({ token: Redacted.value(verification.token) }),
+    );
+    assert.strictEqual(verified.status, 200);
+
+    const signIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({
+        email: "mounted-flow@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    const sessionCookie = signIn.headers.get("set-cookie");
+    if (!sessionCookie) return yield* missingFixture("missing sign-in cookie");
+    const signInBody = yield* Effect.promise(() => signIn.text());
+    assert.equal(signInBody.includes("sessionToken"), false);
+
+    const current = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: sessionCookie },
+    });
+    const currentBody = yield* Effect.promise(() => current.text());
+    assert.strictEqual(current.status, 200);
+    assert.equal(currentBody.includes("mounted-flow@example.com"), true);
+    assert.equal(currentBody.includes("tokenHash"), false);
+
+    const resetRequested = yield* call(
+      "/api/auth/password-reset/request",
+      json({
+        email: "mounted-flow@example.com",
+        resetCallbackUrl: "https://app.example.com/reset",
+      }),
+    );
+    assert.strictEqual(resetRequested.status, 200);
+    const reset = emailState.sent.find((sent) => sent.kind === "PasswordReset");
+    if (!reset) return yield* missingFixture("missing password reset email");
+    const resetCompleted = yield* call(
+      "/api/auth/password-reset/complete",
+      json({ token: Redacted.value(reset.token), password: "new correct horse battery staple" }),
+    );
+    assert.strictEqual(resetCompleted.status, 200);
+
+    const oldSession = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: sessionCookie },
+    });
+    assert.notStrictEqual(oldSession.status, 200);
+
+    const signedInAgain = yield* call(
+      "/api/auth/sign-in/email",
+      json({
+        email: "mounted-flow@example.com",
+        password: "new correct horse battery staple",
+      }),
+    );
+    const changedCookie = signedInAgain.headers.get("set-cookie");
+    if (!changedCookie) return yield* missingFixture("missing changed sign-in cookie");
+
+    const changed = yield* call(
+      "/api/auth/password/change",
+      json(
+        {
+          currentPassword: "new correct horse battery staple",
+          newPassword: "newer correct horse battery staple",
+          sessionToken: "client-supplied-token-is-ignored",
+        },
+        changedCookie,
+      ),
+    );
+    const changedBody = yield* Effect.promise(() => changed.text());
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(changed.status, 200);
+    assert.equal(changed.headers.get("set-cookie")?.includes("effect_auth_session="), true);
+    assert.equal(changedBody.includes("sessionToken"), false);
+  });
+});
+
 it.effect("AuthHttp.requireAuth provides AuthSession from cookies and explicit bearer tokens", () => {
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();

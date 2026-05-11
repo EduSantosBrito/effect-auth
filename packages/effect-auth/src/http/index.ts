@@ -478,6 +478,19 @@ export interface AuthHttpSignInResponse {
   readonly session: AuthHttpSession;
 }
 
+export interface AuthHttpUserResponse {
+  readonly user: AuthUser;
+}
+
+export interface AuthHttpSessionResponse {
+  readonly user: AuthUser;
+  readonly session: AuthHttpSession;
+}
+
+export interface AuthHttpOkResponse {
+  readonly ok: true;
+}
+
 export const SessionTokenPayload = Schema.Struct({
   sessionToken: Schema.String,
 });
@@ -502,6 +515,11 @@ export const ChangePasswordPayload = Schema.Struct({
   currentPassword: Schema.Unknown,
   newPassword: Schema.Unknown,
   ip: OptionalString,
+});
+
+export const MountedChangePasswordPayload = Schema.Struct({
+  currentPassword: Schema.Unknown,
+  newPassword: Schema.Unknown,
 });
 
 export const AuthApiGroup = HttpApiGroup.make("auth").add(
@@ -610,6 +628,7 @@ const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
 const decodeMountedSignInEmailPayload = Schema.decodeUnknownEffect(MountedSignInEmailPayload);
+const decodeMountedChangePasswordPayload = Schema.decodeUnknownEffect(MountedChangePasswordPayload);
 
 const signUpInput = (payload: typeof SignUpEmailPayload.Type): SignUpInput => ({
   email: payload.email,
@@ -734,6 +753,147 @@ export const handleMountedSignInEmail = (request: HttpServerRequest.HttpServerRe
     return jsonWithCookieInstruction(body, sessionCookieFromConfig(result.sessionToken, config));
   }).pipe(
     Effect.catch((error) => authHttpErrorResponse(toAuthHttpError(error))),
+  );
+
+const mountedJson = (body: unknown): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.jsonUnsafe(body);
+
+const mountedErrorBoundary = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+  self.pipe(
+    Effect.catch((error) => authHttpErrorResponse(toAuthHttpError(error))),
+  );
+
+const extractMountedSessionToken = Effect.fn("extractMountedSessionToken")(function* () {
+  const config = yield* AuthHttpConfig;
+  const extracted = yield* config.defaultTokenExtractor?.extract ?? AuthHttpToken.cookie.extract;
+  return yield* Match.valueTags(extracted, {
+    Missing: () => Effect.fail(AuthHttpError.MissingSessionToken()),
+    Found: (found) => Effect.succeed(found),
+  });
+});
+
+export const handleMountedSignUpEmail = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(SignUpEmailPayload)));
+      const auth = yield* Auth;
+      const result = yield* auth.signUp(signUpInput(payload));
+      return mountedJson({ user: result.user } satisfies AuthHttpUserResponse);
+    }),
+  );
+
+export const handleMountedVerifyEmail = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(VerifyEmailPayload)));
+      const token = yield* decodeVerificationToken(payload.token);
+      const auth = yield* Auth;
+      const result = yield* auth.verifyEmail({ token });
+      return mountedJson({ user: result.user } satisfies AuthHttpUserResponse);
+    }),
+  );
+
+export const handleMountedResendVerification = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(ResendVerificationPayload)));
+      const auth = yield* Auth;
+      yield* auth.resendVerification(resendVerificationInput(payload));
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+export const handleMountedCurrentSession = (_request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const current = yield* auth.currentSession({ sessionToken: extracted.token }).pipe(
+        Effect.mapError(() => AuthHttpError.InvalidSessionToken()),
+      );
+      if (extracted.source === "Cookie" && Predicate.isTagged(current.tokenRotation, "Rotated")) {
+        yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
+      }
+      return mountedJson({
+        user: current.user,
+        session: authHttpSession(current.session),
+      } satisfies AuthHttpSessionResponse);
+    }),
+  );
+
+export const handleMountedSignOut = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const signOut = auth.signOut({ sessionToken: extracted.token }).pipe(
+        Effect.mapError(() => AuthHttpError.InvalidSessionToken()),
+      );
+      if (extracted.source === "Cookie") {
+        yield* signOut.pipe(
+          Effect.catch((error) =>
+            appendCookieInstruction(clearSessionCookieFromConfig(config)).pipe(
+              Effect.flatMap(() => Effect.fail(error)),
+            )
+          ),
+        );
+      } else {
+        yield* signOut;
+      }
+      yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+export const handleMountedRequestPasswordReset = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(RequestPasswordResetPayload)));
+      const auth = yield* Auth;
+      yield* auth.requestPasswordReset(requestPasswordResetInput(payload));
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+export const handleMountedCompletePasswordReset = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(Effect.flatMap(Schema.decodeUnknownEffect(CompletePasswordResetPayload)));
+      const token = yield* decodeVerificationToken(payload.token);
+      const auth = yield* Auth;
+      yield* auth.resetPassword({ token, password: payload.password });
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+export const handleMountedChangePassword = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const payload = yield* request.json.pipe(Effect.flatMap(decodeMountedChangePasswordPayload));
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const ip = trustedRequestIp(request);
+      const result = yield* auth.changePassword({
+        sessionToken: extracted.token,
+        currentPassword: payload.currentPassword,
+        newPassword: payload.newPassword,
+        ...(ip === undefined ? {} : { ip }),
+      });
+      if (extracted.source === "Cookie") {
+        yield* appendCookieInstruction(sessionCookieFromConfig(result.currentSessionToken, config));
+      }
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
   );
 
 export interface AuthHttpRequireAuthOptions {
@@ -1016,8 +1176,32 @@ export const AuthHttp = {
     <A, E, R>(self: Layer.Layer<A, E, R>) =>
       Layer.mergeAll(
         self,
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sign-up/email"), (request) =>
+          handleMountedSignUpEmail(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/verify-email"), (request) =>
+          handleMountedVerifyEmail(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/resend-verification"), (request) =>
+          handleMountedResendVerification(request),
+        ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/sign-in/email"), (request) =>
           handleMountedSignInEmail(request),
+        ),
+        HttpRouter.add("GET", mountedPath(options.basePath, "/session"), (request) =>
+          handleMountedCurrentSession(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sign-out"), (request) =>
+          handleMountedSignOut(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/password-reset/request"), (request) =>
+          handleMountedRequestPasswordReset(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/password-reset/complete"), (request) =>
+          handleMountedCompletePasswordReset(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/password/change"), (request) =>
+          handleMountedChangePassword(request),
         ),
       ),
 };
