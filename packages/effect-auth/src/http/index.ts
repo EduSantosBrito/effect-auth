@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Match, Predicate, Redacted, Schema } from "effect";
+import { Context, Data, Effect, Layer, Match, Option, Predicate, Redacted, Schema } from "effect";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -28,6 +28,7 @@ import {
   type ResendVerificationInput,
   type SignInInput,
   type SignUpInput,
+  type TokenRotationDecision,
   type VerifyEmailInput,
 } from "../workflows/index.js";
 
@@ -137,6 +138,11 @@ export interface AuthSessionShape {
 export class AuthSession extends Context.Service<AuthSession, AuthSessionShape>()(
   "effect-auth/http/AuthSession",
 ) {}
+
+export class CurrentAuthSession extends Context.Service<
+  CurrentAuthSession,
+  Option.Option<AuthSessionShape>
+>()("effect-auth/http/CurrentAuthSession") {}
 
 export type SessionTokenExtractResult = Data.TaggedEnum<{
   Missing: {};
@@ -349,6 +355,13 @@ const sessionCookieFromConfig = (
   config: AuthHttpConfigShape,
 ): CookieInstruction =>
   makeSessionCookie(token, {
+    name: config.sessionCookieName,
+    path: config.sessionCookiePath,
+    secure: config.secureCookies,
+  });
+
+const clearSessionCookieFromConfig = (config: AuthHttpConfigShape): CookieInstruction =>
+  clearSessionCookie({
     name: config.sessionCookieName,
     path: config.sessionCookiePath,
     secure: config.secureCookies,
@@ -727,7 +740,14 @@ export interface AuthHttpRequireAuthOptions {
   readonly extractor?: AuthHttpTokenExtractor;
 }
 
+export interface AuthHttpOptionalAuthOptions {
+  readonly extractor?: AuthHttpTokenExtractor;
+}
+
 const isRequireAuthOptions = (input: unknown): input is AuthHttpRequireAuthOptions =>
+  !Effect.isEffect(input);
+
+const isOptionalAuthOptions = (input: unknown): input is AuthHttpOptionalAuthOptions =>
   !Effect.isEffect(input);
 
 const configuredTokenExtractor = (
@@ -754,6 +774,84 @@ const resolveAuthSession = Effect.fn("resolveAuthSession")(function* (
         }
         return { user: current.user, session: current.session };
       }),
+    });
+  });
+
+const currentSessionFromToken: (
+  token: SessionTokenValue,
+) => Effect.Effect<
+  {
+    readonly authSession: AuthSessionShape;
+    readonly tokenRotation: TokenRotationDecision;
+  },
+  AuthHttpError,
+  Auth
+> = Effect.fn("currentSessionFromToken")(function* (token) {
+    const auth = yield* Auth;
+    const current = yield* auth.currentSession({ sessionToken: token }).pipe(
+      Effect.mapError(() => AuthHttpError.InvalidSessionToken()),
+    );
+    return {
+      authSession: { user: current.user, session: current.session },
+      tokenRotation: current.tokenRotation,
+    };
+  });
+
+const resolveOptionalAuthSession = Effect.fn("resolveOptionalAuthSession")(function* (
+  options?: AuthHttpOptionalAuthOptions,
+) {
+    const config = yield* AuthHttpConfig;
+    const extractor = configuredTokenExtractor(options, config);
+
+    if (extractor === AuthHttpToken.cookieOrBearer) {
+      const bearer = yield* AuthHttpToken.bearer.extract;
+      const bearerSession = yield* Match.valueTags(bearer, {
+        Found: (found) =>
+          currentSessionFromToken(found.token).pipe(
+            Effect.option,
+            Effect.map((session) => Option.map(session, (_) => _.authSession)),
+          ),
+        Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
+      });
+      if (Option.isSome(bearerSession)) return bearerSession;
+
+      const cookie = yield* AuthHttpToken.cookie.extract;
+      return yield* Match.valueTags(cookie, {
+        Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
+        Found: (found) =>
+          Effect.gen(function* () {
+            const cookieSession = yield* Effect.option(currentSessionFromToken(found.token));
+            if (Option.isNone(cookieSession)) {
+              yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+            } else if (Predicate.isTagged(cookieSession.value.tokenRotation, "Rotated")) {
+              yield* appendCookieInstruction(
+                sessionCookieFromConfig(cookieSession.value.tokenRotation.token, config),
+              );
+            }
+            return Option.map(cookieSession, (_) => _.authSession);
+          }),
+      });
+    }
+
+    const extracted = yield* extractor.extract;
+    return yield* Match.valueTags(extracted, {
+      Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
+      Found: (found) =>
+        Effect.gen(function* () {
+          const session = yield* Effect.option(currentSessionFromToken(found.token));
+          if (Option.isNone(session) && found.source === "Cookie") {
+            yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+          } else if (
+            Option.isSome(session) &&
+            found.source === "Cookie" &&
+            Predicate.isTagged(session.value.tokenRotation, "Rotated")
+          ) {
+            yield* appendCookieInstruction(
+              sessionCookieFromConfig(session.value.tokenRotation.token, config),
+            );
+          }
+          return Option.map(session, (_) => _.authSession);
+        }),
     });
   });
 
@@ -790,6 +888,42 @@ export function requireAuth(input: unknown): unknown {
   }
   if (isRequireAuthOptions(input)) {
     return <A, E, R>(self: Effect.Effect<A, E, R>) => requireAuthEffect(self, input);
+  }
+}
+
+const optionalAuthEffect = <A, E, R>(
+  self: Effect.Effect<A, E, R>,
+  options?: AuthHttpOptionalAuthOptions,
+) =>
+  resolveOptionalAuthSession(options).pipe(
+    Effect.flatMap((session) => Effect.provideService(self, CurrentAuthSession, session)),
+  );
+
+type OptionalAuthResult<I> = I extends Effect.Effect<infer A, infer E, infer R> ? Effect.Effect<
+    A,
+    E,
+    Exclude<R, CurrentAuthSession> | Auth | AuthHttpConfig | HttpServerRequest.HttpServerRequest
+  >
+  : I extends AuthHttpOptionalAuthOptions ? <A, E, R>(
+  self: Effect.Effect<A, E, R>,
+) => Effect.Effect<
+  A,
+  E,
+  Exclude<R, CurrentAuthSession> | Auth | AuthHttpConfig | HttpServerRequest.HttpServerRequest
+>
+  : never;
+
+export function optionalAuth<
+  I extends AuthHttpOptionalAuthOptions | Effect.Effect<unknown, unknown, unknown>,
+>(
+  input: I,
+): OptionalAuthResult<I>;
+export function optionalAuth(input: unknown): unknown {
+  if (Effect.isEffect(input)) {
+    return optionalAuthEffect(input);
+  }
+  if (isOptionalAuthOptions(input)) {
+    return <A, E, R>(self: Effect.Effect<A, E, R>) => optionalAuthEffect(self, input);
   }
 }
 
@@ -876,6 +1010,7 @@ const mountedPath = (basePath: `/${string}`, path: `/${string}`): `/${string}` =
 
 export const AuthHttp = {
   requireAuth,
+  optionalAuth,
   mount:
     (options: AuthHttpMountOptions) =>
     <A, E, R>(self: Layer.Layer<A, E, R>) =>

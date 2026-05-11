@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
@@ -29,6 +30,7 @@ import {
   AuthHttpAdapter,
   AuthHttpToken,
   AuthSession,
+  CurrentAuthSession,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
   clearSessionCookie,
@@ -600,6 +602,183 @@ it.effect("AuthHttp.requireAuth provides AuthSession from cookies and explicit b
     });
     assert.deepStrictEqual(bearerSession, { email: "protected-session@example.com" });
     assert.strictEqual(missing._tag, "Failure");
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        authLayer,
+        AuthHttpConfig.layer({
+          trustedOrigins: ["https://app.example.com"],
+          secureCookies: true,
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale cookies", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "optional-session@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const signedIn = yield* auth.signIn({
+      email: "optional-session@example.com",
+      password: "correct horse battery staple",
+    });
+    yield* auth.signUp({
+      email: "optional-bearer@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const bearerVerification = emailState.sent[1];
+    if (!bearerVerification) return yield* missingFixture("missing bearer verification email");
+    yield* auth.verifyEmail({ token: bearerVerification.token });
+    const bearerSignedIn = yield* auth.signIn({
+      email: "optional-bearer@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const optionalProgram = Effect.gen(function* () {
+      const current = yield* CurrentAuthSession;
+      return Option.match(current, {
+        onNone: () => ({ signedIn: false }),
+        onSome: ({ user }) => ({ signedIn: true, email: String(user.email) }),
+      });
+    }).pipe(AuthHttp.optionalAuth);
+
+    const anonymous = yield* optionalProgram.pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar"),
+        ),
+      ),
+    );
+    const signedInState = yield* optionalProgram.pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.setHeader(
+              "cookie",
+              `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const combinedProgram = AuthHttp.optionalAuth({ extractor: AuthHttpToken.cookieOrBearer })(
+      Effect.gen(function* () {
+        const current = yield* CurrentAuthSession;
+        return Option.match(current, {
+          onNone: () => "anonymous",
+          onSome: ({ user }) => String(user.email),
+        });
+      }),
+    );
+    const combined = yield* combinedProgram.pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.setHeader("authorization", "Bearer invalid-session-token"),
+            HttpClientRequest.setHeader(
+              "cookie",
+              `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+            ),
+          ),
+        ),
+      ),
+    );
+    const bearerWins = yield* combinedProgram.pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.bearerToken(bearerSignedIn.sessionToken),
+            HttpClientRequest.setHeader(
+              "cookie",
+              `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const clearCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      AuthHttp.optionalAuth(Effect.gen(function* () {
+        yield* CurrentAuthSession;
+        return HttpServerResponse.jsonUnsafe(null);
+      })),
+      (_request, response) =>
+        Effect.sync(() => {
+          clearCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.setHeader("cookie", "effect_auth_session=stale"),
+          ),
+        ),
+      ),
+    );
+
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const rotationCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      AuthHttp.optionalAuth(Effect.gen(function* () {
+        yield* CurrentAuthSession;
+        return HttpServerResponse.jsonUnsafe(null);
+      })),
+      (_request, response) =>
+        Effect.sync(() => {
+          rotationCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.setHeader(
+              "cookie",
+              `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    assert.deepStrictEqual(anonymous, { signedIn: false });
+    assert.deepStrictEqual(signedInState, {
+      signedIn: true,
+      email: "optional-session@example.com",
+    });
+    assert.strictEqual(combined, "optional-session@example.com");
+    assert.strictEqual(bearerWins, "optional-bearer@example.com");
+    assert.equal(clearCookies[0]?.includes("Max-Age=0"), true);
+    assert.equal(rotationCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(rotationCookies[0]?.includes(Redacted.value(signedIn.sessionToken)), false);
   }).pipe(
     Effect.provide(
       Layer.mergeAll(
