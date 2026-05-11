@@ -89,9 +89,10 @@ export interface CurrentSessionInput {
   readonly sessionToken: SessionToken;
 }
 
-export type TokenRotationDecision =
-  | { readonly _tag: "Unchanged" }
-  | { readonly _tag: "Rotated"; readonly token: SessionToken };
+export type TokenRotationDecision = Data.TaggedEnum<{
+  Unchanged: {};
+  Rotated: { readonly token: SessionToken };
+}>;
 
 const TokenRotationDecision = Data.taggedEnum<TokenRotationDecision>();
 

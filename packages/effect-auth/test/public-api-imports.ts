@@ -1,9 +1,12 @@
-import type { PublicAuthError } from "effect-auth";
+import { Auth, AuthLive, type PublicAuthError } from "effect-auth";
 import type { AuthBoundary, NormalizedEmail } from "effect-auth/domain";
 import type { AuthEmail, SentAuthEmail } from "effect-auth/email/mock";
 import {
   AuthApi,
+  AuthHttp,
   AuthHttpAdapter,
+  AuthHttpConfig,
+  AuthHttpErrorMapper,
   AuthHttpHandlersLive,
   handleChangePassword,
   handleCompletePasswordReset,
@@ -33,6 +36,7 @@ import type {
 
 type DocumentedImportsCompile = {
   readonly root: PublicAuthError;
+  readonly auth: typeof Auth | typeof AuthLive;
   readonly domain: AuthBoundary | NormalizedEmail;
   readonly password: PasswordHasher | PasswordPolicy;
   readonly nativeScryptRuntime: NativeScryptRuntime;
@@ -44,6 +48,9 @@ type DocumentedImportsCompile = {
   readonly workflows: EmailPasswordWorkflows | SessionWorkflows | PasswordRecoveryWorkflows;
   readonly http:
     | typeof AuthApi
+    | typeof AuthHttp
+    | typeof AuthHttpConfig
+    | typeof AuthHttpErrorMapper
     | typeof AuthHttpAdapter
     | typeof AuthHttpHandlersLive
     | typeof handleSignUpEmail
