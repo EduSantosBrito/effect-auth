@@ -42,7 +42,6 @@ import {
   AuthApiEndpoints,
   AuthHttp,
   AuthHttpConfig,
-  AuthHttpConfigLayer,
   AuthHttpError,
   AuthHttpErrorMapper,
   AuthHttpHandlersLive,
@@ -183,7 +182,6 @@ type PublicApiContract = {
     | typeof AuthApiEndpoints
     | typeof AuthHttp
     | typeof AuthHttpConfig
-    | typeof AuthHttpConfigLayer
     | typeof AuthHttpError
     | typeof AuthHttpErrorMapper
     | typeof AuthHttpHandlersLive

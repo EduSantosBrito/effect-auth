@@ -7,12 +7,12 @@ Backend-first email/password auth for Effect applications.
 ```ts
 import { Effect, Layer, Option } from "effect";
 import { Auth, AuthLive } from "effect-auth";
-import { AuthHttp, AuthHttpConfigLayer, AuthSession, CurrentAuthSession } from "effect-auth/http";
+import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession } from "effect-auth/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 const appLayer = Layer.mergeAll(
   AuthLive.default,
-  AuthHttpConfigLayer({
+  AuthHttpConfig.layer({
     trustedOrigins: ["https://app.example.com"],
   }),
 ).pipe(Layer.provide(PostgresAuthStorage), Layer.provide(ResendAuthEmail));

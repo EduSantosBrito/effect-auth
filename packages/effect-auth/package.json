@@ -2,6 +2,11 @@
   "name": "effect-auth",
   "version": "0.1.0",
   "description": "TypeScript SDK for effect-auth.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/EduSantosBrito/effect-auth.git",
+    "directory": "packages/effect-auth"
+  },
   "files": [
     "dist"
   ],

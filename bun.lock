@@ -53,7 +53,7 @@
     "@types/bun": "latest",
     "@typescript/native-preview": "latest",
     "effect": "^4.0.0-beta.64",
-    "effect-rules": "^0.2.2",
+    "effect-rules": "^0.2.3",
     "knip": "^6.12.2",
     "oxfmt": "^0.48.0",
     "oxlint": "^1.63.0",
@@ -358,7 +358,7 @@
 
     "effect-auth": ["effect-auth@workspace:packages/effect-auth"],
 
-    "effect-rules": ["effect-rules@0.2.2", "", { "dependencies": { "@oxlint/plugins": "^1.63.0" } }, "sha512-pYdEi4TpbkqsW1LqGrmHIrUvhwTMlQJjDP5IO5Fx+n4tj73DxtcAIZagdLdgad2Lr8knvVtzW6/QuY8pxyhRTg=="],
+    "effect-rules": ["effect-rules@0.2.3", "", { "dependencies": { "@oxlint/plugins": "^1.63.0" } }, "sha512-RZisLvBaB66iWCcTgSbZaJIyBC1LZBRGKr/fkfWSm6icn6wrmW4YV7xDXRkC3yjJup0umc6Cs5h0m8cz6cSlQw=="],
 
     "es-module-lexer": ["es-module-lexer@2.1.0", "", {}, "sha512-n27zTYMjYu1aj4MjCWzSP7G9r75utsaoc8m61weK+W8JMBGGQybd43GstCXZ3WNmSFtGT9wi59qQTW6mhTR5LQ=="],
 

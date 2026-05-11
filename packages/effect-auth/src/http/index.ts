@@ -3,7 +3,6 @@ export {
   AuthApiEndpoints,
   AuthHttp,
   AuthHttpConfig,
-  AuthHttpConfigLayer,
   AuthHttpError,
   AuthHttpErrorMapper,
   AuthHttpHandlersLive,

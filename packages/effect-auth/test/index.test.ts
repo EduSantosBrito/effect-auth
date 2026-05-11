@@ -26,7 +26,8 @@ import {
 import {
   AuthHttp,
   AuthApiEndpoints,
-  AuthHttpConfigLayer,
+  AuthHttpConfig,
+  AuthHttpErrorMapper,
   AuthHttpToken,
   AuthSession,
   CurrentAuthSession,
@@ -491,7 +492,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
       Layer.provideMerge(
         Layer.mergeAll(
           authLayer,
-          AuthHttpConfigLayer({
+          AuthHttpConfig.layer({
             trustedOrigins: ["https://app.example.com"],
             secureCookies: true,
           }),
@@ -529,6 +530,121 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
   }).pipe(Effect.provide(authLayer));
 });
 
+it.effect("AuthHttp.mount rejects cookie state changes without trusted origin or referer", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "mounted-origin@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const signedIn = yield* auth.signIn({
+      email: "mounted-origin@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: ["https://app.example.com"],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const cookie = `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`;
+
+    const missingOrigin = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-out", {
+          method: "POST",
+          headers: { cookie },
+        }),
+        Context.empty(),
+      ),
+    );
+    const nullOrigin = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-out", {
+          method: "POST",
+          headers: { cookie, origin: "null" },
+        }),
+        Context.empty(),
+      ),
+    );
+    const trustedReferer = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-out", {
+          method: "POST",
+          headers: { cookie, referer: "https://app.example.com/settings" },
+        }),
+        Context.empty(),
+      ),
+    );
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(missingOrigin.status, 401);
+    assert.strictEqual(nullOrigin.status, 401);
+    assert.strictEqual(trustedReferer.status, 200);
+    assert.equal(trustedReferer.headers.get("set-cookie")?.includes("Max-Age=0"), true);
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthHttp.mount uses custom HTTP error mapper when provided", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: ["https://app.example.com"],
+            secureCookies: true,
+          }),
+          Layer.succeed(AuthHttpErrorMapper)({
+            map: (error) =>
+              Effect.succeed({
+                status: 499,
+                body: { envelope: "custom-auth-error", tag: error._tag },
+              }),
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const response = yield* Effect.promise(() =>
+      web.handler(new Request("https://auth.example.com/api/auth/session"), Context.empty()),
+    );
+    const body = yield* Effect.promise(() => response.text());
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(response.status, 499);
+    assert.equal(body.includes("custom-auth-error"), true);
+    assert.equal(body.includes("MissingSessionToken"), true);
+  });
+});
+
 it.effect("AuthHttp.mount serves email, session, sign-out, and password routes", () => {
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
@@ -543,7 +659,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
       Layer.provideMerge(
         Layer.mergeAll(
           authLayer,
-          AuthHttpConfigLayer({
+          AuthHttpConfig.layer({
             trustedOrigins: ["https://app.example.com"],
             secureCookies: true,
           }),
@@ -742,7 +858,7 @@ it.effect(
       Effect.provide(
         Layer.mergeAll(
           authLayer,
-          AuthHttpConfigLayer({
+          AuthHttpConfig.layer({
             trustedOrigins: ["https://app.example.com"],
             secureCookies: true,
           }),
@@ -924,7 +1040,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     Effect.provide(
       Layer.mergeAll(
         authLayer,
-        AuthHttpConfigLayer({
+        AuthHttpConfig.layer({
           trustedOrigins: ["https://app.example.com"],
           secureCookies: true,
         }),

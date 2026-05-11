@@ -131,17 +131,17 @@ export class AuthHttpConfig extends Context.Service<
     readonly secureCookies: boolean;
     readonly defaultTokenExtractor: Option.Option<AuthHttpTokenExtractor>;
   }
->()("effect-auth/AuthHttpConfig") {}
+>()("effect-auth/AuthHttpConfig") {
+  static readonly layer = (input: AuthHttpConfigInput) =>
+    Layer.effect(
+      AuthHttpConfig,
+      Effect.gen(function* () {
+        const nodeEnv = yield* Config.string("NODE_ENV").pipe(Config.withDefault("development"));
+        return makeAuthHttpConfig(input, nodeEnv);
+      }),
+    );
+}
 export type AuthHttpConfigShape = typeof AuthHttpConfig.Service;
-
-export const AuthHttpConfigLayer = (input: AuthHttpConfigInput) =>
-  Layer.effect(
-    AuthHttpConfig,
-    Effect.gen(function* () {
-      const nodeEnv = yield* Config.string("NODE_ENV").pipe(Config.withDefault("development"));
-      return makeAuthHttpConfig(input, nodeEnv);
-    }),
-  );
 
 export class AuthSession extends Context.Service<
   AuthSession,
@@ -339,6 +339,18 @@ const publicAuthErrorToHttpError = (code: PublicAuthError["code"]): AuthHttpErro
 };
 
 const toAuthHttpError = (error: unknown): AuthHttpError => {
+  const knownAuthHttpError = Match.value(error).pipe(
+    Match.when(AuthHttpError.$is("Unauthorized"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("InvalidCredentials"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("EmailNotVerified"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("InvalidToken"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("MissingSessionToken"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("InvalidSessionToken"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("RateLimited"), (error) => Option.some(error)),
+    Match.when(AuthHttpError.$is("BadRequest"), (error) => Option.some(error)),
+    Match.orElse(() => Option.none<AuthHttpError>()),
+  );
+  if (Option.isSome(knownAuthHttpError)) return knownAuthHttpError.value;
   if (Predicate.hasProperty(error, "name") && error.name === "SchemaError") {
     return AuthHttpError.BadRequest({ reason: "Invalid request body" });
   }
@@ -418,21 +430,40 @@ export const checkTrustedRequestOrigin = (
         yield* checkTrustedOrigin(origin);
       });
 
-const checkAuthHttpConfigRequestOrigin = (
-  request: OriginRequest,
-): Effect.Effect<void, AuthHttpError, AuthHttpConfig> =>
-  request.headers.origin === undefined
-    ? Effect.void
+const validateAuthHttpConfigOrigin = (
+  value: string,
+  config: AuthHttpConfigShape,
+): Effect.Effect<void, AuthHttpError> =>
+  value === "null"
+    ? Effect.fail(AuthHttpError.Unauthorized())
     : Effect.gen(function* () {
-        const config = yield* AuthHttpConfig;
         const origin = yield* Effect.try({
-          try: () => new URL(request.headers.origin ?? ""),
+          try: () => new URL(value),
           catch: () => AuthHttpError.Unauthorized(),
         });
         if (!config.trustedOrigins.has(origin.origin)) {
           return yield* Effect.fail(AuthHttpError.Unauthorized());
         }
       });
+
+const checkAuthHttpConfigRequestOrigin: (
+  request: HttpServerRequest.HttpServerRequest,
+) => Effect.Effect<void, AuthHttpError, AuthHttpConfig> = Effect.fn(
+  "checkAuthHttpConfigRequestOrigin",
+)(function* (request) {
+  const config = yield* AuthHttpConfig;
+  const origin = Option.fromUndefinedOr(request.headers.origin);
+  if (Option.isSome(origin)) {
+    return yield* validateAuthHttpConfigOrigin(origin.value, config);
+  }
+
+  const sessionCookie = Option.fromUndefinedOr(request.cookies[config.sessionCookieName]);
+  if (Option.isNone(sessionCookie)) return;
+
+  const referer = Option.fromUndefinedOr(request.headers.referer);
+  if (Option.isNone(referer)) return yield* Effect.fail(AuthHttpError.Unauthorized());
+  yield* validateAuthHttpConfigOrigin(referer.value, config);
+});
 
 export const TrustedOrigins = (origins: ReadonlyArray<string | URL>) => {
   const allowed = new Set(
