@@ -4,6 +4,10 @@ All notable user-facing changes should be documented here.
 
 This project follows npm package versions for `effect-auth`. While the package is `0.x`, minor releases may include breaking changes.
 
+## 0.2.2
+
+- Improve test runtime by using deterministic password hashing in workflow and HTTP tests.
+
 ## 0.2.1
 
 - Include package README in published metadata.

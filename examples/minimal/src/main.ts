@@ -72,6 +72,8 @@ const firstSentEmail = (sent: ReadonlyArray<EmailMessage>) =>
       : Effect.succeed(message);
   });
 
+const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
+
 const extractVerificationToken = (message: EmailMessage) => {
   const urlText = messageText(message.body).match(/https?:\/\/\S+/u)?.[0];
   if (urlText === undefined)
@@ -83,7 +85,7 @@ const extractVerificationToken = (message: EmailMessage) => {
     Effect.flatMap((token) =>
       token === null
         ? Effect.fail(new ExampleFailure({ reason: "Expected verification email token" }))
-        : Schema.decodeUnknownEffect(VerificationToken)(token).pipe(
+        : decodeVerificationToken(token).pipe(
             Effect.mapError(
               () => new ExampleFailure({ reason: "Expected valid verification token" }),
             ),

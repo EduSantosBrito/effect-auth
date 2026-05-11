@@ -281,5 +281,5 @@ export const EffectEmailAuthEmail: Layer.Layer<AuthEmail, never, Email> = Layer.
           Effect.asVoid,
         ),
     });
-  }),
+  }).pipe(Effect.annotateLogs("service", "AuthEmail")),
 );

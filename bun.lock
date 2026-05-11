@@ -31,7 +31,7 @@
     },
     "packages/effect-auth": {
       "name": "effect-auth",
-      "version": "0.2.0",
+      "version": "0.2.1",
       "dependencies": {
         "effect": "^4.0.0-beta.64",
       },
@@ -54,7 +54,7 @@
     "@types/bun": "latest",
     "@typescript/native-preview": "latest",
     "effect": "^4.0.0-beta.64",
-    "effect-rules": "^0.2.3",
+    "effect-rules": "^0.3.0",
     "knip": "^6.12.2",
     "oxfmt": "^0.48.0",
     "oxlint": "^1.63.0",
@@ -355,7 +355,7 @@
 
     "effect-email": ["effect-email@0.3.1", "", { "dependencies": { "effect": "^4.0.0-beta.64" } }, "sha512-alivzp+DRiMvV2Hrzadvx1DzTLVINDGqVbELXwLErnSStoSl1ZSy1w4U7pO1+t+rrHBR2kpz4WMk79ErFLA5cw=="],
 
-    "effect-rules": ["effect-rules@0.2.3", "", { "dependencies": { "@oxlint/plugins": "^1.63.0" } }, "sha512-RZisLvBaB66iWCcTgSbZaJIyBC1LZBRGKr/fkfWSm6icn6wrmW4YV7xDXRkC3yjJup0umc6Cs5h0m8cz6cSlQw=="],
+    "effect-rules": ["effect-rules@0.3.0", "", { "dependencies": { "@oxlint/plugins": "^1.63.0" } }, "sha512-aIVrITgEkhHoVwSId9/LA+NGE94hh3xg/ZZ9A3PnRSs09HBVTrTsGdweqFN85gnh+4BlcscyuZ8QQZl1JbsDlQ=="],
 
     "es-module-lexer": ["es-module-lexer@2.1.0", "", {}, "sha512-n27zTYMjYu1aj4MjCWzSP7G9r75utsaoc8m61weK+W8JMBGGQybd43GstCXZ3WNmSFtGT9wi59qQTW6mhTR5LQ=="],
 

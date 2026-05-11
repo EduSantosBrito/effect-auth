@@ -1070,6 +1070,8 @@ const requireAuthEffect = <A, E, R>(
     Effect.flatMap((session) => Effect.provideService(self, AuthSession, session)),
   );
 
+type RuntimeEffect<R> = Effect.Effect<unknown, unknown, R>;
+
 type RequireAuthResult<I> =
   I extends Effect.Effect<infer A, infer E, infer R>
     ? Effect.Effect<
@@ -1087,9 +1089,9 @@ type RequireAuthResult<I> =
         >
       : never;
 
-export function requireAuth<
-  I extends AuthHttpRequireAuthOptions | Effect.Effect<unknown, unknown, unknown>,
->(input: I): RequireAuthResult<I>;
+export function requireAuth<R, I extends AuthHttpRequireAuthOptions | RuntimeEffect<R>>(
+  input: I,
+): RequireAuthResult<I>;
 export function requireAuth(input: unknown): unknown {
   if (Effect.isEffect(input)) {
     return requireAuthEffect(input);
@@ -1129,9 +1131,9 @@ type OptionalAuthResult<I> =
         >
       : never;
 
-export function optionalAuth<
-  I extends AuthHttpOptionalAuthOptions | Effect.Effect<unknown, unknown, unknown>,
->(input: I): OptionalAuthResult<I>;
+export function optionalAuth<R, I extends AuthHttpOptionalAuthOptions | RuntimeEffect<R>>(
+  input: I,
+): OptionalAuthResult<I>;
 export function optionalAuth(input: unknown): unknown {
   if (Effect.isEffect(input)) {
     return optionalAuthEffect(input);

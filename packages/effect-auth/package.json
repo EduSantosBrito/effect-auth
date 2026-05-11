@@ -1,6 +1,6 @@
 {
   "name": "effect-auth",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Server-side authentication for Effect applications.",
   "keywords": [
     "auth",
@@ -74,7 +74,7 @@
     "check": "bun --bun tsgo -p tsconfig.json --noEmit && bun run lint",
     "format": "bun --bun oxfmt --write .",
     "format:check": "bun --bun oxfmt --check .",
-    "lint": "bun --bun oxlint -c ../../.oxlintrc.json .",
+    "lint": "bun --bun oxlint -c ../../oxlint.config.ts .",
     "package:smoke": "bun run build && npm pack --dry-run",
     "prepack": "bun run build",
     "test": "bun --bun vitest run --config vitest.config.ts"
