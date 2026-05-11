@@ -5,7 +5,11 @@
   "files": [
     "dist"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -48,24 +52,24 @@
     }
   },
   "scripts": {
-    "build": "bun --bun tsgo -p tsconfig.build.json",
+    "build": "rm -rf dist && bun --bun tsgo -p tsconfig.build.json",
     "check": "bun --bun tsgo -p tsconfig.json --noEmit && bun run lint",
-    "format": "bun --bun oxfmt --ignore-path ../../.oxfmtignore --write .",
-    "format:check": "bun --bun oxfmt --ignore-path ../../.oxfmtignore --check .",
-    "lint": "bun --bun oxlint -c .oxlintrc.json .",
+    "format": "bun --bun oxfmt --write .",
+    "format:check": "bun --bun oxfmt --check .",
+    "lint": "bun --bun oxlint -c ../../.oxlintrc.json .",
     "test": "bun --bun vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "effect": "^4.0.0-beta.64"
   },
   "devDependencies": {
-    "@effect/tsgo": "0.5.2",
-    "@effect/vitest": "^4.0.0-beta.64",
-    "@types/bun": "latest",
-    "@typescript/native-preview": "latest",
-    "effect-rules": "0.1.0",
-    "oxfmt": "^0.48.0",
-    "oxlint": "^1.63.0",
-    "vitest": "^4.1.5"
+    "@effect/tsgo": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "effect-rules": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "vitest": "catalog:"
   }
 }

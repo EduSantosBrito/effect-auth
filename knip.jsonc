@@ -1,0 +1,25 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  "ignore": [".repos/**", "dist/**", "node_modules/**"],
+  "ignoreDependencies": [
+    "@effect/language-service",
+    "@effect/tsgo",
+    "@typescript/native-preview",
+    "oxfmt",
+    "oxlint"
+  ],
+  "workspaces": {
+    ".": {
+      "entry": ["package.json", ".github/workflows/*.yml"],
+      "project": ["*.json", "*.jsonc"]
+    },
+    "packages/effect-auth": {
+      "entry": ["src/index.ts", "vitest.config.ts", "test/**/*.ts"],
+      "project": ["src/**/*.ts", "test/**/*.ts", "*.ts", "*.json"]
+    },
+    "examples/minimal": {
+      "entry": ["src/main.ts"],
+      "project": ["src/**/*.ts", "*.json"]
+    }
+  }
+}

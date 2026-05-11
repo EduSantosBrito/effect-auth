@@ -8,12 +8,12 @@
     "check": "bun --bun tsgo -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@effect/platform-bun": "^4.0.0-beta.64",
-    "effect": "^4.0.0-beta.64",
+    "@effect/platform-bun": "catalog:",
+    "effect": "catalog:",
     "effect-auth": "workspace:*"
   },
   "devDependencies": {
-    "@effect/tsgo": "0.5.2",
-    "@types/bun": "latest"
+    "@effect/tsgo": "catalog:",
+    "@types/bun": "catalog:"
   }
 }

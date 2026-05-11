@@ -24,13 +24,13 @@ export interface RateLimitAttempt {
   readonly ip?: string;
 }
 
-export interface RateLimiterShape {
-  readonly check: (attempt: RateLimitAttempt) => Effect.Effect<void, RateLimitExceeded>;
-}
-
-export class RateLimiter extends Context.Service<RateLimiter, RateLimiterShape>()(
-  "effect-auth/rate-limit/RateLimiter",
-) {}
+export class RateLimiter extends Context.Service<
+  RateLimiter,
+  {
+    readonly check: (attempt: RateLimitAttempt) => Effect.Effect<void, RateLimitExceeded>;
+  }
+>()("effect-auth/RateLimiter") {}
+export type RateLimiterShape = typeof RateLimiter.Service;
 
 export const deriveRateLimitKey = (attempt: RateLimitAttempt): string =>
   [

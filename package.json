@@ -2,29 +2,46 @@
   "name": "effect-auth-monorepo",
   "private": true,
   "description": "Monorepo for effect-auth.",
-  "workspaces": [
-    "packages/*",
-    "examples/*"
-  ],
+  "workspaces": {
+    "packages": [
+      "packages/*",
+      "examples/*"
+    ],
+    "catalog": {
+      "@effect/platform-bun": "^4.0.0-beta.64",
+      "@effect/tsgo": "0.5.2",
+      "@effect/vitest": "^4.0.0-beta.64",
+      "@types/bun": "latest",
+      "@typescript/native-preview": "latest",
+      "effect": "^4.0.0-beta.64",
+      "effect-rules": "^0.2.2",
+      "knip": "^6.12.2",
+      "oxfmt": "^0.48.0",
+      "oxlint": "^1.63.0",
+      "vitest": "^4.1.5"
+    }
+  },
   "type": "module",
   "scripts": {
     "build": "bun run --cwd packages/effect-auth build",
-    "check": "bun run --cwd packages/effect-auth check && bun run --cwd examples/minimal check",
-    "format": "bun --bun oxfmt --ignore-path .oxfmtignore --write .",
-    "format:check": "bun --bun oxfmt --ignore-path .oxfmtignore --check .",
-    "lint": "bun run --cwd packages/effect-auth lint",
+    "check": "bun run --cwd packages/effect-auth check && bun run build && bun run --cwd examples/minimal check",
+    "format": "bun --bun oxfmt --write .",
+    "format:check": "bun --bun oxfmt --check .",
+    "knip": "bun --bun ./node_modules/.bin/knip",
+    "lint": "bun --bun oxlint -c .oxlintrc.json .",
     "example:minimal": "bun run build && bun run --cwd examples/minimal start",
     "test": "bun run --cwd packages/effect-auth test",
     "prepare": "bun --bun effect-tsgo patch"
   },
   "devDependencies": {
-    "@effect/tsgo": "0.5.2",
-    "@effect/vitest": "^4.0.0-beta.64",
-    "@types/bun": "latest",
-    "@typescript/native-preview": "latest",
-    "effect-rules": "0.1.0",
-    "oxfmt": "^0.48.0",
-    "oxlint": "^1.63.0",
-    "vitest": "^4.1.5"
+    "@effect/tsgo": "catalog:",
+    "@effect/vitest": "catalog:",
+    "@types/bun": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "effect-rules": "catalog:",
+    "knip": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "vitest": "catalog:"
   }
 }

@@ -19,23 +19,23 @@ export class TokenGenerationFailure extends Schema.TaggedErrorClass<TokenGenerat
   },
 ) {}
 
-export interface AuthTokenShape {
-  readonly makeVerificationToken: Effect.Effect<
-    { readonly token: VerificationToken; readonly hash: TokenHash },
-    TokenGenerationFailure
-  >;
-  readonly makeSessionToken: Effect.Effect<
-    { readonly token: SessionToken; readonly hash: TokenHash },
-    TokenGenerationFailure
-  >;
-  readonly hashToken: (
-    token: VerificationToken | SessionToken,
-  ) => Effect.Effect<TokenHash, TokenGenerationFailure>;
-}
-
-export class AuthToken extends Context.Service<AuthToken, AuthTokenShape>()(
-  "effect-auth/token/AuthToken",
-) {}
+export class AuthToken extends Context.Service<
+  AuthToken,
+  {
+    readonly makeVerificationToken: () => Effect.Effect<
+      { readonly token: VerificationToken; readonly hash: TokenHash },
+      TokenGenerationFailure
+    >;
+    readonly makeSessionToken: () => Effect.Effect<
+      { readonly token: SessionToken; readonly hash: TokenHash },
+      TokenGenerationFailure
+    >;
+    readonly hashToken: (
+      token: VerificationToken | SessionToken,
+    ) => Effect.Effect<TokenHash, TokenGenerationFailure>;
+  }
+>()("effect-auth/AuthToken") {}
+export type AuthTokenShape = typeof AuthToken.Service;
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
 const decodeTokenHash = Schema.decodeUnknownEffect(TokenHash);
@@ -49,35 +49,29 @@ export const hashTokenValue = (
     Effect.mapError(() => new TokenGenerationFailure({ reason: "HashingFailed" })),
   );
 
-const makeVerificationTokenPair: Effect.Effect<
-  { readonly token: VerificationToken; readonly hash: TokenHash },
-  TokenGenerationFailure
-> = Effect.fn("AuthToken.makeVerificationToken")(function* () {
-    const token = yield* Effect.try({
-      try: () => randomBytes(32).toString("base64url"),
-      catch: () => new TokenGenerationFailure({ reason: "UnavailableEntropy" }),
-    }).pipe(
-      Effect.flatMap(decodeVerificationToken),
-      Effect.mapError(() => new TokenGenerationFailure({ reason: "UnavailableEntropy" })),
-    );
-    const hash = yield* hashTokenValue(token);
-    return { token, hash };
-  })();
+const makeVerificationTokenPair = Effect.fn("AuthToken.makeVerificationToken")(function* () {
+  const token = yield* Effect.try({
+    try: () => randomBytes(32).toString("base64url"),
+    catch: () => new TokenGenerationFailure({ reason: "UnavailableEntropy" }),
+  }).pipe(
+    Effect.flatMap(decodeVerificationToken),
+    Effect.mapError(() => new TokenGenerationFailure({ reason: "UnavailableEntropy" })),
+  );
+  const hash = yield* hashTokenValue(token);
+  return { token, hash };
+});
 
-const makeSessionTokenPair: Effect.Effect<
-  { readonly token: SessionToken; readonly hash: TokenHash },
-  TokenGenerationFailure
-> = Effect.fn("AuthToken.makeSessionToken")(function* () {
-    const token = yield* Effect.try({
-      try: () => randomBytes(32).toString("base64url"),
-      catch: () => new TokenGenerationFailure({ reason: "UnavailableEntropy" }),
-    }).pipe(
-      Effect.flatMap(decodeSessionToken),
-      Effect.mapError(() => new TokenGenerationFailure({ reason: "UnavailableEntropy" })),
-    );
-    const hash = yield* hashTokenValue(token);
-    return { token, hash };
-  })();
+const makeSessionTokenPair = Effect.fn("AuthToken.makeSessionToken")(function* () {
+  const token = yield* Effect.try({
+    try: () => randomBytes(32).toString("base64url"),
+    catch: () => new TokenGenerationFailure({ reason: "UnavailableEntropy" }),
+  }).pipe(
+    Effect.flatMap(decodeSessionToken),
+    Effect.mapError(() => new TokenGenerationFailure({ reason: "UnavailableEntropy" })),
+  );
+  const hash = yield* hashTokenValue(token);
+  return { token, hash };
+});
 
 export const AuthTokenLive = Layer.succeed(AuthToken)({
   makeVerificationToken: makeVerificationTokenPair,

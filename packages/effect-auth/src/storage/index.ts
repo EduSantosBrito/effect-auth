@@ -121,43 +121,43 @@ export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailu
   },
 ) {}
 
-export interface AuthStorageShape {
-  readonly createUserWithEmailPasswordCredential: (
-    input: CreateUserWithCredential,
-  ) => Effect.Effect<AuthUser, AuthStorageFailure>;
-  readonly findCredentialByEmail: (
-    email: NormalizedEmail,
-  ) => Effect.Effect<EmailPasswordCredentialLookup, AuthStorageFailure>;
-  readonly storeVerificationToken: (
-    input: StoreVerificationToken,
-  ) => Effect.Effect<void, AuthStorageFailure>;
-  readonly findVerificationToken: (
-    input: ConsumeVerificationToken,
-  ) => Effect.Effect<VerificationTokenLookup, AuthStorageFailure>;
-  readonly consumeVerificationToken: (
-    input: ConsumeVerificationToken,
-  ) => Effect.Effect<VerificationTokenLookup, AuthStorageFailure>;
-  readonly createSession: (
-    input: CreateSession,
-  ) => Effect.Effect<StoredSession, AuthStorageFailure>;
-  readonly findSessionByTokenHash: (
-    hash: TokenHash,
-  ) => Effect.Effect<StoredSessionLookup, AuthStorageFailure>;
-  readonly rotateSessionToken: (
-    input: RotateSessionToken,
-  ) => Effect.Effect<StoredSession, AuthStorageFailure>;
-  readonly revokeSession: (input: RevokeSession) => Effect.Effect<void, AuthStorageFailure>;
-  readonly revokeOtherSessions: (
-    input: RevokeOtherSessions,
-  ) => Effect.Effect<void, AuthStorageFailure>;
-  readonly revokeAllUserSessions: (
-    input: RevokeAllUserSessions,
-  ) => Effect.Effect<void, AuthStorageFailure>;
-  readonly updatePasswordHash: (
-    input: UpdatePasswordHash,
-  ) => Effect.Effect<void, AuthStorageFailure>;
-}
-
-export class AuthStorage extends Context.Service<AuthStorage, AuthStorageShape>()(
-  "effect-auth/storage/AuthStorage",
-) {}
+export class AuthStorage extends Context.Service<
+  AuthStorage,
+  {
+    readonly createUserWithEmailPasswordCredential: (
+      input: CreateUserWithCredential,
+    ) => Effect.Effect<AuthUser, AuthStorageFailure>;
+    readonly findCredentialByEmail: (
+      email: NormalizedEmail,
+    ) => Effect.Effect<EmailPasswordCredentialLookup, AuthStorageFailure>;
+    readonly storeVerificationToken: (
+      input: StoreVerificationToken,
+    ) => Effect.Effect<void, AuthStorageFailure>;
+    readonly findVerificationToken: (
+      input: ConsumeVerificationToken,
+    ) => Effect.Effect<VerificationTokenLookup, AuthStorageFailure>;
+    readonly consumeVerificationToken: (
+      input: ConsumeVerificationToken,
+    ) => Effect.Effect<VerificationTokenLookup, AuthStorageFailure>;
+    readonly createSession: (
+      input: CreateSession,
+    ) => Effect.Effect<StoredSession, AuthStorageFailure>;
+    readonly findSessionByTokenHash: (
+      hash: TokenHash,
+    ) => Effect.Effect<StoredSessionLookup, AuthStorageFailure>;
+    readonly rotateSessionToken: (
+      input: RotateSessionToken,
+    ) => Effect.Effect<StoredSession, AuthStorageFailure>;
+    readonly revokeSession: (input: RevokeSession) => Effect.Effect<void, AuthStorageFailure>;
+    readonly revokeOtherSessions: (
+      input: RevokeOtherSessions,
+    ) => Effect.Effect<void, AuthStorageFailure>;
+    readonly revokeAllUserSessions: (
+      input: RevokeAllUserSessions,
+    ) => Effect.Effect<void, AuthStorageFailure>;
+    readonly updatePasswordHash: (
+      input: UpdatePasswordHash,
+    ) => Effect.Effect<void, AuthStorageFailure>;
+  }
+>()("effect-auth/AuthStorage") {}
+export type AuthStorageShape = typeof AuthStorage.Service;

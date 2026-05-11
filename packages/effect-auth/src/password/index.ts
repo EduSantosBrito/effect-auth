@@ -23,27 +23,27 @@ export class PasswordHashFailure extends Schema.TaggedErrorClass<PasswordHashFai
   },
 ) {}
 
-export interface PasswordPolicyShape {
-  readonly validate: (input: {
-    readonly email: NormalizedEmail;
-    readonly password: PasswordText;
-  }) => Effect.Effect<void, PasswordPolicyFailure>;
-}
-
-export interface PasswordHasherShape {
-  readonly hash: (password: PasswordText) => Effect.Effect<PasswordHash, PasswordHashFailure>;
-  readonly verify: (input: {
-    readonly password: PasswordText;
-    readonly hash: PasswordHash;
-  }) => Effect.Effect<boolean, PasswordHashFailure>;
-}
-
-export class PasswordPolicy extends Context.Service<PasswordPolicy, PasswordPolicyShape>()(
-  "effect-auth/password/PasswordPolicy",
-) {}
-export class PasswordHasher extends Context.Service<PasswordHasher, PasswordHasherShape>()(
-  "effect-auth/password/PasswordHasher",
-) {}
+export class PasswordPolicy extends Context.Service<
+  PasswordPolicy,
+  {
+    readonly validate: (input: {
+      readonly email: NormalizedEmail;
+      readonly password: PasswordText;
+    }) => Effect.Effect<void, PasswordPolicyFailure>;
+  }
+>()("effect-auth/PasswordPolicy") {}
+export type PasswordPolicyShape = typeof PasswordPolicy.Service;
+export class PasswordHasher extends Context.Service<
+  PasswordHasher,
+  {
+    readonly hash: (password: PasswordText) => Effect.Effect<PasswordHash, PasswordHashFailure>;
+    readonly verify: (input: {
+      readonly password: PasswordText;
+      readonly hash: PasswordHash;
+    }) => Effect.Effect<boolean, PasswordHashFailure>;
+  }
+>()("effect-auth/PasswordHasher") {}
+export type PasswordHasherShape = typeof PasswordHasher.Service;
 
 const params: {
   readonly N: number;
@@ -115,17 +115,21 @@ const validatePassword = Match.type<{
   readonly email: NormalizedEmail;
   readonly localPart: string;
 }>().pipe(
-  Match.when({ value: (value) => value.length < 12 }, () =>
-    new PasswordPolicyFailure({ reason: "TooShort" }),
+  Match.when(
+    { value: (value) => value.length < 12 },
+    () => new PasswordPolicyFailure({ reason: "TooShort" }),
   ),
-  Match.when({ value: (value) => value.length > 128 }, () =>
-    new PasswordPolicyFailure({ reason: "TooLong" }),
+  Match.when(
+    { value: (value) => value.length > 128 },
+    () => new PasswordPolicyFailure({ reason: "TooLong" }),
   ),
-  Match.when(({ value, email }) => value === email, () =>
-    new PasswordPolicyFailure({ reason: "MatchesEmail" }),
+  Match.when(
+    ({ value, email }) => value === email,
+    () => new PasswordPolicyFailure({ reason: "MatchesEmail" }),
   ),
-  Match.when(({ value, localPart }) => value === localPart, () =>
-    new PasswordPolicyFailure({ reason: "MatchesEmailLocalPart" }),
+  Match.when(
+    ({ value, localPart }) => value === localPart,
+    () => new PasswordPolicyFailure({ reason: "MatchesEmailLocalPart" }),
   ),
   Match.orElse(() => undefined),
 );

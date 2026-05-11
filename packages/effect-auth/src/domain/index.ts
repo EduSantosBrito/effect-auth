@@ -56,16 +56,16 @@ export const rateLimited = new PublicAuthError({
   message: "Too many attempts",
 });
 
-export interface AuthBoundaryShape {
-  readonly parseEmail: (input: unknown) => Effect.Effect<NormalizedEmail, BoundaryParseError>;
-  readonly parsePassword: (input: unknown) => Effect.Effect<PasswordText, BoundaryParseError>;
-  readonly parseCallbackUrl: (input: unknown) => Effect.Effect<CallbackUrl, BoundaryParseError>;
-  readonly parseOrigin: (input: unknown) => Effect.Effect<OriginUrl, BoundaryParseError>;
-}
-
-export class AuthBoundary extends Context.Service<AuthBoundary, AuthBoundaryShape>()(
-  "effect-auth/domain/AuthBoundary",
-) {}
+export class AuthBoundary extends Context.Service<
+  AuthBoundary,
+  {
+    readonly parseEmail: (input: unknown) => Effect.Effect<NormalizedEmail, BoundaryParseError>;
+    readonly parsePassword: (input: unknown) => Effect.Effect<PasswordText, BoundaryParseError>;
+    readonly parseCallbackUrl: (input: unknown) => Effect.Effect<CallbackUrl, BoundaryParseError>;
+    readonly parseOrigin: (input: unknown) => Effect.Effect<OriginUrl, BoundaryParseError>;
+  }
+>()("effect-auth/AuthBoundary") {}
+export type AuthBoundaryShape = typeof AuthBoundary.Service;
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const decodeNormalizedEmail = Schema.decodeUnknownEffect(NormalizedEmail);

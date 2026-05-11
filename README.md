@@ -7,27 +7,17 @@ Backend-first email/password auth for Effect applications.
 ```ts
 import { Effect, Layer, Option } from "effect";
 import { Auth, AuthLive } from "effect-auth";
-import {
-  AuthHttp,
-  AuthHttpConfig,
-  AuthSession,
-  CurrentAuthSession,
-} from "effect-auth/http";
+import { AuthHttp, AuthHttpConfigLayer, AuthSession, CurrentAuthSession } from "effect-auth/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 const appLayer = Layer.mergeAll(
   AuthLive.default,
-  AuthHttpConfig.layer({
+  AuthHttpConfigLayer({
     trustedOrigins: ["https://app.example.com"],
   }),
-).pipe(
-  Layer.provide(PostgresAuthStorage),
-  Layer.provide(ResendAuthEmail),
-);
+).pipe(Layer.provide(PostgresAuthStorage), Layer.provide(ResendAuthEmail));
 
-const app = HttpRouter.layer.pipe(
-  AuthHttp.mount({ basePath: "/api/auth" }),
-);
+const app = HttpRouter.layer.pipe(AuthHttp.mount({ basePath: "/api/auth" }));
 
 const protectedProgram = Effect.gen(function* () {
   const authSession = yield* AuthSession;
@@ -35,8 +25,8 @@ const protectedProgram = Effect.gen(function* () {
 }).pipe(AuthHttp.requireAuth);
 
 const navbarProgram = Effect.gen(function* () {
-  const current = yield* CurrentAuthSession;
-  return Option.match(current, {
+  const session = yield* CurrentAuthSession;
+  return Option.match(session.current, {
     onNone: () => ({ signedIn: false }),
     onSome: ({ user }) => ({ signedIn: true, user }),
   });

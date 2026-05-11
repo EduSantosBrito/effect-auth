@@ -16,22 +16,22 @@ export interface SentAuthEmail {
   readonly callbackUrl: URL;
 }
 
-export interface AuthEmailShape {
-  readonly sendEmailVerification: (input: {
-    readonly to: NormalizedEmail;
-    readonly token: VerificationToken;
-    readonly callbackUrl: URL;
-  }) => Effect.Effect<void, AuthEmailFailure>;
-  readonly sendPasswordReset: (input: {
-    readonly to: NormalizedEmail;
-    readonly token: VerificationToken;
-    readonly callbackUrl: URL;
-  }) => Effect.Effect<void, AuthEmailFailure>;
-}
-
-export class AuthEmail extends Context.Service<AuthEmail, AuthEmailShape>()(
-  "effect-auth/email/AuthEmail",
-) {}
+export class AuthEmail extends Context.Service<
+  AuthEmail,
+  {
+    readonly sendEmailVerification: (input: {
+      readonly to: NormalizedEmail;
+      readonly token: VerificationToken;
+      readonly callbackUrl: URL;
+    }) => Effect.Effect<void, AuthEmailFailure>;
+    readonly sendPasswordReset: (input: {
+      readonly to: NormalizedEmail;
+      readonly token: VerificationToken;
+      readonly callbackUrl: URL;
+    }) => Effect.Effect<void, AuthEmailFailure>;
+  }
+>()("effect-auth/AuthEmail") {}
+export type AuthEmailShape = typeof AuthEmail.Service;
 
 export interface MockAuthEmailState {
   readonly sent: Array<SentAuthEmail>;

@@ -2,11 +2,7 @@ import { BunServices } from "@effect/platform-bun";
 import { Clock, Console, Effect, Layer, Redacted, Schema } from "effect";
 import { Command, Prompt } from "effect/unstable/cli";
 import { Auth, AuthLive } from "effect-auth";
-import {
-  makeMockAuthEmailState,
-  MockAuthEmail,
-  type SentAuthEmail,
-} from "effect-auth/email/mock";
+import { makeMockAuthEmailState, MockAuthEmail, type SentAuthEmail } from "effect-auth/email/mock";
 import { DevMemoryAuthStorage, makeDevMemoryStorageState } from "effect-auth/storage/dev-memory";
 
 class ExampleFailure extends Schema.TaggedErrorClass<ExampleFailure>()("ExampleFailure", {
@@ -39,12 +35,7 @@ const storageState = makeDevMemoryStorageState();
 const emailState = makeMockAuthEmailState();
 
 const appLayer = AuthLive.default.pipe(
-  Layer.provideMerge(
-    Layer.mergeAll(
-      DevMemoryAuthStorage(storageState),
-      MockAuthEmail(emailState),
-    ),
-  ),
+  Layer.provideMerge(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
 );
 
 const preview = (value: string): string => `${value.slice(0, 8)}...`;
@@ -66,17 +57,16 @@ const confirmStep = (message: string) =>
 
 const logStep = (event: StepEvent) => Console.log(JSON.stringify(event, null, 2));
 
-const timedStep = <A, E>(
+const timedStep = Effect.fn("timedStep")(function* <A, E>(
   event: Omit<StepEvent, "duration_ms" | "outcome">,
   effect: Effect.Effect<A, E>,
-) =>
-  Effect.gen(function* () {
-    const start = yield* Clock.currentTimeMillis;
-    const value = yield* effect;
-    const end = yield* Clock.currentTimeMillis;
-    yield* logStep({ ...event, outcome: "success", duration_ms: end - start });
-    return value;
-  });
+) {
+  const start = yield* Clock.currentTimeMillis;
+  const value = yield* effect;
+  const end = yield* Clock.currentTimeMillis;
+  yield* logStep({ ...event, outcome: "success", duration_ms: end - start });
+  return value;
+});
 
 const skippedStep = (event: Omit<StepEvent, "duration_ms" | "outcome">) =>
   logStep({ ...event, outcome: "skipped", duration_ms: 0 });

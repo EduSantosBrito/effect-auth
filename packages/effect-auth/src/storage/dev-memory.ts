@@ -92,14 +92,14 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     findUsableVerificationToken(state, { purpose, tokenHash, now }).pipe(
       Effect.flatMap(({ user, credential }) =>
         Effect.suspend(() => {
-        const record = state.tokensByHash.get(tokenKey(tokenHash));
-        if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-        record.consumedAt = now;
-        const consumedCredential =
-          purpose === "EmailVerification"
-            ? { ...credential, emailVerified: true, updatedAt: now }
-            : credential;
-        state.credentialsByEmail.set(String(record.email), consumedCredential);
+          const record = state.tokensByHash.get(tokenKey(tokenHash));
+          if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+          record.consumedAt = now;
+          const consumedCredential =
+            purpose === "EmailVerification"
+              ? { ...credential, emailVerified: true, updatedAt: now }
+              : credential;
+          state.credentialsByEmail.set(String(record.email), consumedCredential);
           return Effect.succeed({ user, credential: consumedCredential });
         }),
       ),

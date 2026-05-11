@@ -26,11 +26,14 @@ import {
 import {
   AuthHttp,
   AuthApiEndpoints,
-  AuthHttpConfig,
-  AuthHttpAdapter,
+  AuthHttpConfigLayer,
   AuthHttpToken,
   AuthSession,
   CurrentAuthSession,
+  TrustedOrigins,
+} from "../src/http/index";
+import {
+  AuthHttpAdapter,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
   clearSessionCookie,
@@ -45,8 +48,7 @@ import {
   jsonWithCookieInstruction,
   makeSessionCookie,
   mapPublicHttpError,
-  TrustedOrigins,
-} from "../src/http/index";
+} from "../src/http/internal";
 import { createEffectAuthClient } from "../src/index";
 import {
   makeNativeScryptPasswordHasher,
@@ -93,6 +95,7 @@ class MissingFixture extends Schema.TaggedErrorClass<MissingFixture>()("MissingF
 
 const missingFixture = (message: string) => new MissingFixture({ message });
 const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
+const jsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
 const makeWorkflowLayer = () => {
   const storageState = makeDevMemoryStorageState();
@@ -208,9 +211,9 @@ it.effect("auth token service returns redacted 32-byte base64url tokens and SHA-
       yield* Effect.void;
       return yield* AuthToken;
     }).pipe(Effect.provide(AuthTokenLive));
-    const verification = yield* tokenService.makeVerificationToken;
-    const secondVerification = yield* tokenService.makeVerificationToken;
-    const session = yield* tokenService.makeSessionToken;
+    const verification = yield* tokenService.makeVerificationToken();
+    const secondVerification = yield* tokenService.makeVerificationToken();
+    const session = yield* tokenService.makeSessionToken();
     const verificationHash = yield* tokenService.hashToken(verification.token);
 
     assert.strictEqual(Redacted.value(verification.token).length, 43);
@@ -303,7 +306,7 @@ it.effect("dev memory storage enforces unique email and one-time tokens", () =>
     const duplicate = yield* Effect.exit(
       storage.createUserWithEmailPasswordCredential({ email, passwordHash, now: 1 }),
     );
-    const pair = yield* tokenService.makeVerificationToken;
+    const pair = yield* tokenService.makeVerificationToken();
 
     yield* storage.storeVerificationToken({
       userId: user.id,
@@ -360,7 +363,7 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
       passwordHash,
       now: 1,
     });
-    const expiredPair = yield* tokenService.makeSessionToken;
+    const expiredPair = yield* tokenService.makeSessionToken();
     yield* storage.createSession({
       userId: user.id,
       tokenHash: expiredPair.hash,
@@ -369,8 +372,8 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
     });
     const expired = yield* Effect.exit(storage.findSessionByTokenHash(expiredPair.hash));
 
-    const currentPair = yield* tokenService.makeSessionToken;
-    const nextPair = yield* tokenService.makeSessionToken;
+    const currentPair = yield* tokenService.makeSessionToken();
+    const nextPair = yield* tokenService.makeSessionToken();
     yield* storage.createSession({
       userId: user.id,
       tokenHash: currentPair.hash,
@@ -458,7 +461,7 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
       false,
     );
     assert.equal(
-      JSON.stringify(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
+      jsonString(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
       false,
     );
   }).pipe(Effect.provide(authLayer));
@@ -488,7 +491,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
       Layer.provideMerge(
         Layer.mergeAll(
           authLayer,
-          AuthHttpConfig.layer({
+          AuthHttpConfigLayer({
             trustedOrigins: ["https://app.example.com"],
             secureCookies: true,
           }),
@@ -505,7 +508,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
             origin: "https://app.example.com",
             "x-forwarded-for": "203.0.113.10",
           },
-          body: JSON.stringify({
+          body: jsonString({
             email: "mounted-sign-in@example.com",
             password: "correct horse battery staple",
             ip: "198.51.100.99",
@@ -540,7 +543,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
       Layer.provideMerge(
         Layer.mergeAll(
           authLayer,
-          AuthHttpConfig.layer({
+          AuthHttpConfigLayer({
             trustedOrigins: ["https://app.example.com"],
             secureCookies: true,
           }),
@@ -555,10 +558,12 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
         origin: "https://app.example.com",
         ...(cookie === undefined ? {} : { cookie }),
       },
-      body: JSON.stringify(body),
+      body: jsonString(body),
     });
     const call = (path: string, init?: RequestInit) =>
-      Effect.promise(() => web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()));
+      Effect.promise(() =>
+        web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()),
+      );
 
     const signUp = yield* call(
       "/api/auth/sign-up/email",
@@ -651,94 +656,101 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
   });
 });
 
-it.effect("AuthHttp.requireAuth provides AuthSession from cookies and explicit bearer tokens", () => {
-  const storageState = makeDevMemoryStorageState();
-  const emailState = makeMockAuthEmailState();
-  const authLayer = AuthLive.default.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
-    ),
-  );
-  return Effect.gen(function* () {
-    const auth = yield* Auth;
-    yield* auth.signUp({
-      email: "protected-session@example.com",
-      password: "correct horse battery staple",
-      verificationCallbackUrl: new URL("https://app.example.com/verify"),
-    });
-    const verification = emailState.sent[0];
-    if (!verification) return yield* missingFixture("missing verification email");
-    yield* auth.verifyEmail({ token: verification.token });
-    const signedIn = yield* auth.signIn({
-      email: "protected-session@example.com",
-      password: "correct horse battery staple",
-    });
+it.effect(
+  "AuthHttp.requireAuth provides AuthSession from cookies and explicit bearer tokens",
+  () => {
+    const storageState = makeDevMemoryStorageState();
+    const emailState = makeMockAuthEmailState();
+    const authLayer = AuthLive.default.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+      ),
+    );
+    return Effect.gen(function* () {
+      const auth = yield* Auth;
+      yield* auth.signUp({
+        email: "protected-session@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      });
+      const verification = emailState.sent[0];
+      if (!verification) return yield* missingFixture("missing verification email");
+      yield* auth.verifyEmail({ token: verification.token });
+      const signedIn = yield* auth.signIn({
+        email: "protected-session@example.com",
+        password: "correct horse battery staple",
+      });
 
-    const protectedProgram = Effect.gen(function* () {
-      const session = yield* AuthSession;
-      return {
-        email: session.user.email,
-        hasSessionToken: Object.hasOwn(session, "sessionToken"),
-      };
-    }).pipe(AuthHttp.requireAuth);
+      const protectedProgram = Effect.gen(function* () {
+        const session = yield* AuthSession;
+        return {
+          email: session.user.email,
+          hasSessionToken: Object.hasOwn(session, "sessionToken"),
+        };
+      }).pipe(AuthHttp.requireAuth);
 
-    const cookieSession = yield* protectedProgram.pipe(
-      Effect.provideService(
-        HttpServerRequest.HttpServerRequest,
-        HttpServerRequest.fromClientRequest(
-          HttpClientRequest.get("https://auth.example.com/me").pipe(
-            HttpClientRequest.setHeader(
-              "cookie",
-              `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+      const cookieSession = yield* protectedProgram.pipe(
+        Effect.provideService(
+          HttpServerRequest.HttpServerRequest,
+          HttpServerRequest.fromClientRequest(
+            HttpClientRequest.get("https://auth.example.com/me").pipe(
+              HttpClientRequest.setHeader(
+                "cookie",
+                `effect_auth_session=${Redacted.value(signedIn.sessionToken)}`,
+              ),
             ),
           ),
         ),
-      ),
-    );
+      );
 
-    const bearerProgram = AuthHttp.requireAuth({ extractor: AuthHttpToken.bearer })(Effect.gen(function* () {
-      const session = yield* AuthSession;
-      return { email: session.user.email };
-    }));
+      const bearerProgram = AuthHttp.requireAuth({ extractor: AuthHttpToken.bearer })(
+        Effect.gen(function* () {
+          const session = yield* AuthSession;
+          return { email: session.user.email };
+        }),
+      );
 
-    const bearerSession = yield* bearerProgram.pipe(
-      Effect.provideService(
-        HttpServerRequest.HttpServerRequest,
-        HttpServerRequest.fromClientRequest(
-          HttpClientRequest.get("https://auth.example.com/me").pipe(
-            HttpClientRequest.bearerToken(signedIn.sessionToken),
-          ),
-        ),
-      ),
-    );
-
-    const missing = yield* Effect.exit(
-      protectedProgram.pipe(
+      const bearerSession = yield* bearerProgram.pipe(
         Effect.provideService(
           HttpServerRequest.HttpServerRequest,
-          HttpServerRequest.fromClientRequest(HttpClientRequest.get("https://auth.example.com/me")),
+          HttpServerRequest.fromClientRequest(
+            HttpClientRequest.get("https://auth.example.com/me").pipe(
+              HttpClientRequest.bearerToken(signedIn.sessionToken),
+            ),
+          ),
+        ),
+      );
+
+      const missing = yield* Effect.exit(
+        protectedProgram.pipe(
+          Effect.provideService(
+            HttpServerRequest.HttpServerRequest,
+            HttpServerRequest.fromClientRequest(
+              HttpClientRequest.get("https://auth.example.com/me"),
+            ),
+          ),
+        ),
+      );
+
+      assert.deepStrictEqual(cookieSession, {
+        email: "protected-session@example.com",
+        hasSessionToken: false,
+      });
+      assert.deepStrictEqual(bearerSession, { email: "protected-session@example.com" });
+      assert.strictEqual(missing._tag, "Failure");
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfigLayer({
+            trustedOrigins: ["https://app.example.com"],
+            secureCookies: true,
+          }),
         ),
       ),
     );
-
-    assert.deepStrictEqual(cookieSession, {
-      email: "protected-session@example.com",
-      hasSessionToken: false,
-    });
-    assert.deepStrictEqual(bearerSession, { email: "protected-session@example.com" });
-    assert.strictEqual(missing._tag, "Failure");
-  }).pipe(
-    Effect.provide(
-      Layer.mergeAll(
-        authLayer,
-        AuthHttpConfig.layer({
-          trustedOrigins: ["https://app.example.com"],
-          secureCookies: true,
-        }),
-      ),
-    ),
-  );
-});
+  },
+);
 
 it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale cookies", () => {
   const storageState = makeDevMemoryStorageState();
@@ -776,8 +788,8 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     });
 
     const optionalProgram = Effect.gen(function* () {
-      const current = yield* CurrentAuthSession;
-      return Option.match(current, {
+      const session = yield* CurrentAuthSession;
+      return Option.match(session.current, {
         onNone: () => ({ signedIn: false }),
         onSome: ({ user }) => ({ signedIn: true, email: String(user.email) }),
       });
@@ -807,8 +819,8 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
 
     const combinedProgram = AuthHttp.optionalAuth({ extractor: AuthHttpToken.cookieOrBearer })(
       Effect.gen(function* () {
-        const current = yield* CurrentAuthSession;
-        return Option.match(current, {
+        const session = yield* CurrentAuthSession;
+        return Option.match(session.current, {
           onNone: () => "anonymous",
           onSome: ({ user }) => String(user.email),
         });
@@ -845,10 +857,12 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
 
     const clearCookies: Array<string> = [];
     yield* HttpEffect.toHandled(
-      AuthHttp.optionalAuth(Effect.gen(function* () {
-        yield* CurrentAuthSession;
-        return HttpServerResponse.jsonUnsafe(null);
-      })),
+      AuthHttp.optionalAuth(
+        Effect.gen(function* () {
+          yield* CurrentAuthSession;
+          return HttpServerResponse.jsonUnsafe(null);
+        }),
+      ),
       (_request, response) =>
         Effect.sync(() => {
           clearCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
@@ -872,10 +886,12 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     }
     const rotationCookies: Array<string> = [];
     yield* HttpEffect.toHandled(
-      AuthHttp.optionalAuth(Effect.gen(function* () {
-        yield* CurrentAuthSession;
-        return HttpServerResponse.jsonUnsafe(null);
-      })),
+      AuthHttp.optionalAuth(
+        Effect.gen(function* () {
+          yield* CurrentAuthSession;
+          return HttpServerResponse.jsonUnsafe(null);
+        }),
+      ),
       (_request, response) =>
         Effect.sync(() => {
           rotationCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
@@ -908,7 +924,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     Effect.provide(
       Layer.mergeAll(
         authLayer,
-        AuthHttpConfig.layer({
+        AuthHttpConfigLayer({
           trustedOrigins: ["https://app.example.com"],
           secureCookies: true,
         }),
@@ -1326,7 +1342,7 @@ it.effect(
         email: "change-failures@example.com",
         password: "correct horse battery staple",
       });
-      const missingToken = yield* tokenService.makeSessionToken;
+      const missingToken = yield* tokenService.makeSessionToken();
       const unauthenticated = yield* Effect.flip(
         recovery.changePassword({
           sessionToken: missingToken.token,
@@ -1389,7 +1405,7 @@ it.effect("password change checks rate limits before session lookup", () => {
   return Effect.gen(function* () {
     const recovery = yield* PasswordRecoveryWorkflows;
     const tokenService = yield* AuthToken;
-    const token = yield* tokenService.makeSessionToken;
+    const token = yield* tokenService.makeSessionToken();
     const limited = yield* Effect.flip(
       recovery.changePassword({
         sessionToken: token.token,
@@ -1407,7 +1423,7 @@ it.effect("http helpers preserve cookie defaults and public error mapping", () =
   const { layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
     const tokenService = yield* AuthToken;
-    const session = yield* tokenService.makeSessionToken;
+    const session = yield* tokenService.makeSessionToken();
     const setCookie = makeSessionCookie(session.token);
     const clearCookie = clearSessionCookie();
 

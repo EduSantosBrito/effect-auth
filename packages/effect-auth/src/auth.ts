@@ -120,7 +120,20 @@ export interface AuthShape {
   >;
 }
 
-export class Auth extends Context.Service<Auth, AuthShape>()("effect-auth/Auth") {}
+export class Auth extends Context.Service<
+  Auth,
+  {
+    readonly signUp: AuthShape["signUp"];
+    readonly verifyEmail: AuthShape["verifyEmail"];
+    readonly resendVerification: AuthShape["resendVerification"];
+    readonly signIn: AuthShape["signIn"];
+    readonly currentSession: AuthShape["currentSession"];
+    readonly signOut: AuthShape["signOut"];
+    readonly requestPasswordReset: AuthShape["requestPasswordReset"];
+    readonly resetPassword: AuthShape["resetPassword"];
+    readonly changePassword: AuthShape["changePassword"];
+  }
+>()("effect-auth/Auth") {}
 
 const AuthLiveLayer = Layer.effect(Auth)(
   Effect.gen(function* () {
