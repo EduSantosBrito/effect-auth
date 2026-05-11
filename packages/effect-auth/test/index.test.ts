@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Predicate from "effect/Predicate";
@@ -7,8 +8,10 @@ import * as Schema from "effect/Schema";
 import * as Cookies from "effect/unstable/http/Cookies";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import { Auth, AuthLive } from "../src/auth";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -20,7 +23,9 @@ import {
   normalizePassword,
 } from "../src/domain/index";
 import {
+  AuthHttp,
   AuthApiEndpoints,
+  AuthHttpConfig,
   AuthHttpAdapter,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
@@ -417,6 +422,104 @@ it.effect("email password workflows verify email before issuing sessions", () =>
     });
     assert.strictEqual(signedIn.user.email, "user@example.com");
   }).pipe(Effect.provide(layer));
+});
+
+it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session token", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "flat-auth@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+
+    const signedIn = yield* auth.signIn({
+      email: "flat-auth@example.com",
+      password: "correct horse battery staple",
+    });
+
+    assert.strictEqual(signedIn.user.email, "flat-auth@example.com");
+    assert.equal(
+      String(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
+      false,
+    );
+    assert.equal(
+      JSON.stringify(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
+      false,
+    );
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthHttp.mount adds a token-free sign-in route under the configured base path", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "mounted-sign-in@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: ["https://app.example.com"],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const response = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-in/email", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+            "x-forwarded-for": "203.0.113.10",
+          },
+          body: JSON.stringify({
+            email: "mounted-sign-in@example.com",
+            password: "correct horse battery staple",
+            ip: "198.51.100.99",
+          }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const bodyText = yield* Effect.promise(() => response.text());
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(response.status, 200);
+    assert.equal(response.headers.get("set-cookie")?.includes("effect_auth_session="), true);
+    assert.equal(response.headers.get("set-cookie")?.includes("HttpOnly"), true);
+    assert.equal(response.headers.get("set-cookie")?.includes("SameSite=Lax"), true);
+    assert.equal(bodyText.includes("sessionToken"), false);
+    assert.equal(bodyText.includes("tokenHash"), false);
+  }).pipe(Effect.provide(authLayer));
 });
 
 it.effect(

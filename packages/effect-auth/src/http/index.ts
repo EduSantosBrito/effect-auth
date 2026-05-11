@@ -1,9 +1,13 @@
-import { Context, Effect, Layer, Predicate, Redacted, Schema } from "effect";
+import { Context, Data, Effect, Layer, Match, Predicate, Redacted, Schema } from "effect";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
+import { Auth } from "../auth.js";
 import {
   invalidCredentials,
+  invalidToken,
   rateLimited,
   unauthorized,
   type PublicAuthError,
@@ -13,6 +17,7 @@ import {
   VerificationToken,
   type SessionToken as SessionTokenValue,
 } from "../token/index.js";
+import type { AuthUser, StoredSession } from "../storage/index.js";
 import {
   EmailPasswordWorkflows,
   PasswordRecoveryWorkflows,
@@ -25,6 +30,99 @@ import {
   type SignUpInput,
   type VerifyEmailInput,
 } from "../workflows/index.js";
+
+export type AuthHttpError = Data.TaggedEnum<{
+  Unauthorized: {};
+  InvalidCredentials: {};
+  EmailNotVerified: {};
+  InvalidToken: {};
+  MissingSessionToken: {};
+  InvalidSessionToken: {};
+  RateLimited: { readonly retryAfterMillis?: number };
+  BadRequest: { readonly reason: string };
+}>;
+
+export const AuthHttpError = Data.taggedEnum<AuthHttpError>();
+
+export interface AuthHttpErrorResponse {
+  readonly status: number;
+  readonly body: unknown;
+  readonly headers?: Readonly<Record<string, string | ReadonlyArray<string>>>;
+}
+
+export interface AuthHttpErrorMapperShape {
+  readonly map: (error: AuthHttpError) => Effect.Effect<AuthHttpErrorResponse>;
+}
+
+const defaultAuthHttpErrorMapper: AuthHttpErrorMapperShape = {
+  map: Match.typeTags<AuthHttpError, Effect.Effect<AuthHttpErrorResponse>>()({
+    RateLimited: () => Effect.succeed({ status: 429, body: rateLimited }),
+    BadRequest: (error) =>
+      Effect.succeed({
+        status: 400,
+        body: { code: "BadRequest", message: error.reason },
+      }),
+    InvalidCredentials: () => Effect.succeed({ status: 400, body: invalidCredentials }),
+    EmailNotVerified: () =>
+      Effect.succeed({
+        status: 400,
+        body: { code: "EmailNotVerified", message: "Email is not verified" },
+      }),
+    InvalidToken: () => Effect.succeed({ status: 400, body: invalidToken }),
+    InvalidSessionToken: () => Effect.succeed({ status: 400, body: invalidToken }),
+    MissingSessionToken: () => Effect.succeed({ status: 401, body: unauthorized }),
+    Unauthorized: () => Effect.succeed({ status: 401, body: unauthorized }),
+  }),
+};
+
+export const AuthHttpErrorMapper = Context.Reference<AuthHttpErrorMapperShape>(
+  "effect-auth/http/AuthHttpErrorMapper",
+  { defaultValue: () => defaultAuthHttpErrorMapper },
+);
+
+export interface AuthHttpConfigInput {
+  readonly trustedOrigins: ReadonlyArray<string | URL>;
+  readonly sessionCookieName?: string;
+  readonly sessionCookiePath?: string;
+  readonly secureCookies?: boolean;
+  readonly baseUrl?: URL;
+}
+
+export interface AuthHttpConfigShape {
+  readonly trustedOrigins: ReadonlySet<string>;
+  readonly sessionCookieName: string;
+  readonly sessionCookiePath: string;
+  readonly secureCookies: boolean;
+}
+
+const deriveSecureCookies = (input: AuthHttpConfigInput): boolean => {
+  if (input.secureCookies !== undefined) return input.secureCookies;
+  if (input.baseUrl !== undefined) {
+    if (input.baseUrl.protocol === "https:") return true;
+    if (input.baseUrl.hostname === "localhost" || input.baseUrl.hostname === "127.0.0.1") {
+      return false;
+    }
+  }
+  return process.env.NODE_ENV === "production";
+};
+
+const makeAuthHttpConfig = (input: AuthHttpConfigInput): AuthHttpConfigShape => ({
+  trustedOrigins: new Set(
+    input.trustedOrigins.map((origin) =>
+      origin instanceof URL ? origin.origin : new URL(origin).origin,
+    ),
+  ),
+  sessionCookieName: input.sessionCookieName ?? "effect_auth_session",
+  sessionCookiePath: input.sessionCookiePath ?? "/",
+  secureCookies: deriveSecureCookies(input),
+});
+
+export class AuthHttpConfig extends Context.Service<AuthHttpConfig, AuthHttpConfigShape>()(
+  "effect-auth/http/AuthHttpConfig",
+) {
+  static readonly layer = (input: AuthHttpConfigInput): Layer.Layer<AuthHttpConfig> =>
+    Layer.succeed(AuthHttpConfig)(makeAuthHttpConfig(input));
+}
 
 export interface TrustedOriginPolicyShape {
   readonly isTrusted: (origin: URL) => Effect.Effect<boolean>;
@@ -114,19 +212,69 @@ export const appendCookieInstruction = (instruction: CookieInstruction) =>
 export const mapPublicHttpError = (
   error: PublicAuthError,
 ): { readonly status: number; readonly body: PublicAuthError } => {
-  switch (error.code) {
-    case "RateLimited":
-      return { status: 429, body: rateLimited };
-    case "Unauthorized":
-      return { status: 401, body: unauthorized };
-    case "InvalidCredentials":
-    case "EmailNotVerified":
-    case "InvalidToken":
-      return {
-        status: 400,
-        body: error.code === "InvalidCredentials" ? invalidCredentials : error,
-      };
+  return Match.value(error.code).pipe(
+    Match.when("RateLimited", () => ({ status: 429, body: rateLimited })),
+    Match.when("Unauthorized", () => ({ status: 401, body: unauthorized })),
+    Match.when("InvalidCredentials", () => ({ status: 400, body: invalidCredentials })),
+    Match.when("EmailNotVerified", () => ({ status: 400, body: error })),
+    Match.when("InvalidToken", () => ({ status: 400, body: error })),
+    Match.exhaustive,
+  );
+};
+
+const publicAuthErrorToHttpError = (code: PublicAuthError["code"]): AuthHttpError => {
+  return Match.value(code).pipe(
+    Match.when("InvalidCredentials", () => AuthHttpError.InvalidCredentials()),
+    Match.when("EmailNotVerified", () => AuthHttpError.EmailNotVerified()),
+    Match.when("InvalidToken", () => AuthHttpError.InvalidToken()),
+    Match.when("RateLimited", () => AuthHttpError.RateLimited({})),
+    Match.when("Unauthorized", () => AuthHttpError.Unauthorized()),
+    Match.exhaustive,
+  );
+};
+
+const toAuthHttpError = (error: unknown): AuthHttpError => {
+  if (Predicate.hasProperty(error, "name") && error.name === "SchemaError") {
+    return AuthHttpError.BadRequest({ reason: "Invalid request body" });
   }
+  if (
+    Predicate.hasProperty(error, "code") &&
+    (error.code === "InvalidCredentials" ||
+      error.code === "EmailNotVerified" ||
+      error.code === "InvalidToken" ||
+      error.code === "RateLimited" ||
+      error.code === "Unauthorized")
+  ) {
+    return publicAuthErrorToHttpError(error.code);
+  }
+  if (Predicate.isTagged(error, "BoundaryParseError")) {
+    return AuthHttpError.BadRequest({ reason: "Invalid request body" });
+  }
+  return AuthHttpError.Unauthorized();
+};
+
+const authHttpErrorResponse = Effect.fn("authHttpErrorResponse")(function* (error: AuthHttpError) {
+  const mapper = yield* AuthHttpErrorMapper;
+  const mapped = yield* mapper.map(error);
+  return HttpServerResponse.jsonUnsafe(mapped.body, {
+    status: mapped.status,
+    headers: mapped.headers,
+  });
+});
+
+const sessionCookieFromConfig = (
+  token: SessionTokenValue,
+  config: AuthHttpConfigShape,
+): CookieInstruction =>
+  makeSessionCookie(token, {
+    name: config.sessionCookieName,
+    path: config.sessionCookiePath,
+    secure: config.secureCookies,
+  });
+
+const authHttpSession = (session: StoredSession): AuthHttpSession => {
+  const { tokenHash: _tokenHash, ...publicSession } = session;
+  return publicSession;
 };
 
 export interface AuthHttpAdapterShape {
@@ -173,6 +321,22 @@ export const checkTrustedRequestOrigin = (
         yield* checkTrustedOrigin(origin);
       });
 
+export const checkAuthHttpConfigRequestOrigin = (
+  request: OriginRequest,
+): Effect.Effect<void, AuthHttpError, AuthHttpConfig> =>
+  request.headers.origin === undefined
+    ? Effect.void
+    : Effect.gen(function* () {
+        const config = yield* AuthHttpConfig;
+        const origin = yield* Effect.try({
+          try: () => new URL(request.headers.origin ?? ""),
+          catch: () => AuthHttpError.Unauthorized(),
+        });
+        if (!config.trustedOrigins.has(origin.origin)) {
+          return yield* Effect.fail(AuthHttpError.Unauthorized());
+        }
+      });
+
 export const TrustedOrigins = (origins: ReadonlyArray<string | URL>) => {
   const allowed = new Set(
     origins.map((origin) => (origin instanceof URL ? origin.origin : new URL(origin).origin)),
@@ -206,6 +370,18 @@ export const SignInEmailPayload = Schema.Struct({
   password: Schema.Unknown,
   ip: OptionalString,
 });
+
+export const MountedSignInEmailPayload = Schema.Struct({
+  email: Schema.Unknown,
+  password: Schema.Unknown,
+});
+
+export type AuthHttpSession = Omit<StoredSession, "tokenHash">;
+
+export interface AuthHttpSignInResponse {
+  readonly user: AuthUser;
+  readonly session: AuthHttpSession;
+}
 
 export const SessionTokenPayload = Schema.Struct({
   sessionToken: Schema.String,
@@ -338,6 +514,8 @@ const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
 
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
+const decodeMountedSignInEmailPayload = Schema.decodeUnknownEffect(MountedSignInEmailPayload);
+
 const signUpInput = (payload: typeof SignUpEmailPayload.Type): SignUpInput => ({
   email: payload.email,
   password: payload.password,
@@ -358,6 +536,27 @@ const signInInput = (payload: typeof SignInEmailPayload.Type): SignInInput => ({
   password: payload.password,
   ...(payload.ip === undefined ? {} : { ip: payload.ip }),
 });
+
+const trustedRequestIp = (request: HttpServerRequest.HttpServerRequest): string | undefined => {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (forwarded !== undefined && forwarded.trim() !== "") {
+    return forwarded.split(",")[0]?.trim();
+  }
+  const realIp = request.headers["x-real-ip"];
+  return realIp === undefined || realIp.trim() === "" ? undefined : realIp.trim();
+};
+
+const mountedSignInInput = (
+  payload: typeof MountedSignInEmailPayload.Type,
+  request: HttpServerRequest.HttpServerRequest,
+): SignInInput => {
+  const ip = trustedRequestIp(request);
+  return {
+    email: payload.email,
+    password: payload.password,
+    ...(ip === undefined ? {} : { ip }),
+  };
+};
 
 const requestPasswordResetInput = (
   payload: typeof RequestPasswordResetPayload.Type,
@@ -425,6 +624,22 @@ export const handleSignInEmail = Effect.fn("handleSignInEmail")(function* ({
   const adapter = yield* AuthHttpAdapter;
   return yield* adapter.signInEmail(signInInput(payload));
 });
+
+export const handleMountedSignInEmail = (request: HttpServerRequest.HttpServerRequest) =>
+  Effect.gen(function* () {
+    yield* checkAuthHttpConfigRequestOrigin(request);
+    const payload = yield* request.json.pipe(Effect.flatMap(decodeMountedSignInEmailPayload));
+    const auth = yield* Auth;
+    const config = yield* AuthHttpConfig;
+    const result = yield* auth.signIn(mountedSignInInput(payload, request));
+    const body: AuthHttpSignInResponse = {
+      user: result.user,
+      session: authHttpSession(result.session),
+    };
+    return jsonWithCookieInstruction(body, sessionCookieFromConfig(result.sessionToken, config));
+  }).pipe(
+    Effect.catch((error) => authHttpErrorResponse(toAuthHttpError(error))),
+  );
 
 export const handleCurrentSession = Effect.fn("handleCurrentSession")(function* ({
   query,
@@ -499,3 +714,22 @@ export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handl
     .handle("completePasswordReset", handleCompletePasswordReset)
     .handle("changePassword", handleChangePassword),
 );
+
+export interface AuthHttpMountOptions {
+  readonly basePath: `/${string}`;
+}
+
+const mountedPath = (basePath: `/${string}`, path: `/${string}`): `/${string}` =>
+  `${basePath}${path}`;
+
+export const AuthHttp = {
+  mount:
+    (options: AuthHttpMountOptions) =>
+    <A, E, R>(self: Layer.Layer<A, E, R>) =>
+      Layer.mergeAll(
+        self,
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sign-in/email"), (request) =>
+          handleMountedSignInEmail(request),
+        ),
+      ),
+};
