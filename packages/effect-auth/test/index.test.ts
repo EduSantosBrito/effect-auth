@@ -84,12 +84,8 @@ import {
   SessionWorkflowsLive,
   VerificationTokenConfigLive,
 } from "../src/workflows/index";
-import {
-  AuthEmail,
-  AuthEmailFailure,
-  makeMockAuthEmailState,
-  MockAuthEmail,
-} from "../src/email/mock";
+import { AuthEmail, AuthEmailFailure } from "../src/email/index";
+import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
 
 class MissingFixture extends Schema.TaggedErrorClass<MissingFixture>()("MissingFixture", {
   message: Schema.String,

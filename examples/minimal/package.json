@@ -4,13 +4,13 @@
   "type": "module",
   "scripts": {
     "start": "bun src/main.ts",
-    "demo": "bun src/main.ts demo",
+    "demo": "bun src/main.ts",
     "check": "bun --bun tsgo -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@effect/platform-bun": "catalog:",
     "effect": "catalog:",
-    "effect-auth": "workspace:*"
+    "effect-auth": "workspace:*",
+    "effect-email": "^0.3.1"
   },
   "devDependencies": {
     "@effect/tsgo": "catalog:",

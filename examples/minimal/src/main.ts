@@ -1,21 +1,25 @@
-import { BunServices } from "@effect/platform-bun";
 import { Clock, Console, Effect, Layer, Redacted, Schema } from "effect";
-import { Command, Prompt } from "effect/unstable/cli";
+import { type EmailMessage, MessageBody } from "effect-email";
+import * as TestEmail from "effect-email/test";
 import { Auth, AuthLive } from "effect-auth";
-import { makeMockAuthEmailState, MockAuthEmail, type SentAuthEmail } from "effect-auth/email/mock";
-import { DevMemoryAuthStorage, makeDevMemoryStorageState } from "effect-auth/storage/dev-memory";
+import { VerificationToken } from "effect-auth/token";
+import {
+  EffectEmailAuthEmail,
+  ExampleAuthStorage,
+  makeExampleStorageState,
+} from "./dev-adapters.js";
 
 class ExampleFailure extends Schema.TaggedErrorClass<ExampleFailure>()("ExampleFailure", {
   reason: Schema.String,
 }) {}
 
 interface StepEvent {
-  readonly event: "effect_auth_cli_step";
+  readonly event: "effect_auth_minimal_step";
   readonly service: "effect-auth-example";
-  readonly command: "demo";
+  readonly flow: "minimal";
   readonly run_id: string;
-  readonly step: "sign_up" | "verify_email" | "sign_in" | "current_session";
-  readonly outcome: "success" | "skipped";
+  readonly step: "sign_up" | "email_sent" | "verify_email" | "sign_in" | "current_session";
+  readonly outcome: "success";
   readonly duration_ms: number;
   readonly user?: {
     readonly id?: string;
@@ -28,32 +32,65 @@ interface StepEvent {
     readonly session_token_preview?: string;
     readonly token_rotation?: string;
   };
-  readonly next_action?: string;
+  readonly email?: {
+    readonly adapter: "effect-email/test";
+    readonly from: string;
+    readonly to: ReadonlyArray<string>;
+    readonly subject: string;
+    readonly body_preview: string;
+  };
 }
 
-const storageState = makeDevMemoryStorageState();
-const emailState = makeMockAuthEmailState();
+const storageState = makeExampleStorageState();
 
 const appLayer = AuthLive.dev.pipe(
-  Layer.provideMerge(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
+  Layer.provideMerge(Layer.mergeAll(ExampleAuthStorage(storageState), EffectEmailAuthEmail)),
+  Layer.provideMerge(TestEmail.defaultLayer),
 );
 
 const preview = (value: string): string => `${value.slice(0, 8)}...`;
 
-const firstEmail = (sent: ReadonlyArray<SentAuthEmail>) =>
+const previewRedacted = (value: Redacted.Redacted<string>): string =>
+  preview(Redacted.value(value));
+
+const messageText = MessageBody.$match({
+  TextOnly: ({ text }) => text,
+  HtmlOnly: ({ html }) => html,
+  TextAndHtml: ({ text }) => text,
+});
+
+const mailboxLabel = (mailbox: EmailMessage["from"]): string =>
+  mailbox.displayName === undefined
+    ? mailbox.address
+    : `${mailbox.displayName} <${mailbox.address}>`;
+
+const firstSentEmail = (sent: ReadonlyArray<EmailMessage>) =>
   Effect.suspend(() => {
-    const email = sent[0];
-    return email === undefined
+    const message = sent[0];
+    return message === undefined
       ? Effect.fail(new ExampleFailure({ reason: "Expected verification email to be sent" }))
-      : Effect.succeed(email);
+      : Effect.succeed(message);
   });
 
-const confirmStep = (message: string) =>
-  Prompt.confirm({
-    message,
-    initial: true,
-    label: { confirm: "run", deny: "skip" },
-  });
+const extractVerificationToken = (message: EmailMessage) => {
+  const urlText = messageText(message.body).match(/https?:\/\/\S+/u)?.[0];
+  if (urlText === undefined)
+    return Effect.fail(new ExampleFailure({ reason: "Expected verification email URL" }));
+  return Effect.try({
+    try: () => new URL(urlText).searchParams.get("token"),
+    catch: () => new ExampleFailure({ reason: "Expected valid verification email URL" }),
+  }).pipe(
+    Effect.flatMap((token) =>
+      token === null
+        ? Effect.fail(new ExampleFailure({ reason: "Expected verification email token" }))
+        : Schema.decodeUnknownEffect(VerificationToken)(token).pipe(
+            Effect.mapError(
+              () => new ExampleFailure({ reason: "Expected valid verification token" }),
+            ),
+          ),
+    ),
+  );
+};
 
 const logStep = (event: StepEvent) => Console.log(JSON.stringify(event, null, 2));
 
@@ -68,37 +105,22 @@ const timedStep = Effect.fn("timedStep")(function* <A, E>(
   return value;
 });
 
-const skippedStep = (event: Omit<StepEvent, "duration_ms" | "outcome">) =>
-  logStep({ ...event, outcome: "skipped", duration_ms: 0 });
-
 const demoProgram = Effect.gen(function* () {
   const startedAt = yield* Clock.currentTimeMillis;
   const runId = `auth_demo_${startedAt}`;
   const auth = yield* Auth;
+  const emailInspection = yield* TestEmail.TestEmailInspection;
   const email = "demo@example.com";
   const password = "correct horse battery staple";
 
-  const runSignUp = yield* confirmStep("Step 1: create an email/password user?");
-  if (!runSignUp) {
-    return yield* skippedStep({
-      event: "effect_auth_cli_step",
-      service: "effect-auth-example",
-      command: "demo",
-      run_id: runId,
-      step: "sign_up",
-      next_action: "Run sign-up to create a verification token.",
-    });
-  }
-
   const signUp = yield* timedStep(
     {
-      event: "effect_auth_cli_step",
+      event: "effect_auth_minimal_step",
       service: "effect-auth-example",
-      command: "demo",
+      flow: "minimal",
       run_id: runId,
       step: "sign_up",
       user: { email },
-      next_action: "Verify the email using the mock email token.",
     },
     auth.signUp({
       email,
@@ -107,108 +129,76 @@ const demoProgram = Effect.gen(function* () {
     }),
   );
 
-  const verificationEmail = yield* firstEmail(emailState.sent);
-  const runVerify = yield* confirmStep("Step 2: verify the mock email token?");
-  if (!runVerify) {
-    return yield* skippedStep({
-      event: "effect_auth_cli_step",
-      service: "effect-auth-example",
-      command: "demo",
-      run_id: runId,
-      step: "verify_email",
-      user: { id: signUp.user.id, email },
-      auth: {
-        verification_email_count: emailState.sent.length,
-        verification_token_preview: preview(Redacted.value(verificationEmail.token)),
-      },
-      next_action: "Run verification before signing in.",
-    });
-  }
+  const sentEmails = yield* emailInspection.sent;
+  const sentEmail = yield* firstSentEmail(sentEmails);
+  const verificationToken = yield* extractVerificationToken(sentEmail);
+  const verificationTokenPreview = previewRedacted(verificationToken);
+  const emailBodyPreview = messageText(sentEmail.body)
+    .replace(Redacted.value(verificationToken), verificationTokenPreview)
+    .slice(0, 96);
+
+  yield* logStep({
+    event: "effect_auth_minimal_step",
+    service: "effect-auth-example",
+    flow: "minimal",
+    run_id: runId,
+    step: "email_sent",
+    outcome: "success",
+    duration_ms: 0,
+    user: { id: signUp.user.id, email },
+    auth: {
+      verification_email_count: sentEmails.length,
+      verification_token_preview: verificationTokenPreview,
+    },
+    email: {
+      adapter: "effect-email/test",
+      from: mailboxLabel(sentEmail.from),
+      to: sentEmail.to.map(mailboxLabel),
+      subject: sentEmail.subject,
+      body_preview: emailBodyPreview,
+    },
+  });
 
   const verified = yield* timedStep(
     {
-      event: "effect_auth_cli_step",
+      event: "effect_auth_minimal_step",
       service: "effect-auth-example",
-      command: "demo",
+      flow: "minimal",
       run_id: runId,
       step: "verify_email",
       user: { id: signUp.user.id, email },
       auth: {
-        verification_email_count: emailState.sent.length,
-        verification_token_preview: preview(Redacted.value(verificationEmail.token)),
+        verification_email_count: sentEmails.length,
+        verification_token_preview: verificationTokenPreview,
       },
-      next_action: "Sign in to create a session.",
     },
-    auth.verifyEmail({ token: verificationEmail.token }),
+    auth.verifyEmail({ token: verificationToken }),
   );
-
-  const runSignIn = yield* confirmStep("Step 3: sign in and create a session?");
-  if (!runSignIn) {
-    return yield* skippedStep({
-      event: "effect_auth_cli_step",
-      service: "effect-auth-example",
-      command: "demo",
-      run_id: runId,
-      step: "sign_in",
-      user: { id: verified.user.id, email: String(verified.user.email) },
-      next_action: "Run sign-in before reading the current session.",
-    });
-  }
 
   const signedIn = yield* timedStep(
     {
-      event: "effect_auth_cli_step",
+      event: "effect_auth_minimal_step",
       service: "effect-auth-example",
-      command: "demo",
+      flow: "minimal",
       run_id: runId,
       step: "sign_in",
       user: { id: verified.user.id, email: String(verified.user.email) },
-      next_action: "Read the current session using the issued session token.",
     },
     auth.signIn({ email, password }),
   );
 
-  const runCurrentSession = yield* confirmStep("Step 4: read the current session?");
-  if (!runCurrentSession) {
-    return yield* skippedStep({
-      event: "effect_auth_cli_step",
-      service: "effect-auth-example",
-      command: "demo",
-      run_id: runId,
-      step: "current_session",
-      user: { id: signedIn.user.id, email: String(signedIn.user.email) },
-      auth: {
-        session_id: signedIn.session.id,
-        session_token_preview: preview(Redacted.value(signedIn.sessionToken)),
-      },
-      next_action: "Run current-session lookup to complete the flow.",
-    });
-  }
-
-  const current = yield* timedStep(
-    {
-      event: "effect_auth_cli_step",
-      service: "effect-auth-example",
-      command: "demo",
-      run_id: runId,
-      step: "current_session",
-      user: { id: signedIn.user.id, email: String(signedIn.user.email) },
-      auth: {
-        session_id: signedIn.session.id,
-        session_token_preview: preview(Redacted.value(signedIn.sessionToken)),
-      },
-    },
-    auth.currentSession({ sessionToken: signedIn.sessionToken }),
-  );
+  const currentSessionStartedAt = yield* Clock.currentTimeMillis;
+  const current = yield* auth.currentSession({ sessionToken: signedIn.sessionToken });
+  const currentSessionEndedAt = yield* Clock.currentTimeMillis;
 
   yield* logStep({
-    event: "effect_auth_cli_step",
+    event: "effect_auth_minimal_step",
     service: "effect-auth-example",
-    command: "demo",
+    flow: "minimal",
     run_id: runId,
     step: "current_session",
     outcome: "success",
-    duration_ms: 0,
+    duration_ms: currentSessionEndedAt - currentSessionStartedAt,
     user: { id: signedIn.user.id, email: String(signedIn.user.email) },
     auth: {
       session_id: current.session.id,
@@ -218,17 +208,4 @@ const demoProgram = Effect.gen(function* () {
   });
 }).pipe(Effect.provide(appLayer));
 
-const demo = Command.make("demo", {}, () => demoProgram).pipe(
-  Command.withDescription("Walk through sign-up, verification, sign-in, and session lookup."),
-);
-
-const cli = Command.make("effect-auth-example", {}, () =>
-  Console.log("Run `bun run demo` to manually step through the auth flow."),
-).pipe(
-  Command.withDescription("Minimal effect-auth CLI example."),
-  Command.withSubcommands([demo]),
-);
-
-const main = Command.run(cli, { version: "0.1.0" }).pipe(Effect.provide(BunServices.layer));
-
-Effect.runPromise(main);
+Effect.runPromise(demoProgram);

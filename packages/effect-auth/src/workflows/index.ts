@@ -11,7 +11,7 @@ import {
   type NormalizedEmail,
   type PublicAuthError,
 } from "../domain/index.js";
-import { AuthEmail, type AuthEmailFailure } from "../email/mock.js";
+import { AuthEmail, type AuthEmailFailure } from "../email/index.js";
 import {
   PasswordHasher,
   PasswordPolicy,

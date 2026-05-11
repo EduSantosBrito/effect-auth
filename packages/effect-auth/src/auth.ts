@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect";
 import { AuthBoundaryLive, type BoundaryParseError, type PublicAuthError } from "./domain/index.js";
-import { AuthEmail, type AuthEmailFailure } from "./email/mock.js";
+import { AuthEmail, type AuthEmailFailure } from "./email/index.js";
 import {
   NativeScryptPasswordHasher,
   SecureDefaultPasswordPolicy,

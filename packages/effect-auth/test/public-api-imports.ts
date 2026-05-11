@@ -34,13 +34,9 @@ import {
 import {
   AuthEmail,
   AuthEmailFailure,
-  MockAuthEmail,
-  makeMockAuthEmail,
-  makeMockAuthEmailState,
   type AuthEmailShape,
-  type MockAuthEmailState,
   type SentAuthEmail,
-} from "effect-auth/email/mock";
+} from "effect-auth/email";
 import {
   AuthApi,
   AuthApiEndpoints,
@@ -129,12 +125,6 @@ import {
   type VerificationTokenPurpose,
 } from "effect-auth/storage";
 import {
-  DevMemoryAuthStorage,
-  makeDevMemoryStorage,
-  makeDevMemoryStorageState,
-  type DevMemoryStorageState,
-} from "effect-auth/storage/dev-memory";
-import {
   AuthToken,
   AuthTokenLive,
   SessionToken,
@@ -180,15 +170,7 @@ type PublicApiContract = {
     | typeof unauthorized
     | AuthBoundaryShape
     | NormalizedEmail;
-  readonly email:
-    | typeof AuthEmail
-    | typeof AuthEmailFailure
-    | typeof MockAuthEmail
-    | typeof makeMockAuthEmail
-    | typeof makeMockAuthEmailState
-    | AuthEmailShape
-    | MockAuthEmailState
-    | SentAuthEmail;
+  readonly email: typeof AuthEmail | typeof AuthEmailFailure | AuthEmailShape | SentAuthEmail;
   readonly http:
     | typeof AuthApi
     | typeof AuthApiEndpoints
@@ -272,11 +254,6 @@ type PublicApiContract = {
     | UpdatePasswordHash
     | VerificationTokenLookup
     | VerificationTokenPurpose;
-  readonly devMemoryStorage:
-    | typeof DevMemoryAuthStorage
-    | typeof makeDevMemoryStorage
-    | typeof makeDevMemoryStorageState
-    | DevMemoryStorageState;
   readonly token:
     | typeof AuthToken
     | typeof AuthTokenLive
