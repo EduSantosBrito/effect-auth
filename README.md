@@ -1,31 +1,51 @@
 # effect-auth
 
-TypeScript SDK for `effect-auth`, built with Bun.
+Backend-first email/password auth for Effect applications.
 
-## Imports
+## Backend DX
 
 ```ts
-import { AuthBoundaryLive, PublicAuthError } from "effect-auth/domain";
+import { Effect, Layer, Option } from "effect";
+import { Auth, AuthLive } from "effect-auth";
 import {
-  makeNativeScryptPasswordHasher,
-  NativeScryptPasswordHasher,
-  SecureDefaultPasswordPolicy,
-} from "effect-auth/password";
-import { AuthTokenLive } from "effect-auth/token";
-import { AuthStorage } from "effect-auth/storage";
-import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
-import { MockAuthEmail } from "effect-auth/email/mock";
-import { BoundedDevRateLimiter, PermissiveDevRateLimiter } from "effect-auth/rate-limit";
-import {
-  EmailPasswordWorkflowsLive,
-  PasswordRecoveryWorkflowsLive,
-  SessionWorkflowsLive,
-} from "effect-auth/workflows";
-import { AuthApi, AuthHttpAdapter, AuthHttpHandlersLive, TrustedOrigins } from "effect-auth/http";
+  AuthHttp,
+  AuthHttpConfig,
+  AuthSession,
+  CurrentAuthSession,
+} from "effect-auth/http";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
+
+const appLayer = Layer.mergeAll(
+  AuthLive.default,
+  AuthHttpConfig.layer({
+    trustedOrigins: ["https://app.example.com"],
+  }),
+).pipe(
+  Layer.provide(PostgresAuthStorage),
+  Layer.provide(ResendAuthEmail),
+);
+
+const app = HttpRouter.layer.pipe(
+  AuthHttp.mount({ basePath: "/api/auth" }),
+);
+
+const protectedProgram = Effect.gen(function* () {
+  const authSession = yield* AuthSession;
+  return authSession.user;
+}).pipe(AuthHttp.requireAuth);
+
+const navbarProgram = Effect.gen(function* () {
+  const current = yield* CurrentAuthSession;
+  return Option.match(current, {
+    onNone: () => ({ signedIn: false }),
+    onSome: ({ user }) => ({ signedIn: true, user }),
+  });
+}).pipe(AuthHttp.optionalAuth);
 ```
 
-The root module intentionally stays minimal. Use deep imports for stable service contracts,
-schemas, public errors, workflow layers, and explicitly named dev/mock layers.
+`AuthLive.default` wires boundary parsing, secure password policy, native scrypt hashing, token generation, rate limiting, and the flat `Auth` service. Applications still provide storage and email explicitly.
+
+Mounted browser sign-in sets an HttpOnly SameSite=Lax session cookie and does not return session tokens in JSON. Programmatic `Auth.signIn` returns a redacted session token for server-owned bearer/API flows.
 
 ## Scripts
 
