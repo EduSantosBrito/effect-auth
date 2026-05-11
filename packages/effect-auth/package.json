@@ -42,10 +42,6 @@
       "types": "./dist/rate-limit/index.d.ts",
       "import": "./dist/rate-limit/index.js"
     },
-    "./workflows": {
-      "types": "./dist/workflows/index.d.ts",
-      "import": "./dist/workflows/index.js"
-    },
     "./http": {
       "types": "./dist/http/index.d.ts",
       "import": "./dist/http/index.js"

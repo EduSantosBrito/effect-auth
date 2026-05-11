@@ -31,11 +31,6 @@ import type { RateLimiter } from "effect-auth/rate-limit";
 import type { AuthStorage } from "effect-auth/storage";
 import type { DevMemoryStorageState } from "effect-auth/storage/dev-memory";
 import type { AuthToken, SessionToken } from "effect-auth/token";
-import type {
-  EmailPasswordWorkflows,
-  PasswordRecoveryWorkflows,
-  SessionWorkflows,
-} from "effect-auth/workflows";
 
 type DocumentedImportsCompile = {
   readonly root: PublicAuthError;
@@ -48,7 +43,6 @@ type DocumentedImportsCompile = {
   readonly storage: AuthStorage | DevMemoryStorageState;
   readonly email: AuthEmail | SentAuthEmail;
   readonly rateLimit: RateLimiter;
-  readonly workflows: EmailPasswordWorkflows | SessionWorkflows | PasswordRecoveryWorkflows;
   readonly http:
     | typeof AuthApi
     | typeof AuthHttp

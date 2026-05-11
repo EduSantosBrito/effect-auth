@@ -1,22 +1,13 @@
 import { BunServices } from "@effect/platform-bun";
 import { Clock, Console, Effect, Layer, Redacted, Schema } from "effect";
 import { Command, Prompt } from "effect/unstable/cli";
-import { AuthBoundaryLive } from "effect-auth/domain";
+import { Auth, AuthLive } from "effect-auth";
 import {
   makeMockAuthEmailState,
   MockAuthEmail,
   type SentAuthEmail,
 } from "effect-auth/email/mock";
-import { NativeScryptPasswordHasher, SecureDefaultPasswordPolicy } from "effect-auth/password";
-import { PermissiveDevRateLimiter } from "effect-auth/rate-limit";
 import { DevMemoryAuthStorage, makeDevMemoryStorageState } from "effect-auth/storage/dev-memory";
-import { AuthTokenLive } from "effect-auth/token";
-import {
-  EmailPasswordWorkflows,
-  EmailPasswordWorkflowsLive,
-  SessionWorkflows,
-  SessionWorkflowsLive,
-} from "effect-auth/workflows";
 
 class ExampleFailure extends Schema.TaggedErrorClass<ExampleFailure>()("ExampleFailure", {
   reason: Schema.String,
@@ -47,18 +38,13 @@ interface StepEvent {
 const storageState = makeDevMemoryStorageState();
 const emailState = makeMockAuthEmailState();
 
-const dependencies = Layer.mergeAll(
-  AuthBoundaryLive,
-  SecureDefaultPasswordPolicy,
-  NativeScryptPasswordHasher,
-  AuthTokenLive,
-  DevMemoryAuthStorage(storageState),
-  MockAuthEmail(emailState),
-  PermissiveDevRateLimiter,
-);
-
-const appLayer = Layer.mergeAll(EmailPasswordWorkflowsLive, SessionWorkflowsLive).pipe(
-  Layer.provideMerge(dependencies),
+const appLayer = AuthLive.default.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      DevMemoryAuthStorage(storageState),
+      MockAuthEmail(emailState),
+    ),
+  ),
 );
 
 const preview = (value: string): string => `${value.slice(0, 8)}...`;
@@ -98,8 +84,7 @@ const skippedStep = (event: Omit<StepEvent, "duration_ms" | "outcome">) =>
 const demoProgram = Effect.gen(function* () {
   const startedAt = yield* Clock.currentTimeMillis;
   const runId = `auth_demo_${startedAt}`;
-  const emailPassword = yield* EmailPasswordWorkflows;
-  const sessions = yield* SessionWorkflows;
+  const auth = yield* Auth;
   const email = "demo@example.com";
   const password = "correct horse battery staple";
 
@@ -125,7 +110,7 @@ const demoProgram = Effect.gen(function* () {
       user: { email },
       next_action: "Verify the email using the mock email token.",
     },
-    emailPassword.signUp({
+    auth.signUp({
       email,
       password,
       verificationCallbackUrl: new URL("http://localhost:3000/auth/verify"),
@@ -164,7 +149,7 @@ const demoProgram = Effect.gen(function* () {
       },
       next_action: "Sign in to create a session.",
     },
-    emailPassword.verifyEmail({ token: verificationEmail.token }),
+    auth.verifyEmail({ token: verificationEmail.token }),
   );
 
   const runSignIn = yield* confirmStep("Step 3: sign in and create a session?");
@@ -190,7 +175,7 @@ const demoProgram = Effect.gen(function* () {
       user: { id: verified.user.id, email: String(verified.user.email) },
       next_action: "Read the current session using the issued session token.",
     },
-    emailPassword.signIn({ email, password }),
+    auth.signIn({ email, password }),
   );
 
   const runCurrentSession = yield* confirmStep("Step 4: read the current session?");
@@ -223,7 +208,7 @@ const demoProgram = Effect.gen(function* () {
         session_token_preview: preview(Redacted.value(signedIn.sessionToken)),
       },
     },
-    sessions.currentSession({ sessionToken: signedIn.sessionToken }),
+    auth.currentSession({ sessionToken: signedIn.sessionToken }),
   );
 
   yield* logStep({
