@@ -17,13 +17,13 @@ The example logs each step as structured JSON. The email log includes the `effec
 
 Run from the repository root:
 
-```sh
+```bash
 bun run example:minimal
 ```
 
 Run the same deterministic auth flow directly:
 
-```sh
+```bash
 bun run --cwd examples/minimal demo
 ```
 

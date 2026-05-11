@@ -26,10 +26,14 @@
   "scripts": {
     "build": "bun run --cwd packages/effect-auth build",
     "check": "bun run --cwd packages/effect-auth check && bun run build && bun run --cwd examples/minimal check",
+    "changeset": "npm exec --package @changesets/cli@2.31.0 -- changeset",
+    "changeset:status": "npm exec --package @changesets/cli@2.31.0 -- changeset status",
+    "changeset:version": "npm exec --package @changesets/cli@2.31.0 -- changeset version",
     "format": "bun --bun oxfmt --write .",
     "format:check": "bun --bun oxfmt --check .",
     "knip": "bun --bun ./node_modules/.bin/knip",
     "lint": "bun --bun oxlint -c .oxlintrc.json .",
+    "package:smoke": "bun run --cwd packages/effect-auth package:smoke",
     "example:minimal": "bun run build && bun run --cwd examples/minimal start",
     "test": "bun run --cwd packages/effect-auth test",
     "prepare": "bun --bun effect-tsgo patch"

@@ -36,13 +36,13 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 
 ## Install
 
-```sh
+```bash
 bun add effect-auth effect
 ```
 
 ## Backend Usage
 
-```ts
+```typescript
 import { Effect, Layer } from "effect";
 import { Auth, AuthLive } from "effect-auth";
 
@@ -65,7 +65,7 @@ const program = Effect.gen(function* () {
 
 Token TTLs are configured at the workflow seam:
 
-```ts
+```typescript
 import { VerificationTokenConfigLive } from "effect-auth";
 
 const TokenPolicyLive = VerificationTokenConfigLive({
@@ -76,7 +76,7 @@ const TokenPolicyLive = VerificationTokenConfigLive({
 
 ## HTTP Usage
 
-```ts
+```typescript
 import { Effect, Layer, Option } from "effect";
 import { AuthLive, VerificationTokenConfigLive } from "effect-auth";
 import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession } from "effect-auth/http";
@@ -141,7 +141,7 @@ Use `AuthStorage` and `AuthEmail` to connect your own database and email provide
 
 ## Example
 
-```sh
+```bash
 bun run example:minimal
 bun run --cwd examples/minimal demo
 ```
@@ -152,7 +152,7 @@ See [`examples/minimal/README.md`](https://github.com/EduSantosBrito/effect-auth
 
 ## Development
 
-```sh
+```bash
 bun install
 bun run check
 bun run test

@@ -21,6 +21,7 @@
     "directory": "packages/effect-auth"
   },
   "files": [
+    "CHANGELOG.md",
     "dist"
   ],
   "type": "module",
@@ -63,7 +64,9 @@
     }
   },
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/"
   },
   "scripts": {
     "build": "rm -rf dist && bun --bun tsgo -p tsconfig.build.json",
@@ -71,6 +74,8 @@
     "format": "bun --bun oxfmt --write .",
     "format:check": "bun --bun oxfmt --check .",
     "lint": "bun --bun oxlint -c ../../.oxlintrc.json .",
+    "package:smoke": "bun run build && npm pack --dry-run",
+    "prepack": "bun run build",
     "test": "bun --bun vitest run --config vitest.config.ts"
   },
   "dependencies": {
