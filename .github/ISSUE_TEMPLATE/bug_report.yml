@@ -1,0 +1,67 @@
+name: Bug report
+description: Report a bug or unexpected behavior
+type: Bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug.
+
+        Please search existing issues first. Public security reports will be closed; see SECURITY.md.
+  - type: input
+    id: version
+    attributes:
+      label: effect-auth version
+      placeholder: "0.x.x"
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: Provide steps or a minimal repository.
+      placeholder: |
+        1. Configure AuthLive with ...
+        2. Call ...
+        3. Observe ...
+    validations:
+      required: true
+  - type: textarea
+    id: current-expected
+    attributes:
+      label: Current vs expected behavior
+      placeholder: I expected A, but observed B.
+    validations:
+      required: true
+  - type: textarea
+    id: system
+    attributes:
+      label: System info
+      description: Include runtime, package manager, OS, and relevant dependency versions.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      multiple: true
+      options:
+        - Workflows
+        - HTTP adapter
+        - Storage
+        - Email
+        - Password hashing
+        - Tokens
+        - Sessions
+        - Types
+        - Documentation
+        - Package
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Add logs, config snippets without secrets, or other context.

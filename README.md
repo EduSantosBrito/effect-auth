@@ -1,5 +1,10 @@
 # effect-auth
 
+[![npm version](https://img.shields.io/npm/v/effect-auth.svg)](https://www.npmjs.com/package/effect-auth)
+[![PR Check](https://github.com/EduSantosBrito/effect-auth/actions/workflows/pr.yml/badge.svg)](https://github.com/EduSantosBrito/effect-auth/actions/workflows/pr.yml)
+[![pkg.pr.new](https://pkg.pr.new/badge/EduSantosBrito/effect-auth)](https://pkg.pr.new/~/EduSantosBrito/effect-auth)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](./LICENSE)
+
 Server-side authentication for Effect applications.
 
 `effect-auth` owns authentication workflows, session issuance, token handling, and storage boundaries while keeping persistence and email delivery explicit in your app. The first supported authentication method is email/password.
@@ -156,8 +161,12 @@ bun run build
 
 ## Contributing
 
-Issues and pull requests are welcome while the API is still young. Please keep changes small, tested, and aligned with the server-side Effect model.
+Issues and PRs are welcome.
+
+For non-trivial features or API changes, please open an issue first. PRs that do not fit the project direction, maintenance budget, or current scope may be closed even if the implementation is correct.
+
+Small bug fixes, docs fixes, examples, tests, and clearly scoped improvements are the easiest to review and merge. See [CONTRIBUTING.md](./CONTRIBUTING.md).
 
 ## Security
 
-Please do not open public issues for suspected vulnerabilities. Report them privately through GitHub security advisories for this repository.
+Please do not open public issues for suspected vulnerabilities. Report them privately through GitHub security advisories for this repository. See [SECURITY.md](./SECURITY.md).

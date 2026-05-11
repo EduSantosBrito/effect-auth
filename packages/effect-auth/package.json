@@ -1,7 +1,20 @@
 {
   "name": "effect-auth",
   "version": "0.2.0",
-  "description": "TypeScript SDK for effect-auth.",
+  "description": "Server-side authentication for Effect applications.",
+  "keywords": [
+    "auth",
+    "authentication",
+    "effect",
+    "password",
+    "sessions",
+    "typescript"
+  ],
+  "homepage": "https://github.com/EduSantosBrito/effect-auth#readme",
+  "bugs": {
+    "url": "https://github.com/EduSantosBrito/effect-auth/issues"
+  },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/EduSantosBrito/effect-auth.git",
