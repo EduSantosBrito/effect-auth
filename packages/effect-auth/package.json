@@ -1,0 +1,75 @@
+{
+  "name": "effect-auth",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for effect-auth.",
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./domain": {
+      "types": "./dist/domain/index.d.ts",
+      "import": "./dist/domain/index.js"
+    },
+    "./password": {
+      "types": "./dist/password/index.d.ts",
+      "import": "./dist/password/index.js"
+    },
+    "./token": {
+      "types": "./dist/token/index.d.ts",
+      "import": "./dist/token/index.js"
+    },
+    "./storage": {
+      "types": "./dist/storage/index.d.ts",
+      "import": "./dist/storage/index.js"
+    },
+    "./storage/dev-memory": {
+      "types": "./dist/storage/dev-memory.d.ts",
+      "import": "./dist/storage/dev-memory.js"
+    },
+    "./email/mock": {
+      "types": "./dist/email/mock.d.ts",
+      "import": "./dist/email/mock.js"
+    },
+    "./rate-limit": {
+      "types": "./dist/rate-limit/index.d.ts",
+      "import": "./dist/rate-limit/index.js"
+    },
+    "./workflows": {
+      "types": "./dist/workflows/index.d.ts",
+      "import": "./dist/workflows/index.js"
+    },
+    "./http": {
+      "types": "./dist/http/index.d.ts",
+      "import": "./dist/http/index.js"
+    }
+  },
+  "scripts": {
+    "build": "bun --bun tsgo -p tsconfig.build.json",
+    "check": "bun --bun tsgo -p tsconfig.json --noEmit && bun run lint",
+    "format": "bun --bun oxfmt --ignore-path ../../.oxfmtignore --write .",
+    "format:check": "bun --bun oxfmt --ignore-path ../../.oxfmtignore --check .",
+    "lint": "bun --bun oxlint -c .oxlintrc.json .",
+    "test": "bun --bun vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "effect": "^4.0.0-beta.64"
+  },
+  "devDependencies": {
+    "@effect/tsgo": "0.5.2",
+    "@effect/vitest": "^4.0.0-beta.64",
+    "@types/bun": "latest",
+    "@typescript/native-preview": "latest",
+    "effect-rules": "0.1.0",
+    "oxfmt": "^0.48.0",
+    "oxlint": "^1.63.0",
+    "vitest": "^4.1.5"
+  }
+}

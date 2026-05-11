@@ -1,68 +1,21 @@
 {
-  "name": "effect-auth",
-  "version": "0.1.0",
-  "description": "TypeScript SDK for effect-auth.",
-  "files": [
-    "dist",
-    "!.repos"
+  "name": "effect-auth-monorepo",
+  "private": true,
+  "description": "Monorepo for effect-auth.",
+  "workspaces": [
+    "packages/*",
+    "examples/*"
   ],
   "type": "module",
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
-  "exports": {
-    ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js"
-    },
-    "./domain": {
-      "types": "./dist/domain/index.d.ts",
-      "import": "./dist/domain/index.js"
-    },
-    "./password": {
-      "types": "./dist/password/index.d.ts",
-      "import": "./dist/password/index.js"
-    },
-    "./token": {
-      "types": "./dist/token/index.d.ts",
-      "import": "./dist/token/index.js"
-    },
-    "./storage": {
-      "types": "./dist/storage/index.d.ts",
-      "import": "./dist/storage/index.js"
-    },
-    "./storage/dev-memory": {
-      "types": "./dist/storage/dev-memory.d.ts",
-      "import": "./dist/storage/dev-memory.js"
-    },
-    "./email/mock": {
-      "types": "./dist/email/mock.d.ts",
-      "import": "./dist/email/mock.js"
-    },
-    "./rate-limit": {
-      "types": "./dist/rate-limit/index.d.ts",
-      "import": "./dist/rate-limit/index.js"
-    },
-    "./workflows": {
-      "types": "./dist/workflows/index.d.ts",
-      "import": "./dist/workflows/index.js"
-    },
-    "./http": {
-      "types": "./dist/http/index.d.ts",
-      "import": "./dist/http/index.js"
-    }
-  },
   "scripts": {
-    "build": "bun --bun tsgo -p tsconfig.build.json",
-    "check": "bun --bun tsgo -p tsconfig.json --noEmit && bun run lint",
+    "build": "bun run --cwd packages/effect-auth build",
+    "check": "bun run --cwd packages/effect-auth check && bun run --cwd examples/minimal check",
     "format": "bun --bun oxfmt --ignore-path .oxfmtignore --write .",
     "format:check": "bun --bun oxfmt --ignore-path .oxfmtignore --check .",
-    "lint": "bun --bun oxlint -c .oxlintrc.json .",
-    "test": "bun --bun vitest run --config vitest.config.ts",
+    "lint": "bun run --cwd packages/effect-auth lint",
+    "example:minimal": "bun run build && bun run --cwd examples/minimal start",
+    "test": "bun run --cwd packages/effect-auth test",
     "prepare": "bun --bun effect-tsgo patch"
-  },
-  "dependencies": {
-    "effect": "^4.0.0-beta.64"
   },
   "devDependencies": {
     "@effect/tsgo": "0.5.2",

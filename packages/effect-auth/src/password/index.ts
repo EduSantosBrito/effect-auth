@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Redacted, Schema } from "effect";
+import { Context, Effect, Layer, Match, Redacted, Schema } from "effect";
 import {
   randomBytes as nodeRandomBytes,
   scrypt as nodeScrypt,
@@ -52,6 +52,7 @@ const params: {
   readonly dkLen: number;
   readonly maxmem: number;
 } = { N: 16384, r: 16, p: 1, dkLen: 64, maxmem: 128 * 1024 * 1024 };
+const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 
 export interface NativeScryptRuntime {
   readonly randomBytes?: (size: number) => Buffer;
@@ -89,40 +90,52 @@ const scryptEffect = (
   dkLen: number,
 ): Effect.Effect<Buffer, PasswordHashFailure> =>
   Effect.callback<Buffer, PasswordHashFailure>((resume) => {
-    try {
-      scrypt(
-        password,
-        salt,
-        dkLen,
-        {
-          cost: options.N,
-          blockSize: options.r,
-          parallelization: options.p,
-          maxmem: options.maxmem ?? params.maxmem,
-        },
-        (error, derivedKey) => {
-          resume(
-            error
-              ? Effect.fail(new PasswordHashFailure({ reason: "HashingFailed" }))
-              : Effect.succeed(Buffer.from(derivedKey)),
-          );
-        },
-      );
-    } catch {
-      resume(Effect.fail(new PasswordHashFailure({ reason: "HashingFailed" })));
-    }
+    scrypt(
+      password,
+      salt,
+      dkLen,
+      {
+        cost: options.N,
+        blockSize: options.r,
+        parallelization: options.p,
+        maxmem: options.maxmem ?? params.maxmem,
+      },
+      (error, derivedKey) => {
+        resume(
+          error
+            ? Effect.fail(new PasswordHashFailure({ reason: "HashingFailed" }))
+            : Effect.succeed(Buffer.from(derivedKey)),
+        );
+      },
+    );
   });
+
+const validatePassword = Match.type<{
+  readonly value: string;
+  readonly email: NormalizedEmail;
+  readonly localPart: string;
+}>().pipe(
+  Match.when({ value: (value) => value.length < 12 }, () =>
+    new PasswordPolicyFailure({ reason: "TooShort" }),
+  ),
+  Match.when({ value: (value) => value.length > 128 }, () =>
+    new PasswordPolicyFailure({ reason: "TooLong" }),
+  ),
+  Match.when(({ value, email }) => value === email, () =>
+    new PasswordPolicyFailure({ reason: "MatchesEmail" }),
+  ),
+  Match.when(({ value, localPart }) => value === localPart, () =>
+    new PasswordPolicyFailure({ reason: "MatchesEmailLocalPart" }),
+  ),
+  Match.orElse(() => undefined),
+);
 
 export const SecureDefaultPasswordPolicy = Layer.succeed(PasswordPolicy)({
   validate: ({ email, password }) => {
     const value = Redacted.value(password);
     const localPart = String(email).split("@")[0] ?? "";
-    if (value.length < 12) return Effect.fail(new PasswordPolicyFailure({ reason: "TooShort" }));
-    if (value.length > 128) return Effect.fail(new PasswordPolicyFailure({ reason: "TooLong" }));
-    if (value === email) return Effect.fail(new PasswordPolicyFailure({ reason: "MatchesEmail" }));
-    if (value === localPart)
-      return Effect.fail(new PasswordPolicyFailure({ reason: "MatchesEmailLocalPart" }));
-    return Effect.void;
+    const failure = validatePassword({ value, email, localPart });
+    return failure === undefined ? Effect.void : Effect.fail(failure);
   },
 });
 
@@ -159,7 +172,7 @@ export const makeNativeScryptPasswordHasher = (
         params,
         params.dkLen,
       );
-      return yield* Schema.decodeUnknownEffect(PasswordHash)(
+      return yield* decodePasswordHash(
         `$effect-auth-scrypt$N=${params.N},r=${params.r},p=${params.p},dkLen=${params.dkLen}$${salt.toString("base64url")}$${derived.toString("base64url")}`,
       ).pipe(Effect.mapError(() => new PasswordHashFailure({ reason: "HashingFailed" })));
     }),

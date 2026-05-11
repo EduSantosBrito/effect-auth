@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Redacted, Schema } from "effect";
+import { Context, Effect, Layer, Predicate, Redacted, Schema } from "effect";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
@@ -148,11 +148,11 @@ export interface AuthHttpAdapterShape {
 export const checkTrustedOrigin = (
   origin: URL,
 ): Effect.Effect<void, PublicAuthError, TrustedOriginPolicy> =>
-  Effect.gen(function* () {
+  Effect.fn("checkTrustedOrigin")(function* () {
     const policy = yield* TrustedOriginPolicy;
     const trusted = yield* policy.isTrusted(origin);
     if (!trusted) return yield* unauthorized;
-  });
+  })();
 
 export interface OriginRequest {
   readonly headers: {
@@ -312,7 +312,7 @@ export const AuthHttpAdapter = Effect.gen(function* () {
     currentSession: (input: { readonly sessionToken: SessionTokenValue }) =>
       Effect.gen(function* () {
         const result = yield* sessions.currentSession(input);
-        if (result.tokenRotation._tag === "Rotated") {
+        if (Predicate.isTagged(result.tokenRotation, "Rotated")) {
           yield* appendCookieInstruction(makeSessionCookie(result.tokenRotation.token));
         }
         return result;
@@ -334,10 +334,9 @@ export const AuthHttpAdapter = Effect.gen(function* () {
   };
 });
 
-const decodeVerificationToken = (token: string) =>
-  Schema.decodeUnknownEffect(VerificationToken)(token);
+const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
 
-const decodeSessionToken = (token: string) => Schema.decodeUnknownEffect(SessionToken)(token);
+const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
 const signUpInput = (payload: typeof SignUpEmailPayload.Type): SignUpInput => ({
   email: payload.email,
@@ -378,124 +377,115 @@ const changePasswordInput = (
   ...(payload.ip === undefined ? {} : { ip: payload.ip }),
 });
 
-export const handleSignUpEmail = ({
+export const handleSignUpEmail = Effect.fn("handleSignUpEmail")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof SignUpEmailPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    return yield* adapter.signUpEmail(signUpInput(payload));
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  return yield* adapter.signUpEmail(signUpInput(payload));
+});
 
-export const handleVerifyEmail = ({
+export const handleVerifyEmail = Effect.fn("handleVerifyEmail")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof VerifyEmailPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    const token = yield* decodeVerificationToken(payload.token);
-    return yield* adapter.verifyEmail({ token });
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const token = yield* decodeVerificationToken(payload.token);
+  return yield* adapter.verifyEmail({ token });
+});
 
-export const handleResendVerification = ({
+export const handleResendVerification = Effect.fn("handleResendVerification")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof ResendVerificationPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    return yield* adapter.resendVerification(resendVerificationInput(payload));
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  return yield* adapter.resendVerification(resendVerificationInput(payload));
+});
 
-export const handleSignInEmail = ({
+export const handleSignInEmail = Effect.fn("handleSignInEmail")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof SignInEmailPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    return yield* adapter.signInEmail(signInInput(payload));
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  return yield* adapter.signInEmail(signInInput(payload));
+});
 
-export const handleCurrentSession = ({
+export const handleCurrentSession = Effect.fn("handleCurrentSession")(function* ({
   query,
 }: {
   readonly query: typeof CurrentSessionQuery.Type;
-}) =>
-  Effect.gen(function* () {
-    const adapter = yield* AuthHttpAdapter;
-    const sessionToken = yield* decodeSessionToken(query.sessionToken);
-    return yield* adapter.currentSession({ sessionToken });
-  });
+}) {
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(query.sessionToken);
+  return yield* adapter.currentSession({ sessionToken });
+});
 
-export const handleSignOut = ({
+export const handleSignOut = Effect.fn("handleSignOut")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof SessionTokenPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    const sessionToken = yield* decodeSessionToken(payload.sessionToken);
-    return yield* adapter.signOut({ sessionToken });
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  return yield* adapter.signOut({ sessionToken });
+});
 
-export const handleRequestPasswordReset = ({
+export const handleRequestPasswordReset = Effect.fn("handleRequestPasswordReset")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof RequestPasswordResetPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    return yield* adapter.requestPasswordReset(requestPasswordResetInput(payload));
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  return yield* adapter.requestPasswordReset(requestPasswordResetInput(payload));
+});
 
-export const handleCompletePasswordReset = ({
+export const handleCompletePasswordReset = Effect.fn("handleCompletePasswordReset")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof CompletePasswordResetPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    const token = yield* decodeVerificationToken(payload.token);
-    return yield* adapter.completePasswordReset({ token, password: payload.password });
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const token = yield* decodeVerificationToken(payload.token);
+  return yield* adapter.completePasswordReset({ token, password: payload.password });
+});
 
-export const handleChangePassword = ({
+export const handleChangePassword = Effect.fn("handleChangePassword")(function* ({
   payload,
   request,
 }: {
   readonly payload: typeof ChangePasswordPayload.Type;
   readonly request: OriginRequest;
-}) =>
-  Effect.gen(function* () {
-    yield* checkTrustedRequestOrigin(request);
-    const adapter = yield* AuthHttpAdapter;
-    const sessionToken = yield* decodeSessionToken(payload.sessionToken);
-    return yield* adapter.changePassword(changePasswordInput(payload, sessionToken));
-  });
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  return yield* adapter.changePassword(changePasswordInput(payload, sessionToken));
+});
 
 export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handlers) =>
   handlers

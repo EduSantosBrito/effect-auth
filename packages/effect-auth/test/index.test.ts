@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Predicate from "effect/Predicate";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 import * as Cookies from "effect/unstable/http/Cookies";
@@ -11,6 +12,7 @@ import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import {
   AuthBoundary,
   AuthBoundaryLive,
+  invalidToken,
   invalidCredentials,
   rateLimited,
   unauthorized,
@@ -42,6 +44,7 @@ import {
   NativeScryptPasswordHasher,
   PasswordHash,
   PasswordHasher,
+  PasswordPolicyFailure,
   type PasswordHasherShape,
   PasswordPolicy,
   SecureDefaultPasswordPolicy,
@@ -58,6 +61,7 @@ import {
   makeDevMemoryStorageState,
   DevMemoryAuthStorage,
 } from "../src/storage/dev-memory";
+import { AuthStorageFailure } from "../src/storage/index";
 import { AuthToken, AuthTokenLive, type SessionToken } from "../src/token/index";
 import {
   EmailPasswordWorkflows,
@@ -73,6 +77,13 @@ import {
   makeMockAuthEmailState,
   MockAuthEmail,
 } from "../src/email/mock";
+
+class MissingFixture extends Schema.TaggedErrorClass<MissingFixture>()("MissingFixture", {
+  message: Schema.String,
+}) {}
+
+const missingFixture = (message: string) => new MissingFixture({ message });
+const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 
 const makeWorkflowLayer = () => {
   const storageState = makeDevMemoryStorageState();
@@ -118,7 +129,7 @@ it.effect("rejects invalid email at the boundary", () =>
     const exit = yield* Effect.exit(normalizeEmail("not-an-email"));
 
     assert.strictEqual(exit._tag, "Failure");
-    if (exit._tag === "Failure") {
+    if (Predicate.isTagged(exit, "Failure")) {
       assert.equal(String(exit.cause).includes("BoundaryParseError"), true);
     }
   }),
@@ -147,7 +158,7 @@ it.effect("native scrypt hasher verifies correct passwords and rejects wrong pas
       const hasher = yield* PasswordHasher;
       const hash = yield* hasher.hash(password);
       const secondHash = yield* hasher.hash(password);
-      const malformedHash = yield* Schema.decodeUnknownEffect(PasswordHash)("not-a-phc-hash");
+      const malformedHash = yield* decodePasswordHash("not-a-phc-hash");
       return {
         hash,
         secondHash,
@@ -171,7 +182,7 @@ it.effect("native scrypt hasher fails explicitly on unsupported runtimes", () =>
   Effect.gen(function* () {
     const password = yield* normalizePassword("correct horse battery staple");
     const hasher = makeNativeScryptPasswordHasher({});
-    const placeholder = yield* Schema.decodeUnknownEffect(PasswordHash)(
+    const placeholder = yield* decodePasswordHash(
       "$effect-auth-scrypt$N=16384,r=16,p=1,dkLen=64$c2FsdA$ZGVyaXZlZA",
     );
     const hashFailure = yield* Effect.flip(hasher.hash(password));
@@ -383,7 +394,7 @@ it.effect("email password workflows verify email before issuing sessions", () =>
 
     assert.strictEqual(emailState.sent.length, 1);
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     assert.strictEqual(verification.kind, "EmailVerification");
 
     const unverified = yield* Effect.exit(
@@ -427,11 +438,9 @@ it.effect(
         }),
       );
       const sent = emailState.sent[0];
-      if (!sent) return yield* Effect.die("missing verification email");
+      if (!sent) return yield* missingFixture("missing verification email");
 
-      assert.strictEqual(duplicate._tag, "AuthStorageFailure");
-      assert.equal("reason" in duplicate, true);
-      if ("reason" in duplicate) assert.strictEqual(duplicate.reason, "Conflict");
+      assert.deepStrictEqual(duplicate, new AuthStorageFailure({ reason: "Conflict" }));
       assert.equal(String(sent.token).includes(Redacted.value(sent.token)), false);
     }).pipe(Effect.provide(layer));
   },
@@ -467,18 +476,14 @@ it.effect("auth email port preserves typed delivery failures", () => {
       }),
     );
 
-    assert.strictEqual(failed._tag, "AuthEmailFailure");
-    assert.equal("reason" in failed, true);
-    if ("reason" in failed) assert.strictEqual(failed.reason, "DeliveryUnavailable");
+    assert.deepStrictEqual(failed, new AuthEmailFailure({ reason: "DeliveryUnavailable" }));
     const resendFailed = yield* Effect.flip(
       emailPassword.resendVerification({
         email: "delivery@example.com",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       }),
     );
-    assert.strictEqual(resendFailed._tag, "AuthEmailFailure");
-    assert.equal("reason" in resendFailed, true);
-    if ("reason" in resendFailed) assert.strictEqual(resendFailed.reason, "DeliveryUnavailable");
+    assert.deepStrictEqual(resendFailed, new AuthEmailFailure({ reason: "DeliveryUnavailable" }));
   }).pipe(Effect.provide(layer));
 });
 
@@ -492,13 +497,12 @@ it.effect("verify and resend cover expired tokens and already-verified no-op", (
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     for (const [key, token] of storageState.tokensByHash) {
       storageState.tokensByHash.set(key, { ...token, expiresAt: 0 });
     }
     const expired = yield* Effect.flip(emailPassword.verifyEmail({ token: verification.token }));
-    assert.equal("code" in expired, true);
-    if ("code" in expired) assert.strictEqual(expired.code, "InvalidToken");
+    assert.deepStrictEqual(expired, invalidToken);
 
     yield* emailPassword.signUp({
       email: "verified@example.com",
@@ -506,7 +510,7 @@ it.effect("verify and resend cover expired tokens and already-verified no-op", (
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verifiedToken = emailState.sent[1];
-    if (!verifiedToken) return yield* Effect.die("missing second verification email");
+    if (!verifiedToken) return yield* missingFixture("missing second verification email");
     yield* emailPassword.verifyEmail({ token: verifiedToken.token });
     yield* emailPassword.resendVerification({
       email: "verified@example.com",
@@ -564,14 +568,10 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
       }),
     );
 
-    assert.equal("code" in signUp, true);
-    assert.equal("code" in signIn, true);
-    assert.equal("code" in resend, true);
-    assert.equal("code" in reset, true);
-    if ("code" in signUp) assert.strictEqual(signUp.code, "RateLimited");
-    if ("code" in signIn) assert.strictEqual(signIn.code, "RateLimited");
-    if ("code" in resend) assert.strictEqual(resend.code, "RateLimited");
-    if ("code" in reset) assert.strictEqual(reset.code, "RateLimited");
+    assert.deepStrictEqual(signUp, rateLimited);
+    assert.deepStrictEqual(signIn, rateLimited);
+    assert.deepStrictEqual(resend, rateLimited);
+    assert.deepStrictEqual(reset, rateLimited);
   }).pipe(Effect.provide(layer));
 });
 
@@ -615,7 +615,7 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
 
     const missing = yield* Effect.flip(
@@ -631,10 +631,8 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
       }),
     );
 
-    assert.equal("code" in missing, true);
-    assert.equal("code" in wrong, true);
-    if ("code" in missing) assert.strictEqual(missing.code, "InvalidCredentials");
-    if ("code" in wrong) assert.strictEqual(wrong.code, "InvalidCredentials");
+    assert.deepStrictEqual(missing, invalidCredentials);
+    assert.deepStrictEqual(wrong, invalidCredentials);
     assert.strictEqual(hashCalls, 2);
     assert.strictEqual(verifyCalls, 1);
   }).pipe(Effect.provide(layer));
@@ -651,7 +649,7 @@ it.effect("session workflow rotates stale sessions and sign-out revokes them", (
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
     const signedIn = yield* emailPassword.signIn({
       email: "session@example.com",
@@ -669,7 +667,9 @@ it.effect("session workflow rotates stale sessions and sign-out revokes them", (
     }
     const rotated = yield* sessions.currentSession({ sessionToken: signedIn.sessionToken });
     assert.strictEqual(rotated.tokenRotation._tag, "Rotated");
-    if (rotated.tokenRotation._tag !== "Rotated") return yield* Effect.die("missing rotation");
+    if (!Predicate.isTagged(rotated.tokenRotation, "Rotated")) {
+      return yield* missingFixture("missing rotation");
+    }
 
     yield* sessions.signOut({ sessionToken: rotated.tokenRotation.token });
     const signedOut = yield* Effect.exit(
@@ -691,7 +691,7 @@ it.effect("password reset revokes sessions and password change rotates current s
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
     const firstSession = yield* emailPassword.signIn({
       email: "reset@example.com",
@@ -709,7 +709,7 @@ it.effect("password reset revokes sessions and password change rotates current s
       resetCallbackUrl: new URL("https://app.example.com/reset"),
     });
     const resetEmail = emailState.sent[1];
-    if (!resetEmail) return yield* Effect.die("missing reset email");
+    if (!resetEmail) return yield* missingFixture("missing reset email");
     const weakReset = yield* Effect.exit(
       recovery.resetPassword({
         token: resetEmail.token,
@@ -766,7 +766,7 @@ it.effect("password reset rejects expired and consumed tokens", () => {
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
 
     yield* recovery.requestPasswordReset({
@@ -774,7 +774,7 @@ it.effect("password reset rejects expired and consumed tokens", () => {
       resetCallbackUrl: new URL("https://app.example.com/reset"),
     });
     const expiredEmail = emailState.sent[1];
-    if (!expiredEmail) return yield* Effect.die("missing reset email");
+    if (!expiredEmail) return yield* missingFixture("missing reset email");
     for (const [key, token] of storageState.tokensByHash) {
       if (token.purpose === "PasswordReset")
         storageState.tokensByHash.set(key, { ...token, expiresAt: 0 });
@@ -791,7 +791,7 @@ it.effect("password reset rejects expired and consumed tokens", () => {
       resetCallbackUrl: new URL("https://app.example.com/reset"),
     });
     const consumedEmail = emailState.sent[2];
-    if (!consumedEmail) return yield* Effect.die("missing consumed reset email");
+    if (!consumedEmail) return yield* missingFixture("missing consumed reset email");
     yield* recovery.resetPassword({
       token: consumedEmail.token,
       password: "new correct horse battery",
@@ -803,10 +803,8 @@ it.effect("password reset rejects expired and consumed tokens", () => {
       }),
     );
 
-    assert.equal("code" in expired, true);
-    assert.equal("code" in consumed, true);
-    if ("code" in expired) assert.strictEqual(expired.code, "InvalidToken");
-    if ("code" in consumed) assert.strictEqual(consumed.code, "InvalidToken");
+    assert.deepStrictEqual(expired, invalidToken);
+    assert.deepStrictEqual(consumed, invalidToken);
   }).pipe(Effect.provide(layer));
 });
 
@@ -824,7 +822,7 @@ it.effect(
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       });
       const verification = emailState.sent[0];
-      if (!verification) return yield* Effect.die("missing verification email");
+      if (!verification) return yield* missingFixture("missing verification email");
       yield* emailPassword.verifyEmail({ token: verification.token });
       const signedIn = yield* emailPassword.signIn({
         email: "change-failures@example.com",
@@ -863,14 +861,10 @@ it.effect(
         }),
       );
 
-      assert.equal("code" in unauthenticated, true);
-      assert.equal("code" in wrongPassword, true);
-      assert.equal("reason" in weakPassword, true);
-      assert.equal("code" in expiredSession, true);
-      if ("code" in unauthenticated) assert.strictEqual(unauthenticated.code, "Unauthorized");
-      if ("code" in wrongPassword) assert.strictEqual(wrongPassword.code, "InvalidCredentials");
-      if ("reason" in weakPassword) assert.strictEqual(weakPassword.reason, "TooShort");
-      if ("code" in expiredSession) assert.strictEqual(expiredSession.code, "Unauthorized");
+      assert.deepStrictEqual(unauthenticated, unauthorized);
+      assert.deepStrictEqual(wrongPassword, invalidCredentials);
+      assert.deepStrictEqual(weakPassword, new PasswordPolicyFailure({ reason: "TooShort" }));
+      assert.deepStrictEqual(expiredSession, unauthorized);
     }).pipe(Effect.provide(layer));
   },
 );
@@ -907,8 +901,7 @@ it.effect("password change checks rate limits before session lookup", () => {
       }),
     );
 
-    assert.equal("code" in limited, true);
-    if ("code" in limited) assert.strictEqual(limited.code, "RateLimited");
+    assert.deepStrictEqual(limited, rateLimited);
   }).pipe(Effect.provide(layer));
 });
 
@@ -956,7 +949,7 @@ it.effect("http adapter appends rotated session cookies to handled responses", (
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
     const signedIn = yield* emailPassword.signIn({
       email: "http-cookie@example.com",
@@ -1005,7 +998,7 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* emailPassword.verifyEmail({ token: verification.token });
 
     const signInCookies: Array<string> = [];
@@ -1029,7 +1022,7 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
         HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
       ),
     );
-    if (!signedInToken) return yield* Effect.die("missing signed-in token");
+    if (!signedInToken) return yield* missingFixture("missing signed-in token");
     const sessionToken = signedInToken;
 
     const signOutCookies: Array<string> = [];
@@ -1072,7 +1065,7 @@ it.effect("http adapter delegates password reset and password change behavior", 
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* adapter.verifyEmail({ token: verification.token });
 
     yield* adapter.requestPasswordReset({
@@ -1080,7 +1073,7 @@ it.effect("http adapter delegates password reset and password change behavior", 
       resetCallbackUrl: new URL("https://app.example.com/reset"),
     });
     const reset = emailState.sent[1];
-    if (!reset) return yield* Effect.die("missing reset email");
+    if (!reset) return yield* missingFixture("missing reset email");
     assert.strictEqual(reset.kind, "PasswordReset");
 
     yield* adapter.completePasswordReset({
@@ -1125,7 +1118,7 @@ it.effect("http handler functions exercise auth and session endpoints", () => {
       },
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* handleVerifyEmail({
       request,
       payload: { token: Redacted.value(verification.token) },
@@ -1155,7 +1148,7 @@ it.effect("http handler functions exercise auth and session endpoints", () => {
         HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
       ),
     );
-    if (!sessionTokenText) return yield* Effect.die("missing handler session token");
+    if (!sessionTokenText) return yield* missingFixture("missing handler session token");
     const sessionTokenTextValue = sessionTokenText;
 
     const unchangedCookies: Array<string> = [];
@@ -1198,7 +1191,7 @@ it.effect("http handler functions exercise auth and session endpoints", () => {
       ),
     );
     const rotatedTokenText = rotatedCookies[0]?.match(/^effect_auth_session=([^;]+)/u)?.[1];
-    if (!rotatedTokenText) return yield* Effect.die("missing rotated handler cookie");
+    if (!rotatedTokenText) return yield* missingFixture("missing rotated handler cookie");
 
     const signOutCookies: Array<string> = [];
     yield* HttpEffect.toHandled(
@@ -1240,7 +1233,7 @@ it.effect("http handler functions exercise password reset and change endpoints",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
-    if (!verification) return yield* Effect.die("missing verification email");
+    if (!verification) return yield* missingFixture("missing verification email");
     yield* handleVerifyEmail({
       request,
       payload: { token: Redacted.value(verification.token) },
@@ -1254,7 +1247,7 @@ it.effect("http handler functions exercise password reset and change endpoints",
       },
     });
     const reset = emailState.sent[1];
-    if (!reset) return yield* Effect.die("missing reset email");
+    if (!reset) return yield* missingFixture("missing reset email");
     yield* handleCompletePasswordReset({
       request,
       payload: {
@@ -1292,7 +1285,7 @@ it.effect("http handler functions exercise password reset and change endpoints",
         HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
       ),
     );
-    if (!changedToken) return yield* Effect.die("missing changed handler session token");
+    if (!changedToken) return yield* missingFixture("missing changed handler session token");
     const current = yield* sessions.currentSession({ sessionToken: changedToken });
 
     assert.strictEqual(current.session.userId, signedIn.user.id);

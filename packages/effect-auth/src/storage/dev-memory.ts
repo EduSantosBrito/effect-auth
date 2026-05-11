@@ -90,17 +90,19 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
   findVerificationToken: (input) => findUsableVerificationToken(state, input),
   consumeVerificationToken: ({ purpose, tokenHash, now }) =>
     findUsableVerificationToken(state, { purpose, tokenHash, now }).pipe(
-      Effect.map(({ user, credential }) => {
+      Effect.flatMap(({ user, credential }) =>
+        Effect.suspend(() => {
         const record = state.tokensByHash.get(tokenKey(tokenHash));
-        if (!record) throw new Error("verification token disappeared during consume");
+        if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
         record.consumedAt = now;
         const consumedCredential =
           purpose === "EmailVerification"
             ? { ...credential, emailVerified: true, updatedAt: now }
             : credential;
         state.credentialsByEmail.set(String(record.email), consumedCredential);
-        return { user, credential: consumedCredential };
-      }),
+          return Effect.succeed({ user, credential: consumedCredential });
+        }),
+      ),
     ),
   createSession: ({ userId, tokenHash, expiresAt, now }) =>
     Effect.sync(() => {

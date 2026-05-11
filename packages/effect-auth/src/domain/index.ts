@@ -68,6 +68,10 @@ export class AuthBoundary extends Context.Service<AuthBoundary, AuthBoundaryShap
 ) {}
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
+const decodeNormalizedEmail = Schema.decodeUnknownEffect(NormalizedEmail);
+const decodePasswordText = Schema.decodeUnknownEffect(PasswordText);
+const decodeCallbackUrl = Schema.decodeUnknownEffect(CallbackUrl);
+const decodeOriginUrl = Schema.decodeUnknownEffect(OriginUrl);
 
 export const normalizeEmail = (
   input: unknown,
@@ -77,7 +81,7 @@ export const normalizeEmail = (
     : Effect.suspend(() => {
         const normalized = input.trim().toLowerCase();
         return normalized.length > 0 && emailPattern.test(normalized)
-          ? Schema.decodeUnknownEffect(NormalizedEmail)(normalized).pipe(
+          ? decodeNormalizedEmail(normalized).pipe(
               Effect.mapError(
                 () => new BoundaryParseError({ field: "email", reason: "Invalid email" }),
               ),
@@ -90,7 +94,7 @@ export const normalizePassword = (
 ): Effect.Effect<PasswordText, BoundaryParseError> =>
   typeof input !== "string"
     ? Effect.fail(new BoundaryParseError({ field: "password", reason: "Expected string" }))
-    : Schema.decodeUnknownEffect(PasswordText)(input.normalize("NFKC")).pipe(
+    : decodePasswordText(input.normalize("NFKC")).pipe(
         Effect.mapError(
           () => new BoundaryParseError({ field: "password", reason: "Invalid password" }),
         ),
@@ -101,7 +105,7 @@ export const parseCallbackUrl = (input: unknown): Effect.Effect<CallbackUrl, Bou
     try: () => (input instanceof URL ? input : new URL(String(input))),
     catch: () => new BoundaryParseError({ field: "callbackUrl", reason: "Invalid URL" }),
   }).pipe(
-    Effect.flatMap((url) => Schema.decodeUnknownEffect(CallbackUrl)(url)),
+    Effect.flatMap(decodeCallbackUrl),
     Effect.mapError(() => new BoundaryParseError({ field: "callbackUrl", reason: "Invalid URL" })),
   );
 
@@ -110,7 +114,7 @@ export const parseOrigin = (input: unknown): Effect.Effect<OriginUrl, BoundaryPa
     try: () => (input instanceof URL ? input : new URL(String(input))),
     catch: () => new BoundaryParseError({ field: "origin", reason: "Invalid URL" }),
   }).pipe(
-    Effect.flatMap((url) => Schema.decodeUnknownEffect(OriginUrl)(url)),
+    Effect.flatMap(decodeOriginUrl),
     Effect.mapError(() => new BoundaryParseError({ field: "origin", reason: "Invalid URL" })),
   );
 
