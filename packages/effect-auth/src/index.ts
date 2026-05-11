@@ -1,5 +1,11 @@
 export { Auth, AuthLive, type AuthShape } from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
+export {
+  VerificationTokenConfig,
+  VerificationTokenConfigLive,
+  type VerificationTokenConfigInput,
+  type VerificationTokenConfigShape,
+} from "./workflows/index.js";
 
 export const packageName = "effect-auth";
 

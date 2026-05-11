@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -37,7 +38,6 @@ import {
   AuthHttpAdapter,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
-  clearSessionCookie,
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
@@ -47,8 +47,8 @@ import {
   handleSignUpEmail,
   handleVerifyEmail,
   jsonWithCookieInstruction,
-  makeSessionCookie,
   mapPublicHttpError,
+  SessionCookie,
 } from "../src/http/internal";
 import { createEffectAuthClient } from "../src/index";
 import {
@@ -82,6 +82,7 @@ import {
   PasswordRecoveryWorkflowsLive,
   SessionWorkflows,
   SessionWorkflowsLive,
+  VerificationTokenConfigLive,
 } from "../src/workflows/index";
 import {
   AuthEmail,
@@ -98,7 +99,12 @@ const missingFixture = (message: string) => new MissingFixture({ message });
 const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 const jsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
 
-const makeWorkflowLayer = () => {
+const makeWorkflowLayer = (
+  options: {
+    readonly httpConfig?: Parameters<typeof AuthHttpConfig.layer>[0];
+    readonly verificationTokenConfig?: Parameters<typeof VerificationTokenConfigLive>[0];
+  } = {},
+) => {
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
   const coreLayer = Layer.mergeAll(
@@ -109,6 +115,8 @@ const makeWorkflowLayer = () => {
     DevMemoryAuthStorage(storageState),
     MockAuthEmail(emailState),
     PermissiveDevRateLimiter,
+    AuthHttpConfig.layer(options.httpConfig ?? { trustedOrigins: ["https://app.example.com"] }),
+    VerificationTokenConfigLive(options.verificationTokenConfig),
   );
   const layer = Layer.mergeAll(
     EmailPasswordWorkflowsLive,
@@ -429,6 +437,45 @@ it.effect("email password workflows verify email before issuing sessions", () =>
       password: "correct horse battery staple",
     });
     assert.strictEqual(signedIn.user.email, "user@example.com");
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("verification token TTLs are configured at the workflow seam", () => {
+  const { storageState, layer } = makeWorkflowLayer({
+    verificationTokenConfig: {
+      emailVerificationTtl: "2 hours",
+      passwordResetTtl: "3 minutes",
+    },
+  });
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const recovery = yield* PasswordRecoveryWorkflows;
+    const beforeSignUp = yield* Clock.currentTimeMillis;
+    yield* emailPassword.signUp({
+      email: "ttl@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: "https://app.example.com/verify",
+    });
+    const afterSignUp = yield* Clock.currentTimeMillis;
+    const verificationRecord = Array.from(storageState.tokensByHash.values()).find(
+      (record) => record.purpose === "EmailVerification",
+    );
+    if (!verificationRecord) return yield* missingFixture("missing verification token");
+    assert.equal(verificationRecord.expiresAt >= beforeSignUp + 2 * 60 * 60 * 1000, true);
+    assert.equal(verificationRecord.expiresAt <= afterSignUp + 2 * 60 * 60 * 1000, true);
+
+    const beforeReset = yield* Clock.currentTimeMillis;
+    yield* recovery.requestPasswordReset({
+      email: "ttl@example.com",
+      resetCallbackUrl: "https://app.example.com/reset",
+    });
+    const afterReset = yield* Clock.currentTimeMillis;
+    const resetRecord = Array.from(storageState.tokensByHash.values()).find(
+      (record) => record.purpose === "PasswordReset",
+    );
+    if (!resetRecord) return yield* missingFixture("missing password reset token");
+    assert.equal(resetRecord.expiresAt >= beforeReset + 3 * 60 * 1000, true);
+    assert.equal(resetRecord.expiresAt <= afterReset + 3 * 60 * 1000, true);
   }).pipe(Effect.provide(layer));
 });
 
@@ -1540,8 +1587,8 @@ it.effect("http helpers preserve cookie defaults and public error mapping", () =
   return Effect.gen(function* () {
     const tokenService = yield* AuthToken;
     const session = yield* tokenService.makeSessionToken();
-    const setCookie = makeSessionCookie(session.token);
-    const clearCookie = clearSessionCookie();
+    const setCookie = SessionCookie.make(session.token);
+    const clearCookie = SessionCookie.clear();
 
     assert.strictEqual(setCookie.name, "effect_auth_session");
     assert.strictEqual(setCookie.httpOnly, true);
@@ -1679,6 +1726,54 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
     assert.strictEqual(signOutCookies.length, 1);
     assert.equal(signOutCookies[0]?.includes("effect_auth_session="), true);
     assert.equal(signOutCookies[0]?.includes("Max-Age=0"), true);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("http adapter uses configured session cookie options", () => {
+  const { emailState, layer } = makeWorkflowLayer({
+    httpConfig: {
+      trustedOrigins: ["https://app.example.com"],
+      sessionCookieName: "__Host_effect_auth",
+      sessionCookiePath: "/auth",
+      secureCookies: true,
+    },
+  });
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const adapter = yield* AuthHttpAdapter;
+    yield* emailPassword.signUp({
+      email: "configured-cookie@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: "https://app.example.com/verify",
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+
+    const signInCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        yield* adapter.signInEmail({
+          email: "configured-cookie@example.com",
+          password: "correct horse battery staple",
+        });
+        return HttpServerResponse.jsonUnsafe(null);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          signInCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+
+    assert.strictEqual(signInCookies.length, 1);
+    assert.equal(signInCookies[0]?.includes("__Host_effect_auth="), true);
+    assert.equal(signInCookies[0]?.includes("Path=/auth"), true);
+    assert.equal(signInCookies[0]?.includes("Secure"), true);
   }).pipe(Effect.provide(layer));
 });
 

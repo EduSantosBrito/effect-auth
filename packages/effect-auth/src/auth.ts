@@ -7,7 +7,11 @@ import {
   type PasswordHashFailure,
   type PasswordPolicyFailure,
 } from "./password/index.js";
-import { PermissiveDevRateLimiter, type RateLimitExceeded } from "./rate-limit/index.js";
+import {
+  PermissiveDevRateLimiter,
+  RateLimiter,
+  type RateLimitExceeded,
+} from "./rate-limit/index.js";
 import { AuthStorage, type AuthStorageFailure } from "./storage/index.js";
 import { AuthTokenLive, type TokenGenerationFailure } from "./token/index.js";
 import {
@@ -17,6 +21,7 @@ import {
   PasswordRecoveryWorkflowsLive,
   SessionWorkflows,
   SessionWorkflowsLive,
+  VerificationTokenConfigLive,
   type ChangePasswordInput,
   type ChangePasswordResult,
   type CurrentSessionInput,
@@ -160,8 +165,10 @@ const AuthDefaultsLive = Layer.mergeAll(
   SecureDefaultPasswordPolicy,
   NativeScryptPasswordHasher,
   AuthTokenLive,
-  PermissiveDevRateLimiter,
+  VerificationTokenConfigLive(),
 );
+
+const AuthDevDefaultsLive = Layer.mergeAll(AuthDefaultsLive, PermissiveDevRateLimiter);
 
 const InternalWorkflowsLive = Layer.mergeAll(
   EmailPasswordWorkflowsLive,
@@ -169,8 +176,18 @@ const InternalWorkflowsLive = Layer.mergeAll(
   PasswordRecoveryWorkflowsLive,
 ).pipe(Layer.provide(AuthDefaultsLive));
 
+const InternalDevWorkflowsLive = Layer.mergeAll(
+  EmailPasswordWorkflowsLive,
+  SessionWorkflowsLive,
+  PasswordRecoveryWorkflowsLive,
+).pipe(Layer.provide(AuthDevDefaultsLive));
+
 export const AuthLive = {
-  default: AuthLiveLayer.pipe(Layer.provide(InternalWorkflowsLive)),
+  production: AuthLiveLayer.pipe(Layer.provide(InternalWorkflowsLive)),
+  dev: AuthLiveLayer.pipe(Layer.provide(InternalDevWorkflowsLive)),
+  default: AuthLiveLayer.pipe(Layer.provide(InternalDevWorkflowsLive)),
 } satisfies {
+  readonly production: Layer.Layer<Auth, never, AuthStorage | AuthEmail | RateLimiter>;
+  readonly dev: Layer.Layer<Auth, never, AuthStorage | AuthEmail>;
   readonly default: Layer.Layer<Auth, never, AuthStorage | AuthEmail>;
 };

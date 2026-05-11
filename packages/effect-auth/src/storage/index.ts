@@ -107,6 +107,19 @@ export interface UpdatePasswordHash {
   readonly now: number;
 }
 
+export interface CompletePasswordReset {
+  readonly token: ConsumeVerificationToken;
+  readonly passwordHash: PasswordHash;
+}
+
+export interface ChangePasswordSession {
+  readonly password: UpdatePasswordHash;
+  readonly currentSessionId: SessionId;
+  readonly previousSessionTokenHash: TokenHash;
+  readonly nextSessionTokenHash: TokenHash;
+  readonly sessionExpiresAt: number;
+}
+
 export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailure>()(
   "AuthStorageFailure",
   {
@@ -158,6 +171,12 @@ export class AuthStorage extends Context.Service<
     readonly updatePasswordHash: (
       input: UpdatePasswordHash,
     ) => Effect.Effect<void, AuthStorageFailure>;
+    readonly completePasswordReset: (
+      input: CompletePasswordReset,
+    ) => Effect.Effect<void, AuthStorageFailure>;
+    readonly changePasswordSession: (
+      input: ChangePasswordSession,
+    ) => Effect.Effect<StoredSession, AuthStorageFailure>;
   }
 >()("effect-auth/AuthStorage") {}
 export type AuthStorageShape = typeof AuthStorage.Service;

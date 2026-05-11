@@ -1,12 +1,16 @@
 import {
   Auth,
   AuthLive,
+  VerificationTokenConfig,
+  VerificationTokenConfigLive,
   createEffectAuthClient,
   packageName,
   type AuthShape,
   type EffectAuthClient,
   type EffectAuthClientOptions,
   type PublicAuthError,
+  type VerificationTokenConfigInput,
+  type VerificationTokenConfigShape,
 } from "effect-auth";
 import {
   AuthBoundary,
@@ -48,7 +52,9 @@ import {
   AuthHttpToken,
   AuthSession,
   CurrentAuthSession,
+  SessionCookie,
   SessionTokenExtractResult,
+  StateChangingRequest,
   TrustedOriginPolicy,
   TrustedOrigins,
   optionalAuth,
@@ -102,6 +108,8 @@ import {
   type AuthStorageShape,
   type AuthUser,
   type AuthUserId,
+  type ChangePasswordSession,
+  type CompletePasswordReset,
   type ConsumeVerificationToken,
   type CreateSession,
   type CreateUserWithCredential,
@@ -144,12 +152,16 @@ type PublicApiContract = {
   readonly root:
     | typeof Auth
     | typeof AuthLive
+    | typeof VerificationTokenConfig
+    | typeof VerificationTokenConfigLive
     | typeof createEffectAuthClient
     | typeof packageName
     | AuthShape
     | EffectAuthClient
     | EffectAuthClientOptions
-    | PublicAuthError;
+    | PublicAuthError
+    | VerificationTokenConfigInput
+    | VerificationTokenConfigShape;
   readonly domain:
     | typeof AuthBoundary
     | typeof AuthBoundaryLive
@@ -188,7 +200,9 @@ type PublicApiContract = {
     | typeof AuthHttpToken
     | typeof AuthSession
     | typeof CurrentAuthSession
+    | typeof SessionCookie
     | typeof SessionTokenExtractResult
+    | typeof StateChangingRequest
     | typeof TrustedOriginPolicy
     | typeof TrustedOrigins
     | typeof optionalAuth
@@ -239,6 +253,8 @@ type PublicApiContract = {
     | AuthStorageShape
     | AuthUser
     | AuthUserId
+    | ChangePasswordSession
+    | CompletePasswordReset
     | ConsumeVerificationToken
     | CreateSession
     | CreateUserWithCredential

@@ -34,7 +34,7 @@ interface StepEvent {
 const storageState = makeDevMemoryStorageState();
 const emailState = makeMockAuthEmailState();
 
-const appLayer = AuthLive.default.pipe(
+const appLayer = AuthLive.dev.pipe(
   Layer.provideMerge(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
 );
 
@@ -103,7 +103,7 @@ const demoProgram = Effect.gen(function* () {
     auth.signUp({
       email,
       password,
-      verificationCallbackUrl: new URL("http://localhost:3000/auth/verify"),
+      verificationCallbackUrl: "http://localhost:3000/auth/verify",
     }),
   );
 

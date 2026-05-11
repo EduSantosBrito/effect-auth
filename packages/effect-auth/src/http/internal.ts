@@ -1,15 +1,4 @@
-import {
-  Config,
-  Context,
-  Data,
-  Effect,
-  Layer,
-  Match,
-  Option,
-  Predicate,
-  Redacted,
-  Schema,
-} from "effect";
+import { Context, Data, Effect, Layer, Match, Option, Predicate, Redacted, Schema } from "effect";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
@@ -133,13 +122,7 @@ export class AuthHttpConfig extends Context.Service<
   }
 >()("effect-auth/AuthHttpConfig") {
   static readonly layer = (input: AuthHttpConfigInput) =>
-    Layer.effect(
-      AuthHttpConfig,
-      Effect.gen(function* () {
-        const nodeEnv = yield* Config.string("NODE_ENV").pipe(Config.withDefault("development"));
-        return makeAuthHttpConfig(input, nodeEnv);
-      }),
-    );
+    Layer.succeed(AuthHttpConfig)(makeAuthHttpConfig(input, "development"));
 }
 export type AuthHttpConfigShape = typeof AuthHttpConfig.Service;
 
@@ -254,7 +237,7 @@ interface CookieInstruction {
   readonly maxAge?: number;
 }
 
-export const makeSessionCookie = (
+const makeSessionCookie = (
   token: SessionTokenValue,
   options: SessionCookieOptions = {},
 ): CookieInstruction => ({
@@ -266,7 +249,7 @@ export const makeSessionCookie = (
   secure: options.secure ?? true,
 });
 
-export const clearSessionCookie = (options: SessionCookieOptions = {}): CookieInstruction => ({
+const clearSessionCookie = (options: SessionCookieOptions = {}): CookieInstruction => ({
   name: options.name ?? "effect_auth_session",
   value: "",
   httpOnly: true,
@@ -396,6 +379,23 @@ const clearSessionCookieFromConfig = (config: AuthHttpConfigShape): CookieInstru
     secure: config.secureCookies,
   });
 
+export const SessionCookie = {
+  make: makeSessionCookie,
+  clear: clearSessionCookie,
+  fromConfig: sessionCookieFromConfig,
+  clearFromConfig: clearSessionCookieFromConfig,
+  append: appendCookieInstruction,
+  appendFromConfig: (token: SessionTokenValue) =>
+    Effect.gen(function* () {
+      const config = yield* AuthHttpConfig;
+      yield* appendCookieInstruction(sessionCookieFromConfig(token, config));
+    }),
+  appendClearFromConfig: Effect.gen(function* () {
+    const config = yield* AuthHttpConfig;
+    yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+  }),
+};
+
 const authHttpSession = (session: StoredSession): AuthHttpSession => {
   const { tokenHash: _tokenHash, ...publicSession } = session;
   return publicSession;
@@ -464,6 +464,10 @@ const checkAuthHttpConfigRequestOrigin: (
   if (Option.isNone(referer)) return yield* Effect.fail(AuthHttpError.Unauthorized());
   yield* validateAuthHttpConfigOrigin(referer.value, config);
 });
+
+export const StateChangingRequest = {
+  check: checkAuthHttpConfigRequestOrigin,
+};
 
 export const TrustedOrigins = (origins: ReadonlyArray<string | URL>) => {
   const allowed = new Set(
@@ -628,21 +632,21 @@ export const AuthHttpAdapter = Effect.gen(function* () {
     signInEmail: (input: SignInInput) =>
       Effect.gen(function* () {
         const result = yield* emailPassword.signIn(input);
-        yield* appendCookieInstruction(makeSessionCookie(result.sessionToken));
+        yield* SessionCookie.appendFromConfig(result.sessionToken);
         return result;
       }),
     currentSession: (input: { readonly sessionToken: SessionTokenValue }) =>
       Effect.gen(function* () {
         const result = yield* sessions.currentSession(input);
         if (Predicate.isTagged(result.tokenRotation, "Rotated")) {
-          yield* appendCookieInstruction(makeSessionCookie(result.tokenRotation.token));
+          yield* SessionCookie.appendFromConfig(result.tokenRotation.token);
         }
         return result;
       }),
     signOut: (input: { readonly sessionToken: SessionTokenValue }) =>
       Effect.gen(function* () {
         yield* sessions.signOut(input);
-        yield* appendCookieInstruction(clearSessionCookie());
+        yield* SessionCookie.appendClearFromConfig;
         return null;
       }),
     requestPasswordReset: recovery.requestPasswordReset,
@@ -650,7 +654,7 @@ export const AuthHttpAdapter = Effect.gen(function* () {
     changePassword: (input: ChangePasswordInput) =>
       Effect.gen(function* () {
         const result = yield* recovery.changePassword(input);
-        yield* appendCookieInstruction(makeSessionCookie(result.currentSessionToken));
+        yield* SessionCookie.appendFromConfig(result.currentSessionToken);
         return result;
       }),
   };

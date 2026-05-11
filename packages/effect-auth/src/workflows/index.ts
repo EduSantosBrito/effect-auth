@@ -1,4 +1,4 @@
-import { Clock, Context, Data, Effect, Layer } from "effect";
+import { Clock, Context, Data, Duration, Effect, Layer } from "effect";
 import {
   AuthBoundary,
   emailNotVerified,
@@ -7,6 +7,7 @@ import {
   rateLimited,
   unauthorized,
   type BoundaryParseError,
+  type CallbackUrl,
   type NormalizedEmail,
   type PublicAuthError,
 } from "../domain/index.js";
@@ -31,8 +32,32 @@ import {
   type VerificationToken,
 } from "../token/index.js";
 
+export interface VerificationTokenConfigInput {
+  readonly emailVerificationTtl?: Duration.Input;
+  readonly passwordResetTtl?: Duration.Input;
+}
+
+export interface VerificationTokenConfigShape {
+  readonly emailVerificationTtlMillis: number;
+  readonly passwordResetTtlMillis: number;
+}
+
+const verificationTokenConfigFromInput = (
+  input: VerificationTokenConfigInput = {},
+): VerificationTokenConfigShape => ({
+  emailVerificationTtlMillis: Duration.toMillis(input.emailVerificationTtl ?? Duration.days(1)),
+  passwordResetTtlMillis: Duration.toMillis(input.passwordResetTtl ?? Duration.minutes(15)),
+});
+
+export const VerificationTokenConfig = Context.Reference<VerificationTokenConfigShape>(
+  "effect-auth/VerificationTokenConfig",
+  { defaultValue: verificationTokenConfigFromInput },
+);
+
+export const VerificationTokenConfigLive = (input: VerificationTokenConfigInput = {}) =>
+  Layer.succeed(VerificationTokenConfig)(verificationTokenConfigFromInput(input));
+
 const days = (n: number) => n * 24 * 60 * 60 * 1000;
-const minutes = (n: number) => n * 60 * 1000;
 const genericFromStorageToken = (error: AuthStorageFailureType): PublicAuthError =>
   error.reason === "TokenExpired" || error.reason === "TokenConsumed" || error.reason === "NotFound"
     ? invalidToken
@@ -51,7 +76,7 @@ const rateAttempt = (
 export interface SignUpInput {
   readonly email: unknown;
   readonly password: unknown;
-  readonly verificationCallbackUrl: URL;
+  readonly verificationCallbackUrl: unknown;
   readonly ip?: string;
 }
 
@@ -69,7 +94,7 @@ export interface VerifyEmailResult {
 
 export interface ResendVerificationInput {
   readonly email: unknown;
-  readonly verificationCallbackUrl: URL;
+  readonly verificationCallbackUrl: unknown;
   readonly ip?: string;
 }
 
@@ -108,7 +133,7 @@ export interface SignOutInput {
 
 export interface RequestPasswordResetInput {
   readonly email: unknown;
-  readonly resetCallbackUrl: URL;
+  readonly resetCallbackUrl: unknown;
   readonly ip?: string;
 }
 
@@ -255,11 +280,15 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
     const storage = yield* AuthStorage;
     const email = yield* AuthEmail;
     const limiter = yield* RateLimiter;
+    const tokenConfig = yield* VerificationTokenConfig;
 
     const signUp: EmailPasswordWorkflowsShape["signUp"] = Effect.fn("EmailPassword.signUp")(
       function* (input) {
         const parsedEmail = yield* boundary.parseEmail(input.email);
         const password = yield* boundary.parsePassword(input.password);
+        const verificationCallbackUrl: CallbackUrl = yield* boundary.parseCallbackUrl(
+          input.verificationCallbackUrl,
+        );
         yield* limiter
           .check(rateAttempt("SignUp", parsedEmail, input.ip))
           .pipe(Effect.mapError(genericRateLimit));
@@ -277,13 +306,13 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
           email: parsedEmail,
           purpose: "EmailVerification",
           tokenHash: pair.hash,
-          expiresAt: now + days(1),
+          expiresAt: now + tokenConfig.emailVerificationTtlMillis,
           now,
         });
         yield* email.sendEmailVerification({
           to: parsedEmail,
           token: pair.token,
-          callbackUrl: input.verificationCallbackUrl,
+          callbackUrl: verificationCallbackUrl,
         });
         return { user };
       },
@@ -304,6 +333,9 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
       "EmailPassword.resendVerification",
     )(function* (input) {
       const parsedEmail = yield* boundary.parseEmail(input.email);
+      const verificationCallbackUrl: CallbackUrl = yield* boundary.parseCallbackUrl(
+        input.verificationCallbackUrl,
+      );
       yield* limiter
         .check(rateAttempt("ResendVerification", parsedEmail, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
@@ -318,13 +350,13 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
         email: parsedEmail,
         purpose: "EmailVerification",
         tokenHash: pair.hash,
-        expiresAt: now + days(1),
+        expiresAt: now + tokenConfig.emailVerificationTtlMillis,
         now,
       });
       yield* email.sendEmailVerification({
         to: parsedEmail,
         token: pair.token,
-        callbackUrl: input.verificationCallbackUrl,
+        callbackUrl: verificationCallbackUrl,
       });
     });
 
@@ -419,11 +451,15 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
     const storage = yield* AuthStorage;
     const email = yield* AuthEmail;
     const limiter = yield* RateLimiter;
+    const tokenConfig = yield* VerificationTokenConfig;
 
     const requestPasswordReset: PasswordRecoveryWorkflowsShape["requestPasswordReset"] = Effect.fn(
       "PasswordRecovery.requestPasswordReset",
     )(function* (input) {
       const parsedEmail = yield* boundary.parseEmail(input.email);
+      const resetCallbackUrl: CallbackUrl = yield* boundary.parseCallbackUrl(
+        input.resetCallbackUrl,
+      );
       yield* limiter
         .check(rateAttempt("PasswordReset", parsedEmail, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
@@ -438,13 +474,13 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         email: parsedEmail,
         purpose: "PasswordReset",
         tokenHash: pair.hash,
-        expiresAt: now + minutes(15),
+        expiresAt: now + tokenConfig.passwordResetTtlMillis,
         now,
       });
       yield* email.sendPasswordReset({
         to: parsedEmail,
         token: pair.token,
-        callbackUrl: input.resetCallbackUrl,
+        callbackUrl: resetCallbackUrl,
       });
     });
 
@@ -459,11 +495,12 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         .pipe(Effect.mapError(genericFromStorageToken));
       yield* policy.validate({ email: lookup.credential.email, password });
       const passwordHash = yield* hasher.hash(password);
-      const consumed = yield* storage
-        .consumeVerificationToken({ purpose: "PasswordReset", tokenHash: hash, now })
+      yield* storage
+        .completePasswordReset({
+          token: { purpose: "PasswordReset", tokenHash: hash, now },
+          passwordHash,
+        })
         .pipe(Effect.mapError(genericFromStorageToken));
-      yield* storage.updatePasswordHash({ userId: consumed.user.id, passwordHash, now });
-      yield* storage.revokeAllUserSessions({ userId: consumed.user.id, now });
     });
 
     const changePassword: PasswordRecoveryWorkflowsShape["changePassword"] = Effect.fn(
@@ -489,18 +526,13 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
       yield* policy.validate({ email: credential.credential.email, password: newPassword });
       const passwordHash = yield* hasher.hash(newPassword);
       const now = yield* Clock.currentTimeMillis;
-      yield* storage.updatePasswordHash({ userId: lookup.user.id, passwordHash, now });
-      yield* storage.revokeOtherSessions({
-        userId: lookup.user.id,
-        currentSessionId: lookup.session.id,
-        now,
-      });
       const pair = yield* token.makeSessionToken();
-      yield* storage.rotateSessionToken({
-        previousHash: sessionHash,
-        nextHash: pair.hash,
-        expiresAt: now + days(7),
-        now,
+      yield* storage.changePasswordSession({
+        password: { userId: lookup.user.id, passwordHash, now },
+        currentSessionId: lookup.session.id,
+        previousSessionTokenHash: sessionHash,
+        nextSessionTokenHash: pair.hash,
+        sessionExpiresAt: now + days(7),
       });
       return { currentSessionToken: pair.token };
     });

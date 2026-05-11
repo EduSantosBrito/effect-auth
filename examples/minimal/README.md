@@ -14,4 +14,4 @@ Run the interactive auth flow:
 bun run --cwd examples/minimal demo
 ```
 
-The `demo` command asks before each step and emits one structured wide event per step. This example uses in-memory storage and mock email, so no `.env` file is needed.
+The `demo` command asks before each step and emits one structured wide event per step. This example uses `AuthLive.dev`, in-memory storage, and mock email, so no `.env` file is needed.

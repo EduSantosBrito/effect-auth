@@ -56,6 +56,77 @@ const findUsableVerificationToken = (
       : Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
   });
 
+const consumeVerificationToken = (
+  state: DevMemoryStorageState,
+  { purpose, tokenHash, now }: Parameters<AuthStorageShape["consumeVerificationToken"]>[0],
+) =>
+  findUsableVerificationToken(state, { purpose, tokenHash, now }).pipe(
+    Effect.flatMap(({ user, credential }) =>
+      Effect.suspend(() => {
+        const record = state.tokensByHash.get(tokenKey(tokenHash));
+        if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+        record.consumedAt = now;
+        const consumedCredential =
+          purpose === "EmailVerification"
+            ? { ...credential, emailVerified: true, updatedAt: now }
+            : credential;
+        state.credentialsByEmail.set(String(record.email), consumedCredential);
+        return Effect.succeed({ user, credential: consumedCredential });
+      }),
+    ),
+  );
+
+const updatePasswordHash = (
+  state: DevMemoryStorageState,
+  { userId, passwordHash, now }: Parameters<AuthStorageShape["updatePasswordHash"]>[0],
+) =>
+  Effect.suspend(() => {
+    const entry = Array.from(state.credentialsByEmail.entries()).find(
+      ([, credential]) => credential.userId === userId,
+    );
+    if (!entry) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    const [email, credential] = entry;
+    state.credentialsByEmail.set(email, { ...credential, passwordHash, updatedAt: now });
+    return Effect.void;
+  });
+
+const rotateSessionToken = (
+  state: DevMemoryStorageState,
+  { previousHash, nextHash, expiresAt, now }: Parameters<AuthStorageShape["rotateSessionToken"]>[0],
+) =>
+  Effect.suspend(() => {
+    const session = state.sessionsByHash.get(tokenKey(previousHash));
+    if (!session || session.revokedAt !== undefined)
+      return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    state.sessionsByHash.delete(tokenKey(previousHash));
+    const rotated = { ...session, tokenHash: nextHash, updatedAt: now, expiresAt };
+    state.sessionsByHash.set(tokenKey(nextHash), rotated);
+    return Effect.succeed(rotated);
+  });
+
+const revokeOtherSessions = (
+  state: DevMemoryStorageState,
+  { userId, currentSessionId, now }: Parameters<AuthStorageShape["revokeOtherSessions"]>[0],
+) =>
+  Effect.sync(() => {
+    for (const [key, session] of state.sessionsByHash) {
+      if (session.userId === userId && session.id !== currentSessionId) {
+        state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
+      }
+    }
+  });
+
+const revokeAllUserSessions = (
+  state: DevMemoryStorageState,
+  { userId, now }: Parameters<AuthStorageShape["revokeAllUserSessions"]>[0],
+) =>
+  Effect.sync(() => {
+    for (const [key, session] of state.sessionsByHash) {
+      if (session.userId === userId)
+        state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
+    }
+  });
+
 export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthStorageShape => ({
   createUserWithEmailPasswordCredential: ({ email, passwordHash, now }) =>
     Effect.suspend(() => {
@@ -88,22 +159,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       state.tokensByHash.set(tokenKey(input.tokenHash), { ...input });
     }),
   findVerificationToken: (input) => findUsableVerificationToken(state, input),
-  consumeVerificationToken: ({ purpose, tokenHash, now }) =>
-    findUsableVerificationToken(state, { purpose, tokenHash, now }).pipe(
-      Effect.flatMap(({ user, credential }) =>
-        Effect.suspend(() => {
-          const record = state.tokensByHash.get(tokenKey(tokenHash));
-          if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-          record.consumedAt = now;
-          const consumedCredential =
-            purpose === "EmailVerification"
-              ? { ...credential, emailVerified: true, updatedAt: now }
-              : credential;
-          state.credentialsByEmail.set(String(record.email), consumedCredential);
-          return Effect.succeed({ user, credential: consumedCredential });
-        }),
-      ),
-    ),
+  consumeVerificationToken: (input) => consumeVerificationToken(state, input),
   createSession: ({ userId, tokenHash, expiresAt, now }) =>
     Effect.sync(() => {
       const session: StoredSession = {
@@ -128,16 +184,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
         return yield* new AuthStorageFailure({ reason: "SessionExpired" });
       return { session, user };
     }),
-  rotateSessionToken: ({ previousHash, nextHash, expiresAt, now }) =>
-    Effect.suspend(() => {
-      const session = state.sessionsByHash.get(tokenKey(previousHash));
-      if (!session || session.revokedAt !== undefined)
-        return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-      state.sessionsByHash.delete(tokenKey(previousHash));
-      const rotated = { ...session, tokenHash: nextHash, updatedAt: now, expiresAt };
-      state.sessionsByHash.set(tokenKey(nextHash), rotated);
-      return Effect.succeed(rotated);
-    }),
+  rotateSessionToken: (input) => rotateSessionToken(state, input),
   revokeSession: ({ tokenHash, now }) =>
     Effect.suspend(() => {
       const session = state.sessionsByHash.get(tokenKey(tokenHash));
@@ -149,31 +196,41 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       });
       return Effect.void;
     }),
-  revokeOtherSessions: ({ userId, currentSessionId, now }) =>
-    Effect.sync(() => {
-      for (const [key, session] of state.sessionsByHash) {
-        if (session.userId === userId && session.id !== currentSessionId) {
-          state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
-        }
-      }
-    }),
-  revokeAllUserSessions: ({ userId, now }) =>
-    Effect.sync(() => {
-      for (const [key, session] of state.sessionsByHash) {
-        if (session.userId === userId)
-          state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
-      }
-    }),
-  updatePasswordHash: ({ userId, passwordHash, now }) =>
-    Effect.suspend(() => {
-      const entry = Array.from(state.credentialsByEmail.entries()).find(
-        ([, credential]) => credential.userId === userId,
-      );
-      if (!entry) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-      const [email, credential] = entry;
-      state.credentialsByEmail.set(email, { ...credential, passwordHash, updatedAt: now });
-      return Effect.void;
-    }),
+  revokeOtherSessions: (input) => revokeOtherSessions(state, input),
+  revokeAllUserSessions: (input) => revokeAllUserSessions(state, input),
+  updatePasswordHash: (input) => updatePasswordHash(state, input),
+  completePasswordReset: ({ token, passwordHash }) =>
+    consumeVerificationToken(state, token).pipe(
+      Effect.flatMap(({ user }) =>
+        updatePasswordHash(state, { userId: user.id, passwordHash, now: token.now }).pipe(
+          Effect.flatMap(() => revokeAllUserSessions(state, { userId: user.id, now: token.now })),
+        ),
+      ),
+    ),
+  changePasswordSession: ({
+    password,
+    currentSessionId,
+    previousSessionTokenHash,
+    nextSessionTokenHash,
+    sessionExpiresAt,
+  }) =>
+    updatePasswordHash(state, password).pipe(
+      Effect.flatMap(() =>
+        revokeOtherSessions(state, {
+          userId: password.userId,
+          currentSessionId,
+          now: password.now,
+        }),
+      ),
+      Effect.flatMap(() =>
+        rotateSessionToken(state, {
+          previousHash: previousSessionTokenHash,
+          nextHash: nextSessionTokenHash,
+          expiresAt: sessionExpiresAt,
+          now: password.now,
+        }),
+      ),
+    ),
 });
 
 export const DevMemoryAuthStorage = (state?: DevMemoryStorageState) =>

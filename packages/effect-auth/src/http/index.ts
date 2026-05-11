@@ -10,6 +10,8 @@ export {
   AuthSession,
   CurrentAuthSession,
   SessionTokenExtractResult,
+  SessionCookie,
+  StateChangingRequest,
   TrustedOriginPolicy,
   TrustedOrigins,
   optionalAuth,
