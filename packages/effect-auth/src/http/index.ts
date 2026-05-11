@@ -85,6 +85,7 @@ export interface AuthHttpConfigInput {
   readonly sessionCookieName?: string;
   readonly sessionCookiePath?: string;
   readonly secureCookies?: boolean;
+  readonly defaultTokenExtractor?: AuthHttpTokenExtractor;
   readonly baseUrl?: URL;
 }
 
@@ -93,6 +94,7 @@ export interface AuthHttpConfigShape {
   readonly sessionCookieName: string;
   readonly sessionCookiePath: string;
   readonly secureCookies: boolean;
+  readonly defaultTokenExtractor?: AuthHttpTokenExtractor;
 }
 
 const deriveSecureCookies = (input: AuthHttpConfigInput): boolean => {
@@ -115,6 +117,9 @@ const makeAuthHttpConfig = (input: AuthHttpConfigInput): AuthHttpConfigShape => 
   sessionCookieName: input.sessionCookieName ?? "effect_auth_session",
   sessionCookiePath: input.sessionCookiePath ?? "/",
   secureCookies: deriveSecureCookies(input),
+  ...(input.defaultTokenExtractor === undefined
+    ? {}
+    : { defaultTokenExtractor: input.defaultTokenExtractor }),
 });
 
 export class AuthHttpConfig extends Context.Service<AuthHttpConfig, AuthHttpConfigShape>()(
@@ -123,6 +128,83 @@ export class AuthHttpConfig extends Context.Service<AuthHttpConfig, AuthHttpConf
   static readonly layer = (input: AuthHttpConfigInput): Layer.Layer<AuthHttpConfig> =>
     Layer.succeed(AuthHttpConfig)(makeAuthHttpConfig(input));
 }
+
+export interface AuthSessionShape {
+  readonly user: AuthUser;
+  readonly session: StoredSession;
+}
+
+export class AuthSession extends Context.Service<AuthSession, AuthSessionShape>()(
+  "effect-auth/http/AuthSession",
+) {}
+
+export type SessionTokenExtractResult = Data.TaggedEnum<{
+  Missing: {};
+  Found: {
+    readonly token: SessionTokenValue;
+    readonly source: "Cookie" | "Bearer";
+  };
+}>;
+
+export const SessionTokenExtractResult = Data.taggedEnum<SessionTokenExtractResult>();
+
+export interface AuthHttpTokenExtractor {
+  readonly extract: Effect.Effect<
+    SessionTokenExtractResult,
+    never,
+    HttpServerRequest.HttpServerRequest | AuthHttpConfig
+  >;
+}
+
+const decodeSessionTokenValue = Schema.decodeUnknownEffect(SessionToken);
+
+const bearerTokenValue = (authorization: string | undefined): string | undefined => {
+  if (authorization === undefined) return undefined;
+  const prefix = "Bearer ";
+  return authorization.startsWith(prefix) ? authorization.slice(prefix.length).trim() : undefined;
+};
+
+const decodeExtractedToken = (
+  value: string | undefined,
+  source: "Cookie" | "Bearer",
+): Effect.Effect<SessionTokenExtractResult> =>
+  value === undefined || value === ""
+    ? Effect.succeed(SessionTokenExtractResult.Missing())
+    : decodeSessionTokenValue(value).pipe(
+        Effect.map((token) => SessionTokenExtractResult.Found({ token, source })),
+        Effect.catch(() => Effect.succeed(SessionTokenExtractResult.Missing())),
+      );
+
+const cookieTokenExtractor: AuthHttpTokenExtractor = {
+  extract: Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    const config = yield* AuthHttpConfig;
+    return yield* decodeExtractedToken(request.cookies[config.sessionCookieName], "Cookie");
+  }),
+};
+
+const bearerTokenExtractor: AuthHttpTokenExtractor = {
+  extract: Effect.gen(function* () {
+    const request = yield* HttpServerRequest.HttpServerRequest;
+    return yield* decodeExtractedToken(bearerTokenValue(request.headers.authorization), "Bearer");
+  }),
+};
+
+const cookieOrBearerTokenExtractor: AuthHttpTokenExtractor = {
+  extract: Effect.gen(function* () {
+    const bearer = yield* bearerTokenExtractor.extract;
+    return yield* Match.valueTags(bearer, {
+      Found: (found) => Effect.succeed(found),
+      Missing: () => cookieTokenExtractor.extract,
+    });
+  }),
+};
+
+export const AuthHttpToken = {
+  cookie: cookieTokenExtractor,
+  bearer: bearerTokenExtractor,
+  cookieOrBearer: cookieOrBearerTokenExtractor,
+};
 
 export interface TrustedOriginPolicyShape {
   readonly isTrusted: (origin: URL) => Effect.Effect<boolean>;
@@ -641,6 +723,76 @@ export const handleMountedSignInEmail = (request: HttpServerRequest.HttpServerRe
     Effect.catch((error) => authHttpErrorResponse(toAuthHttpError(error))),
   );
 
+export interface AuthHttpRequireAuthOptions {
+  readonly extractor?: AuthHttpTokenExtractor;
+}
+
+const isRequireAuthOptions = (input: unknown): input is AuthHttpRequireAuthOptions =>
+  !Effect.isEffect(input);
+
+const configuredTokenExtractor = (
+  options: AuthHttpRequireAuthOptions | undefined,
+  config: AuthHttpConfigShape,
+): AuthHttpTokenExtractor => options?.extractor ?? config.defaultTokenExtractor ?? AuthHttpToken.cookie;
+
+const resolveAuthSession = Effect.fn("resolveAuthSession")(function* (
+  options?: AuthHttpRequireAuthOptions,
+) {
+    const config = yield* AuthHttpConfig;
+    const extractor = configuredTokenExtractor(options, config);
+    const extracted = yield* extractor.extract;
+    return yield* Match.valueTags(extracted, {
+      Missing: () => Effect.fail(AuthHttpError.MissingSessionToken()),
+      Found: (found) =>
+        Effect.gen(function* () {
+        const auth = yield* Auth;
+        const current = yield* auth.currentSession({ sessionToken: found.token }).pipe(
+          Effect.mapError(() => AuthHttpError.InvalidSessionToken()),
+        );
+        if (Predicate.isTagged(current.tokenRotation, "Rotated") && found.source === "Cookie") {
+          yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
+        }
+        return { user: current.user, session: current.session };
+      }),
+    });
+  });
+
+const requireAuthEffect = <A, E, R>(
+  self: Effect.Effect<A, E, R>,
+  options?: AuthHttpRequireAuthOptions,
+) =>
+  resolveAuthSession(options).pipe(
+    Effect.flatMap((session) => Effect.provideService(self, AuthSession, session)),
+  );
+
+type RequireAuthResult<I> = I extends Effect.Effect<infer A, infer E, infer R> ? Effect.Effect<
+    A,
+    E | AuthHttpError,
+    Exclude<R, AuthSession> | Auth | AuthHttpConfig | HttpServerRequest.HttpServerRequest
+  >
+  : I extends AuthHttpRequireAuthOptions ? <A, E, R>(
+  self: Effect.Effect<A, E, R>,
+) => Effect.Effect<
+  A,
+  E | AuthHttpError,
+  Exclude<R, AuthSession> | Auth | AuthHttpConfig | HttpServerRequest.HttpServerRequest
+>
+  : never;
+
+export function requireAuth<
+  I extends AuthHttpRequireAuthOptions | Effect.Effect<unknown, unknown, unknown>,
+>(
+  input: I,
+): RequireAuthResult<I>;
+export function requireAuth(input: unknown): unknown {
+  if (Effect.isEffect(input)) {
+    return requireAuthEffect(input);
+  }
+  if (isRequireAuthOptions(input)) {
+    return <A, E, R>(self: Effect.Effect<A, E, R>) => requireAuthEffect(self, input);
+  }
+}
+
 export const handleCurrentSession = Effect.fn("handleCurrentSession")(function* ({
   query,
 }: {
@@ -723,6 +875,7 @@ const mountedPath = (basePath: `/${string}`, path: `/${string}`): `/${string}` =
   `${basePath}${path}`;
 
 export const AuthHttp = {
+  requireAuth,
   mount:
     (options: AuthHttpMountOptions) =>
     <A, E, R>(self: Layer.Layer<A, E, R>) =>

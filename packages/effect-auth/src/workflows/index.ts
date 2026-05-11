@@ -97,6 +97,7 @@ export type TokenRotationDecision = Data.TaggedEnum<{
 const TokenRotationDecision = Data.taggedEnum<TokenRotationDecision>();
 
 export interface SessionLookupResult {
+  readonly user: AuthUser;
   readonly session: StoredSession;
   readonly tokenRotation: TokenRotationDecision;
 }
@@ -355,23 +356,31 @@ export const SessionWorkflowsLive = Layer.effect(SessionWorkflows)(
     const currentSession: SessionWorkflowsShape["currentSession"] = Effect.fn(
       "Session.currentSession",
     )(function* (input) {
-        const hash = yield* token.hashToken(input.sessionToken);
-        const lookup = yield* storage
-          .findSessionByTokenHash(hash)
-          .pipe(Effect.mapError(() => unauthorized));
-        const now = yield* Clock.currentTimeMillis;
-        if (lookup.session.expiresAt <= now) return yield* unauthorized;
-        if (lookup.session.updatedAt + days(1) <= now) {
-          const pair = yield* token.makeSessionToken;
-          const session = yield* storage.rotateSessionToken({
-            previousHash: hash,
-            nextHash: pair.hash,
-            expiresAt: now + days(7),
-            now,
-          });
-        return { session, tokenRotation: TokenRotationDecision.Rotated({ token: pair.token }) };
+      const hash = yield* token.hashToken(input.sessionToken);
+      const lookup = yield* storage
+        .findSessionByTokenHash(hash)
+        .pipe(Effect.mapError(() => unauthorized));
+      const now = yield* Clock.currentTimeMillis;
+      if (lookup.session.expiresAt <= now) return yield* unauthorized;
+      if (lookup.session.updatedAt + days(1) <= now) {
+        const pair = yield* token.makeSessionToken;
+        const session = yield* storage.rotateSessionToken({
+          previousHash: hash,
+          nextHash: pair.hash,
+          expiresAt: now + days(7),
+          now,
+        });
+        return {
+          user: lookup.user,
+          session,
+          tokenRotation: TokenRotationDecision.Rotated({ token: pair.token }),
+        };
       }
-      return { session: lookup.session, tokenRotation: TokenRotationDecision.Unchanged() };
+      return {
+        user: lookup.user,
+        session: lookup.session,
+        tokenRotation: TokenRotationDecision.Unchanged(),
+      };
     });
 
     const signOut: SessionWorkflowsShape["signOut"] = Effect.fn("Session.signOut")(
