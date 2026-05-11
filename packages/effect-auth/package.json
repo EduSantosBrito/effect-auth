@@ -1,6 +1,6 @@
 {
   "name": "effect-auth",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Server-side authentication for Effect applications.",
   "keywords": [
     "auth",
@@ -22,6 +22,7 @@
   },
   "files": [
     "CHANGELOG.md",
+    "README.md",
     "dist"
   ],
   "type": "module",
