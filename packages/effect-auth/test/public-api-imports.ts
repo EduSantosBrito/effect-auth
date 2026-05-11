@@ -8,6 +8,8 @@ import {
   AuthHttpConfig,
   AuthHttpErrorMapper,
   AuthHttpHandlersLive,
+  AuthHttpToken,
+  AuthSession,
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
@@ -51,6 +53,8 @@ type DocumentedImportsCompile = {
     | typeof AuthHttp
     | typeof AuthHttpConfig
     | typeof AuthHttpErrorMapper
+    | typeof AuthHttpToken
+    | typeof AuthSession
     | typeof AuthHttpAdapter
     | typeof AuthHttpHandlersLive
     | typeof handleSignUpEmail
