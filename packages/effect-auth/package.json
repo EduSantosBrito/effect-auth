@@ -51,6 +51,10 @@
       "types": "./dist/storage/index.d.ts",
       "import": "./dist/storage/index.js"
     },
+    "./storage/drizzle-pg": {
+      "types": "./dist/storage/drizzle-pg.d.ts",
+      "import": "./dist/storage/drizzle-pg.js"
+    },
     "./email": {
       "types": "./dist/email/index.d.ts",
       "import": "./dist/email/index.js"
@@ -81,6 +85,18 @@
   },
   "dependencies": {
     "effect": "^4.0.0-beta.64"
+  },
+  "peerDependencies": {
+    "@effect/sql-pg": "^4.0.0-beta.64",
+    "drizzle-orm": "^0.45.2"
+  },
+  "peerDependenciesMeta": {
+    "@effect/sql-pg": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@effect/tsgo": "catalog:",

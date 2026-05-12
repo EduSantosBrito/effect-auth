@@ -20,7 +20,7 @@ export interface AuthUser {
 export interface AuthAccount {
   readonly id: AccountId;
   readonly providerId: "credential";
-  readonly accountId: NormalizedEmail;
+  readonly accountId: string;
   readonly userId: AuthUserId;
   readonly scopes: ReadonlyArray<string>;
   readonly passwordHash: PasswordHash;
@@ -31,7 +31,7 @@ export interface AuthAccount {
 export interface PublicAuthAccount {
   readonly id: AccountId;
   readonly providerId: "credential";
-  readonly accountId: NormalizedEmail;
+  readonly accountId: string;
   readonly userId: AuthUserId;
   readonly scopes: ReadonlyArray<string>;
   readonly createdAt: number;

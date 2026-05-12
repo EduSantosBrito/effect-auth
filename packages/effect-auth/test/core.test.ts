@@ -1,4 +1,6 @@
 import { assert, it } from "@effect/vitest";
+import { getTableName } from "drizzle-orm";
+import { DrizzlePg } from "../src/storage/drizzle-pg";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -30,6 +32,25 @@ it.effect("creates effect-auth client", () =>
     const baseUrl = new URL("https://auth.example.com");
 
     assert.deepStrictEqual(createEffectAuthClient({ baseUrl }), { baseUrl });
+  }),
+);
+
+it.effect("DrizzlePg schema returns plural plain Drizzle tables with prefix naming", () =>
+  Effect.sync(() => {
+    const defaultSchema = DrizzlePg.schema();
+    const customSchema = DrizzlePg.schema({ prefix: "app_auth_" });
+
+    assert.deepStrictEqual(Object.keys(defaultSchema), [
+      "Users",
+      "Accounts",
+      "Sessions",
+      "Verifications",
+    ]);
+    assert.strictEqual(getTableName(defaultSchema.Users), "auth_users");
+    assert.strictEqual(getTableName(defaultSchema.Accounts), "auth_accounts");
+    assert.strictEqual(getTableName(defaultSchema.Sessions), "auth_sessions");
+    assert.strictEqual(getTableName(defaultSchema.Verifications), "auth_verifications");
+    assert.strictEqual(getTableName(customSchema.Users), "app_auth_users");
   }),
 );
 

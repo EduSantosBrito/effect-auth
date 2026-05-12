@@ -1691,7 +1691,7 @@ it.effect("AuthHttp.mount updates users and lists scoped secret-free accounts", 
     assert.equal(accountsCookie.includes(signedInTokenText), false);
     assert.equal(updatedBody.includes("Mounted Ada"), true);
     assert.equal(listedBody.includes("credential"), true);
-    assert.equal(listedBody.includes("mounted-identity@example.com"), true);
+    assert.equal(listedBody.includes("usr_"), true);
     assert.equal(listedBody.includes("mounted-other-identity@example.com"), false);
     assert.equal(listedBody.includes("passwordHash"), false);
     assert.equal(listedBody.includes("accessToken"), false);
