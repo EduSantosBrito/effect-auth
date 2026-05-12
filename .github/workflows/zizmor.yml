@@ -4,10 +4,12 @@ on:
   push:
     branches: [main]
     paths:
+      - ".github/dependabot.yml"
       - ".github/workflows/**"
       - ".github/zizmor.yml"
   pull_request:
     paths:
+      - ".github/dependabot.yml"
       - ".github/workflows/**"
       - ".github/zizmor.yml"
 
