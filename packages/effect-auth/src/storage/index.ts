@@ -4,34 +4,51 @@ import type { PasswordHash } from "../password/index.js";
 import type { TokenHash } from "../token/index.js";
 
 export type AuthUserId = string;
-export type CredentialId = string;
+export type AccountId = string;
 export type SessionId = string;
 
 export interface AuthUser {
   readonly id: AuthUserId;
   readonly email: NormalizedEmail;
-  readonly createdAt: number;
-}
-
-export interface EmailPasswordCredential {
-  readonly id: CredentialId;
-  readonly userId: AuthUserId;
-  readonly email: NormalizedEmail;
-  readonly passwordHash: PasswordHash;
+  readonly name: string;
+  readonly image: string | null;
   readonly emailVerified: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
 
-export interface EmailPasswordCredentialLookup {
+export interface AuthAccount {
+  readonly id: AccountId;
+  readonly providerId: "credential";
+  readonly accountId: NormalizedEmail;
+  readonly userId: AuthUserId;
+  readonly scopes: ReadonlyArray<string>;
+  readonly passwordHash: PasswordHash;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface PublicAuthAccount {
+  readonly id: AccountId;
+  readonly providerId: "credential";
+  readonly accountId: NormalizedEmail;
+  readonly userId: AuthUserId;
+  readonly scopes: ReadonlyArray<string>;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface CredentialAccountLookup {
   readonly user: AuthUser;
-  readonly credential: EmailPasswordCredential;
+  readonly account: AuthAccount;
 }
 
 export type VerificationTokenPurpose = "EmailVerification" | "PasswordReset";
 
-export interface CreateUserWithCredential {
+export interface CreateUserWithCredentialAccount {
   readonly email: NormalizedEmail;
+  readonly name: string;
+  readonly image: null;
   readonly passwordHash: PasswordHash;
   readonly now: number;
 }
@@ -53,7 +70,7 @@ export interface ConsumeVerificationToken {
 
 export interface VerificationTokenLookup {
   readonly user: AuthUser;
-  readonly credential: EmailPasswordCredential;
+  readonly account: AuthAccount;
 }
 
 export interface CreateSession {
@@ -116,9 +133,16 @@ export interface RevokeAllUserSessions {
   readonly now: number;
 }
 
-export interface UpdatePasswordHash {
+export interface UpdateCredentialAccountPasswordHash {
   readonly userId: AuthUserId;
   readonly passwordHash: PasswordHash;
+  readonly now: number;
+}
+
+export interface UpdateUserStorageInput {
+  readonly userId: AuthUserId;
+  readonly name?: string;
+  readonly image?: string | null;
   readonly now: number;
 }
 
@@ -128,7 +152,7 @@ export interface CompletePasswordReset {
 }
 
 export interface ChangePasswordSession {
-  readonly password: UpdatePasswordHash;
+  readonly password: UpdateCredentialAccountPasswordHash;
   readonly currentSessionId: SessionId;
   readonly previousSessionTokenHash: TokenHash;
   readonly nextSessionTokenHash: TokenHash;
@@ -152,12 +176,18 @@ export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailu
 export class AuthStorage extends Context.Service<
   AuthStorage,
   {
-    readonly createUserWithEmailPasswordCredential: (
-      input: CreateUserWithCredential,
+    readonly createUserWithCredentialAccount: (
+      input: CreateUserWithCredentialAccount,
     ) => Effect.Effect<AuthUser, AuthStorageFailure>;
-    readonly findCredentialByEmail: (
+    readonly findCredentialAccountByEmail: (
       email: NormalizedEmail,
-    ) => Effect.Effect<EmailPasswordCredentialLookup, AuthStorageFailure>;
+    ) => Effect.Effect<CredentialAccountLookup, AuthStorageFailure>;
+    readonly updateUser: (
+      input: UpdateUserStorageInput,
+    ) => Effect.Effect<AuthUser, AuthStorageFailure>;
+    readonly listUserAccounts: (input: {
+      readonly userId: AuthUserId;
+    }) => Effect.Effect<ReadonlyArray<PublicAuthAccount>, AuthStorageFailure>;
     readonly storeVerificationToken: (
       input: StoreVerificationToken,
     ) => Effect.Effect<void, AuthStorageFailure>;
@@ -189,8 +219,8 @@ export class AuthStorage extends Context.Service<
     readonly revokeAllUserSessions: (
       input: RevokeAllUserSessions,
     ) => Effect.Effect<void, AuthStorageFailure>;
-    readonly updatePasswordHash: (
-      input: UpdatePasswordHash,
+    readonly updateCredentialAccountPasswordHash: (
+      input: UpdateCredentialAccountPasswordHash,
     ) => Effect.Effect<void, AuthStorageFailure>;
     readonly completePasswordReset: (
       input: CompletePasswordReset,

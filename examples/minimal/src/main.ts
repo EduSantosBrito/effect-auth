@@ -127,6 +127,7 @@ const demoProgram = Effect.gen(function* () {
     auth.signUp({
       email,
       password,
+      name: "Effect Auth Example User",
       verificationCallbackUrl: "http://localhost:3000/auth/verify",
     }),
   );

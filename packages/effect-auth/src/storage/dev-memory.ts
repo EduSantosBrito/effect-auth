@@ -3,16 +3,17 @@ import type { TokenHash } from "../token/index.js";
 import {
   AuthStorage,
   AuthStorageFailure,
+  type AuthAccount,
   type AuthStorageShape,
   type AuthUser,
   type AuthUserId,
-  type EmailPasswordCredential,
+  type PublicAuthAccount,
   type StoredSession,
 } from "./index.js";
 
 interface TokenRecord {
   readonly userId: AuthUserId;
-  readonly email: EmailPasswordCredential["email"];
+  readonly email: AuthAccount["accountId"];
   readonly purpose: "EmailVerification" | "PasswordReset";
   readonly tokenHash: TokenHash;
   readonly expiresAt: number;
@@ -21,14 +22,14 @@ interface TokenRecord {
 
 export interface DevMemoryStorageState {
   readonly users: Map<AuthUserId, AuthUser>;
-  readonly credentialsByEmail: Map<string, EmailPasswordCredential>;
+  readonly accountsByEmail: Map<string, AuthAccount>;
   readonly tokensByHash: Map<string, TokenRecord>;
   readonly sessionsByHash: Map<string, StoredSession>;
 }
 
 export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
   users: new Map(),
-  credentialsByEmail: new Map(),
+  accountsByEmail: new Map(),
   tokensByHash: new Map(),
   sessionsByHash: new Map(),
 });
@@ -60,10 +61,10 @@ const findUsableVerificationToken = (
       return Effect.fail(new AuthStorageFailure({ reason: "TokenConsumed" }));
     if (record.expiresAt <= now)
       return Effect.fail(new AuthStorageFailure({ reason: "TokenExpired" }));
-    const credential = state.credentialsByEmail.get(String(record.email));
-    const user = credential ? state.users.get(credential.userId) : undefined;
-    return credential && user
-      ? Effect.succeed({ user, credential })
+    const account = state.accountsByEmail.get(String(record.email));
+    const user = account ? state.users.get(account.userId) : undefined;
+    return account && user
+      ? Effect.succeed({ user, account })
       : Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
   });
 
@@ -72,34 +73,41 @@ const consumeVerificationToken = (
   { purpose, tokenHash, now }: Parameters<AuthStorageShape["consumeVerificationToken"]>[0],
 ) =>
   findUsableVerificationToken(state, { purpose, tokenHash, now }).pipe(
-    Effect.flatMap(({ user, credential }) =>
+    Effect.flatMap(({ user, account }) =>
       Effect.suspend(() => {
         const record = state.tokensByHash.get(tokenKey(tokenHash));
         if (!record) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
         record.consumedAt = now;
-        const consumedCredential =
-          purpose === "EmailVerification"
-            ? { ...credential, emailVerified: true, updatedAt: now }
-            : credential;
-        state.credentialsByEmail.set(String(record.email), consumedCredential);
-        return Effect.succeed({ user, credential: consumedCredential });
+        const consumedUser =
+          purpose === "EmailVerification" ? { ...user, emailVerified: true, updatedAt: now } : user;
+        state.users.set(user.id, consumedUser);
+        return Effect.succeed({ user: consumedUser, account });
       }),
     ),
   );
 
-const updatePasswordHash = (
+const updateCredentialAccountPasswordHash = (
   state: DevMemoryStorageState,
-  { userId, passwordHash, now }: Parameters<AuthStorageShape["updatePasswordHash"]>[0],
+  {
+    userId,
+    passwordHash,
+    now,
+  }: Parameters<AuthStorageShape["updateCredentialAccountPasswordHash"]>[0],
 ) =>
   Effect.suspend(() => {
-    const entry = Array.from(state.credentialsByEmail.entries()).find(
-      ([, credential]) => credential.userId === userId,
+    const entry = Array.from(state.accountsByEmail.entries()).find(
+      ([, account]) => account.userId === userId,
     );
     if (!entry) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-    const [email, credential] = entry;
-    state.credentialsByEmail.set(email, { ...credential, passwordHash, updatedAt: now });
+    const [email, account] = entry;
+    state.accountsByEmail.set(email, { ...account, passwordHash, updatedAt: now });
     return Effect.void;
   });
+
+const publicAccount = ({
+  passwordHash: _passwordHash,
+  ...account
+}: AuthAccount): PublicAuthAccount => account;
 
 const rotateSessionToken = (
   state: DevMemoryStorageState,
@@ -197,32 +205,60 @@ const revokeAllUserSessions = (
   });
 
 export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthStorageShape => ({
-  createUserWithEmailPasswordCredential: ({ email, passwordHash, now }) =>
+  createUserWithCredentialAccount: ({ email, name, image, passwordHash, now }) =>
     Effect.suspend(() => {
-      if (state.credentialsByEmail.has(String(email)))
+      if (state.accountsByEmail.has(String(email)))
         return Effect.fail(new AuthStorageFailure({ reason: "Conflict" }));
-      const user: AuthUser = { id: id("usr"), email, createdAt: now };
-      const credential: EmailPasswordCredential = {
-        id: id("cred"),
-        userId: user.id,
+      const user: AuthUser = {
+        id: id("usr"),
         email,
-        passwordHash,
+        name,
+        image,
         emailVerified: false,
         createdAt: now,
         updatedAt: now,
       };
+      const account: AuthAccount = {
+        id: id("acc"),
+        providerId: "credential",
+        accountId: email,
+        userId: user.id,
+        scopes: [],
+        passwordHash,
+        createdAt: now,
+        updatedAt: now,
+      };
       state.users.set(user.id, user);
-      state.credentialsByEmail.set(String(email), credential);
+      state.accountsByEmail.set(String(email), account);
       return Effect.succeed(user);
     }),
-  findCredentialByEmail: (email) =>
+  findCredentialAccountByEmail: (email) =>
     Effect.suspend(() => {
-      const credential = state.credentialsByEmail.get(String(email));
-      const user = credential ? state.users.get(credential.userId) : undefined;
-      return credential && user
-        ? Effect.succeed({ user, credential })
+      const account = state.accountsByEmail.get(String(email));
+      const user = account ? state.users.get(account.userId) : undefined;
+      return account && user
+        ? Effect.succeed({ user, account })
         : Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
     }),
+  updateUser: ({ userId, name, image, now }) =>
+    Effect.suspend(() => {
+      const user = state.users.get(userId);
+      if (!user) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+      const updated = {
+        ...user,
+        ...(name === undefined ? {} : { name }),
+        ...(image === undefined ? {} : { image }),
+        updatedAt: now,
+      };
+      state.users.set(userId, updated);
+      return Effect.succeed(updated);
+    }),
+  listUserAccounts: ({ userId }) =>
+    Effect.sync(() =>
+      Array.from(state.accountsByEmail.values())
+        .filter((account) => account.userId === userId)
+        .map(publicAccount),
+    ),
   storeVerificationToken: (input) =>
     Effect.sync(() => {
       state.tokensByHash.set(tokenKey(input.tokenHash), { ...input });
@@ -282,11 +318,15 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
   revokeUserSession: (input) => revokeUserSession(state, input),
   revokeOtherSessions: (input) => revokeOtherSessions(state, input),
   revokeAllUserSessions: (input) => revokeAllUserSessions(state, input),
-  updatePasswordHash: (input) => updatePasswordHash(state, input),
+  updateCredentialAccountPasswordHash: (input) => updateCredentialAccountPasswordHash(state, input),
   completePasswordReset: ({ token, passwordHash }) =>
     consumeVerificationToken(state, token).pipe(
       Effect.flatMap(({ user }) =>
-        updatePasswordHash(state, { userId: user.id, passwordHash, now: token.now }).pipe(
+        updateCredentialAccountPasswordHash(state, {
+          userId: user.id,
+          passwordHash,
+          now: token.now,
+        }).pipe(
           Effect.flatMap(() => revokeAllUserSessions(state, { userId: user.id, now: token.now })),
         ),
       ),
@@ -298,7 +338,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     nextSessionTokenHash,
     sessionExpiresAt,
   }) =>
-    updatePasswordHash(state, password).pipe(
+    updateCredentialAccountPasswordHash(state, password).pipe(
       Effect.flatMap(() =>
         revokeOtherSessions(state, {
           userId: password.userId,

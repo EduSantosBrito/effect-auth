@@ -115,10 +115,7 @@ it.effect("native scrypt hasher fails explicitly on unsupported runtimes", () =>
 
 it.effect("auth token service returns redacted 32-byte base64url tokens and SHA-256 hashes", () =>
   Effect.gen(function* () {
-    const tokenService = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthToken;
-    }).pipe(Effect.provide(AuthTokenLive));
+    const tokenService = yield* Effect.service(AuthToken).pipe(Effect.provide(AuthTokenLive));
     const verification = yield* tokenService.makeVerificationToken();
     const secondVerification = yield* tokenService.makeVerificationToken();
     const session = yield* tokenService.makeSessionToken();
@@ -187,30 +184,29 @@ it.effect("rate limiter key derivation covers default and custom bucket semantic
 
 it.effect("dev memory storage enforces unique email and one-time tokens", () =>
   Effect.gen(function* () {
-    const boundary = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthBoundary;
-    }).pipe(Effect.provide(AuthBoundaryLive));
-    const tokenService = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthToken;
-    }).pipe(Effect.provide(AuthTokenLive));
-    const hasher = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* PasswordHasher;
-    }).pipe(Effect.provide(TestPasswordHasher));
+    const boundary = yield* Effect.service(AuthBoundary).pipe(Effect.provide(AuthBoundaryLive));
+    const tokenService = yield* Effect.service(AuthToken).pipe(Effect.provide(AuthTokenLive));
+    const hasher = yield* Effect.service(PasswordHasher).pipe(Effect.provide(TestPasswordHasher));
     const storageState = makeDevMemoryStorageState();
     const storage = makeDevMemoryStorage(storageState);
     const email = yield* boundary.parseEmail("user@example.com");
     const password = yield* boundary.parsePassword("correct horse battery staple");
     const passwordHash = yield* hasher.hash(password);
-    const user = yield* storage.createUserWithEmailPasswordCredential({
+    const user = yield* storage.createUserWithCredentialAccount({
       email,
       passwordHash,
       now: 1,
+      name: "Test User",
+      image: null,
     });
     const duplicate = yield* Effect.exit(
-      storage.createUserWithEmailPasswordCredential({ email, passwordHash, now: 1 }),
+      storage.createUserWithCredentialAccount({
+        email,
+        name: "Test User",
+        image: null,
+        passwordHash,
+        now: 1,
+      }),
     );
     const pair = yield* tokenService.makeVerificationToken();
 
@@ -248,27 +244,22 @@ it.effect("dev memory storage enforces unique email and one-time tokens", () =>
 
 it.effect("dev memory storage enforces session expiry and atomic rotation", () =>
   Effect.gen(function* () {
-    const boundary = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthBoundary;
-    }).pipe(Effect.provide(AuthBoundaryLive));
-    const tokenService = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthToken;
-    }).pipe(Effect.provide(AuthTokenLive));
-    const hasher = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* PasswordHasher;
-    }).pipe(Effect.provide(NativeScryptPasswordHasher));
+    const boundary = yield* Effect.service(AuthBoundary).pipe(Effect.provide(AuthBoundaryLive));
+    const tokenService = yield* Effect.service(AuthToken).pipe(Effect.provide(AuthTokenLive));
+    const hasher = yield* Effect.service(PasswordHasher).pipe(
+      Effect.provide(NativeScryptPasswordHasher),
+    );
     const storageState = makeDevMemoryStorageState();
     const storage = makeDevMemoryStorage(storageState);
     const email = yield* boundary.parseEmail("sessions@example.com");
     const password = yield* boundary.parsePassword("correct horse battery staple");
     const passwordHash = yield* hasher.hash(password);
-    const user = yield* storage.createUserWithEmailPasswordCredential({
+    const user = yield* storage.createUserWithCredentialAccount({
       email,
       passwordHash,
       now: 1,
+      name: "Test User",
+      image: null,
     });
     const expiredPair = yield* tokenService.makeSessionToken();
     yield* storage.createSession({
@@ -304,33 +295,28 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
 
 it.effect("dev memory storage lists active sessions and revokes by current user scope", () =>
   Effect.gen(function* () {
-    const boundary = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthBoundary;
-    }).pipe(Effect.provide(AuthBoundaryLive));
-    const tokenService = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* AuthToken;
-    }).pipe(Effect.provide(AuthTokenLive));
-    const hasher = yield* Effect.gen(function* () {
-      yield* Effect.void;
-      return yield* PasswordHasher;
-    }).pipe(Effect.provide(TestPasswordHasher));
+    const boundary = yield* Effect.service(AuthBoundary).pipe(Effect.provide(AuthBoundaryLive));
+    const tokenService = yield* Effect.service(AuthToken).pipe(Effect.provide(AuthTokenLive));
+    const hasher = yield* Effect.service(PasswordHasher).pipe(Effect.provide(TestPasswordHasher));
     const storageState = makeDevMemoryStorageState();
     const storage = makeDevMemoryStorage(storageState);
     const email = yield* boundary.parseEmail("active-sessions@example.com");
     const otherEmail = yield* boundary.parseEmail("other-sessions@example.com");
     const password = yield* boundary.parsePassword("correct horse battery staple");
     const passwordHash = yield* hasher.hash(password);
-    const user = yield* storage.createUserWithEmailPasswordCredential({
+    const user = yield* storage.createUserWithCredentialAccount({
       email,
       passwordHash,
       now: 1,
+      name: "Test User",
+      image: null,
     });
-    const other = yield* storage.createUserWithEmailPasswordCredential({
+    const other = yield* storage.createUserWithCredentialAccount({
       email: otherEmail,
       passwordHash,
       now: 1,
+      name: "Other User",
+      image: null,
     });
     const currentPair = yield* tokenService.makeSessionToken();
     const expiredPair = yield* tokenService.makeSessionToken();

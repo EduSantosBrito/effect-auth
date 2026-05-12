@@ -70,6 +70,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
     yield* auth.signUp({
       email: "mounted-sign-in@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -127,6 +128,7 @@ it.effect("AuthHttp.mount ignores malformed forwarded client IPs", () => {
     yield* auth.signUp({
       email: "mounted-malformed-ip@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -190,6 +192,7 @@ it.effect("AuthHttp.mount rejects cookie state changes without trusted origin or
     yield* auth.signUp({
       email: "mounted-origin@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -322,6 +325,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
       json({
         email: "mounted-flow@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: "https://app.example.com/verify",
       }),
     );
@@ -493,6 +497,7 @@ it.effect("mounted session revocation preserves rotated current cookies", () => 
       json({
         email: "mounted-stale-revoke@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: "https://app.example.com/verify",
       }),
     );
@@ -589,6 +594,7 @@ it.effect(
       yield* auth.signUp({
         email: "protected-session@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       });
       const verification = emailState.sent[0];
@@ -677,6 +683,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     yield* auth.signUp({
       email: "optional-session@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -689,6 +696,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     yield* auth.signUp({
       email: "optional-bearer@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const bearerVerification = emailState.sent[1];
@@ -955,6 +963,7 @@ it.effect("HTTP token extraction treats bearer auth as a non-cookie source", () 
     yield* auth.signUp({
       email: "bearer-revoke-all@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -1059,6 +1068,7 @@ it.effect("http adapter appends rotated session cookies to handled responses", (
     yield* emailPassword.signUp({
       email: "http-cookie@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -1108,6 +1118,7 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
     yield* emailPassword.signUp({
       email: "http-sign-in-out@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -1182,6 +1193,7 @@ it.effect("http adapter uses configured session cookie options", () => {
     yield* emailPassword.signUp({
       email: "configured-cookie@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: "https://app.example.com/verify",
     });
     const verification = emailState.sent[0];
@@ -1227,6 +1239,7 @@ it.effect("http adapter delegates password reset and password change behavior", 
     yield* emailPassword.signUp({
       email: "http-adapter@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -1280,6 +1293,7 @@ it.effect("http handler functions exercise auth and session endpoints", () => {
       payload: {
         email: "http-handler@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       },
     });
@@ -1396,6 +1410,7 @@ it.effect("http handler functions exercise password reset and change endpoints",
     yield* emailPassword.signUp({
       email: "http-handler-password@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -1476,6 +1491,163 @@ it.effect("trusted origin policy rejects untrusted state-changing requests", () 
   }).pipe(Effect.provide(TrustedOrigins([new URL("https://app.example.com")]))),
 );
 
+it.effect("AuthHttp.mount updates users and lists scoped secret-free accounts", () => {
+  const { emailState, storageState, layer: authLayer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "mounted-identity@example.com",
+      password: "correct horse battery staple",
+      name: "Mounted User",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    yield* auth.signUp({
+      email: "mounted-other-identity@example.com",
+      password: "correct horse battery staple",
+      name: "Other User",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const signIn = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-in/email", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+          },
+          body: jsonString({
+            email: "mounted-identity@example.com",
+            password: "correct horse battery staple",
+          }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const sessionCookie = signIn.headers.get("set-cookie");
+    if (!sessionCookie) return yield* missingFixture("missing sign-in cookie");
+    const signedInTokenText = sessionCookie.match(/^effect_auth_session=([^;]+)/u)?.[1];
+    if (!signedInTokenText) return yield* missingFixture("missing sign-in cookie token");
+    const untrusted = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/update-user", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: sessionCookie,
+            origin: "https://evil.example.com",
+          },
+          body: jsonString({ name: "Evil Ada" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const empty = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/update-user", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: sessionCookie,
+            origin: "https://app.example.com",
+          },
+          body: jsonString({}),
+        }),
+        Context.empty(),
+      ),
+    );
+    const emailChange = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/update-user", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: sessionCookie,
+            origin: "https://app.example.com",
+          },
+          body: jsonString({ email: "new@example.com" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const updated = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/update-user", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            cookie: sessionCookie,
+            origin: "https://app.example.com",
+          },
+          body: jsonString({ name: "Mounted Ada", image: null }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const updateCookie = updated.headers.get("set-cookie");
+    if (!updateCookie) return yield* missingFixture("missing update rotation cookie");
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const listed = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/accounts", {
+          headers: { cookie: updateCookie },
+        }),
+        Context.empty(),
+      ),
+    );
+    const accountsCookie = listed.headers.get("set-cookie");
+    if (!accountsCookie) return yield* missingFixture("missing accounts rotation cookie");
+    const updatedBody = yield* Effect.promise(() => updated.text());
+    const listedBody = yield* Effect.promise(() => listed.text());
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(untrusted.status, 401);
+    assert.strictEqual(empty.status, 400);
+    assert.strictEqual(emailChange.status, 400);
+    assert.strictEqual(updated.status, 200, updatedBody);
+    assert.equal(updateCookie.includes("effect_auth_session="), true);
+    assert.equal(updateCookie.includes(signedInTokenText), false);
+    assert.strictEqual(listed.status, 200, listedBody);
+    assert.equal(accountsCookie.includes("effect_auth_session="), true);
+    assert.equal(accountsCookie.includes(signedInTokenText), false);
+    assert.equal(updatedBody.includes("Mounted Ada"), true);
+    assert.equal(listedBody.includes("credential"), true);
+    assert.equal(listedBody.includes("mounted-identity@example.com"), true);
+    assert.equal(listedBody.includes("mounted-other-identity@example.com"), false);
+    assert.equal(listedBody.includes("passwordHash"), false);
+    assert.equal(listedBody.includes("accessToken"), false);
+    assert.equal(listedBody.includes("refreshToken"), false);
+    assert.equal(listedBody.includes("idToken"), false);
+  }).pipe(Effect.provide(authLayer));
+});
+
 it.effect("auth api endpoint inventory matches the ICD paths", () =>
   Effect.sync(() => {
     assert.deepStrictEqual(AuthApiEndpoints, [
@@ -1489,6 +1661,8 @@ it.effect("auth api endpoint inventory matches the ICD paths", () =>
       ["POST", "/auth/password-reset/complete"],
       ["POST", "/auth/password/change"],
       ["GET", "/auth/sessions"],
+      ["POST", "/auth/update-user"],
+      ["GET", "/auth/accounts"],
       ["POST", "/auth/sessions/revoke"],
       ["POST", "/auth/sessions/revoke-others"],
       ["POST", "/auth/sessions/revoke-all"],

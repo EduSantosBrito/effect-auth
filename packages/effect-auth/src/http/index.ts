@@ -23,6 +23,7 @@ export type {
   AuthHttpConfigShape,
   AuthHttpErrorMapperShape,
   AuthHttpErrorResponse,
+  AuthHttpListAccountsResponse,
   AuthHttpListSessionsResponse,
   AuthHttpMountOptions,
   AuthHttpOkResponse,

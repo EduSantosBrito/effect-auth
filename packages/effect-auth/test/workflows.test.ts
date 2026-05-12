@@ -13,6 +13,7 @@ import {
   AuthEmailFailure,
   AuthLive,
   AuthTestLive,
+  BoundaryParseError,
   AuthStorageFailure,
   AuthToken,
   AuthTokenLive,
@@ -22,6 +23,7 @@ import {
   Effect,
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
+  IdentityWorkflowsLive,
   Layer,
   MockAuthEmail,
   PasswordHasher,
@@ -55,6 +57,7 @@ export type WorkflowCommandBoundaryContract = {
     {
       readonly email: string;
       readonly password: string;
+      readonly name: string;
       readonly verificationCallbackUrl: string;
     } extends WorkflowSignUpInput
       ? true
@@ -102,6 +105,7 @@ it.effect("email password workflows verify email before issuing sessions", () =>
     yield* emailPassword.signUp({
       email: " USER@example.COM ",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
 
@@ -146,6 +150,7 @@ it.effect("verification token TTLs are configured at the workflow seam", () => {
     yield* emailPassword.signUp({
       email: "ttl@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: "https://app.example.com/verify",
     });
     const afterSignUp = yield* Clock.currentTimeMillis;
@@ -184,6 +189,7 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
     yield* auth.signUp({
       email: "flat-auth@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -205,6 +211,78 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
       false,
     );
   }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("Identity Core exposes public user profile fields and credential accounts", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    const signedUp = yield* auth.signUp({
+      email: "identity-core@example.com",
+      password: "correct horse battery staple",
+      name: "Ada Lovelace",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    assert.strictEqual(signedUp.user.name, "Ada Lovelace");
+    assert.strictEqual(signedUp.user.image, null);
+    assert.strictEqual(signedUp.user.emailVerified, false);
+    assert.strictEqual(typeof signedUp.user.updatedAt, "number");
+
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    const verified = yield* auth.verifyEmail({ token: verification.token });
+    assert.strictEqual(verified.user.emailVerified, true);
+
+    const signedIn = yield* auth.signIn({
+      email: "identity-core@example.com",
+      password: "correct horse battery staple",
+    });
+    const updated = yield* auth.updateUser({
+      sessionToken: signedIn.sessionToken,
+      name: "Countess Lovelace",
+      image: "https://app.example.com/ada.png",
+    });
+    assert.strictEqual(updated.user.name, "Countess Lovelace");
+    assert.strictEqual(updated.user.image, "https://app.example.com/ada.png");
+
+    const cleared = yield* auth.updateUser({
+      sessionToken: signedIn.sessionToken,
+      image: null,
+    });
+    assert.strictEqual(cleared.user.name, "Countess Lovelace");
+    assert.strictEqual(cleared.user.image, null);
+
+    const accounts = yield* auth.listAccounts({ sessionToken: signedIn.sessionToken });
+    const account = accounts.accounts[0];
+    if (!account) return yield* missingFixture("missing credential account");
+    assert.strictEqual(account.providerId, "credential");
+    assert.strictEqual(account.accountId, "identity-core@example.com");
+    assert.strictEqual(account.userId, signedIn.user.id);
+    assert.deepStrictEqual(account.scopes, []);
+    assert.strictEqual(typeof account.id, "string");
+    assert.strictEqual(typeof account.createdAt, "number");
+    assert.strictEqual(typeof account.updatedAt, "number");
+    assert.equal(Predicate.hasProperty(account, "passwordHash"), false);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("Auth.signUp requires a display name", () => {
+  const { layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    const rejected = yield* Effect.flip(
+      auth.signUp({
+        email: "missing-name@example.com",
+        password: "correct horse battery staple",
+        name: undefined,
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+    assert.deepStrictEqual(
+      rejected,
+      new BoundaryParseError({ field: "name", reason: "Expected string" }),
+    );
+  }).pipe(Effect.provide(layer));
 });
 
 it.effect("AuthLive rejects malformed verification tokens before workflow storage lookup", () => {
@@ -240,12 +318,14 @@ it.effect(
       yield* emailPassword.signUp({
         email: "duplicate@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       });
       const duplicate = yield* Effect.flip(
         emailPassword.signUp({
           email: "duplicate@example.com",
           password: "correct horse battery staple",
+          name: "Test User",
           verificationCallbackUrl: new URL("https://app.example.com/verify"),
         }),
       );
@@ -268,6 +348,7 @@ it.effect("auth email port preserves typed delivery failures", () => {
     EmailPasswordWorkflowsLive,
     SessionWorkflowsLive,
     PasswordRecoveryWorkflowsLive,
+    IdentityWorkflowsLive,
   ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -289,6 +370,7 @@ it.effect("auth email port preserves typed delivery failures", () => {
       emailPassword.signUp({
         email: "delivery@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       }),
     );
@@ -311,6 +393,7 @@ it.effect("verify and resend cover expired tokens and already-verified no-op", (
     yield* emailPassword.signUp({
       email: "verify-expired@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -324,6 +407,7 @@ it.effect("verify and resend cover expired tokens and already-verified no-op", (
     yield* emailPassword.signUp({
       email: "verified@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verifiedToken = emailState.sent[1];
@@ -346,6 +430,7 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
     EmailPasswordWorkflowsLive,
     SessionWorkflowsLive,
     PasswordRecoveryWorkflowsLive,
+    IdentityWorkflowsLive,
   ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -368,6 +453,7 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
       emailPassword.signUp({
         email: "limited@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       }),
     );
@@ -419,6 +505,7 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
     EmailPasswordWorkflowsLive,
     SessionWorkflowsLive,
     PasswordRecoveryWorkflowsLive,
+    IdentityWorkflowsLive,
   ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
@@ -439,6 +526,7 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
     yield* emailPassword.signUp({
       email: "enumeration@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -473,6 +561,7 @@ it.effect("session workflow rotates stale sessions and sign-out revokes them", (
     yield* emailPassword.signUp({
       email: "session@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -517,6 +606,7 @@ it.effect("session policy drives issue and refresh durations", () => {
     yield* emailPassword.signUp({
       email: "policy@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -576,6 +666,7 @@ it.effect("session management lists and revokes current-user sessions", () => {
     yield* emailPassword.signUp({
       email: "devices@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -646,6 +737,7 @@ it.effect("password reset revokes sessions and password change rotates current s
     yield* emailPassword.signUp({
       email: "reset@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -721,6 +813,7 @@ it.effect("password reset rejects expired and consumed tokens", () => {
     yield* emailPassword.signUp({
       email: "reset-token@example.com",
       password: "correct horse battery staple",
+      name: "Test User",
       verificationCallbackUrl: new URL("https://app.example.com/verify"),
     });
     const verification = emailState.sent[0];
@@ -777,6 +870,7 @@ it.effect(
       yield* emailPassword.signUp({
         email: "change-failures@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       });
       const verification = emailState.sent[0];
@@ -836,6 +930,7 @@ it.effect(
       yield* auth.signUp({
         email: "legacy-current-password@example.com",
         password: "correct horse battery staple",
+        name: "Test User",
         verificationCallbackUrl: new URL("https://app.example.com/verify"),
       });
       const verification = emailState.sent[0];
@@ -846,11 +941,11 @@ it.effect(
         password: "correct horse battery staple",
       });
 
-      const credential = storageState.credentialsByEmail.get("legacy-current-password@example.com");
-      if (!credential) return yield* missingFixture("missing credential");
+      const account = storageState.accountsByEmail.get("legacy-current-password@example.com");
+      if (!account) return yield* missingFixture("missing account");
       const legacyWeakHash = yield* decodePasswordHash("effect-auth-test:short");
-      storageState.credentialsByEmail.set("legacy-current-password@example.com", {
-        ...credential,
+      storageState.accountsByEmail.set("legacy-current-password@example.com", {
+        ...account,
         passwordHash: legacyWeakHash,
       });
 
@@ -875,6 +970,7 @@ it.effect("password change checks rate limits before session lookup", () => {
     EmailPasswordWorkflowsLive,
     SessionWorkflowsLive,
     PasswordRecoveryWorkflowsLive,
+    IdentityWorkflowsLive,
   ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
