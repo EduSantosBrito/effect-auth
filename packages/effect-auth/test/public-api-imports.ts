@@ -15,6 +15,8 @@ import {
   type EffectAuthClient,
   type EffectAuthClientOptions,
   type ListedSession,
+  type ListAccountsInput,
+  type ListAccountsResult,
   type ListSessionsInput,
   type ListSessionsResult,
   type PublicAuthError,
@@ -25,6 +27,9 @@ import {
   type SessionPolicyShape,
   type SignInInput,
   type SignUpInput,
+  type UpdateUserInput,
+  type UpdateUserResult,
+  type WorkflowUpdateUserInput,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
 } from "effect-auth";
@@ -78,6 +83,7 @@ import {
   type AuthHttpConfigShape,
   type AuthHttpErrorMapperShape,
   type AuthHttpErrorResponse,
+  type AuthHttpListAccountsResponse,
   type AuthHttpListSessionsResponse,
   type AuthHttpMountOptions,
   type AuthHttpOkResponse,
@@ -122,17 +128,18 @@ import {
   AuthStorage,
   AuthStorageFailure,
   type AuthStorageShape,
+  type AuthAccount,
+  type AccountId,
   type AuthUser,
   type AuthUserId,
   type ChangePasswordSession,
   type CompletePasswordReset,
   type ConsumeVerificationToken,
   type CreateSession,
-  type CreateUserWithCredential,
-  type CredentialId,
-  type EmailPasswordCredential,
-  type EmailPasswordCredentialLookup,
+  type CreateUserWithCredentialAccount,
+  type CredentialAccountLookup,
   type ListUserSessions,
+  type PublicAuthAccount,
   type RevokeAllUserSessions,
   type RevokeOtherSessions,
   type RevokeSession,
@@ -142,7 +149,8 @@ import {
   type StoreVerificationToken,
   type StoredSession,
   type StoredSessionLookup,
-  type UpdatePasswordHash,
+  type UpdateCredentialAccountPasswordHash,
+  type UpdateUserStorageInput,
   type VerificationTokenLookup,
   type VerificationTokenPurpose,
 } from "effect-auth/storage";
@@ -178,6 +186,8 @@ type PublicApiContract = {
     | EffectAuthClient
     | EffectAuthClientOptions
     | ListedSession
+    | ListAccountsInput
+    | ListAccountsResult
     | ListSessionsInput
     | ListSessionsResult
     | PublicAuthError
@@ -188,6 +198,9 @@ type PublicApiContract = {
     | SessionPolicyShape
     | SignInInput
     | SignUpInput
+    | UpdateUserInput
+    | UpdateUserResult
+    | WorkflowUpdateUserInput
     | VerificationTokenConfigInput
     | VerificationTokenConfigShape;
   readonly domain:
@@ -234,6 +247,7 @@ type PublicApiContract = {
     | AuthHttpConfigShape
     | AuthHttpErrorMapperShape
     | AuthHttpErrorResponse
+    | AuthHttpListAccountsResponse
     | AuthHttpListSessionsResponse
     | AuthHttpMountOptions
     | AuthHttpOkResponse
@@ -274,6 +288,8 @@ type PublicApiContract = {
   readonly storage:
     | typeof AuthStorage
     | typeof AuthStorageFailure
+    | AccountId
+    | AuthAccount
     | AuthStorageShape
     | AuthUser
     | AuthUserId
@@ -281,11 +297,10 @@ type PublicApiContract = {
     | CompletePasswordReset
     | ConsumeVerificationToken
     | CreateSession
-    | CreateUserWithCredential
-    | CredentialId
-    | EmailPasswordCredential
-    | EmailPasswordCredentialLookup
+    | CreateUserWithCredentialAccount
+    | CredentialAccountLookup
     | ListUserSessions
+    | PublicAuthAccount
     | RevokeAllUserSessions
     | RevokeOtherSessions
     | RevokeSession
@@ -295,7 +310,8 @@ type PublicApiContract = {
     | StoreVerificationToken
     | StoredSession
     | StoredSessionLookup
-    | UpdatePasswordHash
+    | UpdateCredentialAccountPasswordHash
+    | UpdateUserStorageInput
     | VerificationTokenLookup
     | VerificationTokenPurpose;
   readonly token:

@@ -22,7 +22,7 @@ import {
   VerificationToken,
   type SessionToken as SessionTokenValue,
 } from "../token/index.js";
-import type { AuthUser, StoredSession } from "../storage/index.js";
+import type { AuthUser, PublicAuthAccount, StoredSession } from "../storage/index.js";
 import {
   EmailPasswordWorkflows,
   PasswordRecoveryWorkflows,
@@ -34,6 +34,7 @@ import {
   type SignUpInput,
   type SignInInput,
   type TokenRotationDecision,
+  type UpdateUserInput,
 } from "../workflows/index.js";
 
 export type AuthHttpError = Data.TaggedEnum<{
@@ -511,6 +512,7 @@ const OptionalString = Schema.optional(Schema.String);
 const SignUpEmailPayload = Schema.Struct({
   email: Schema.Unknown,
   password: Schema.Unknown,
+  name: Schema.Unknown,
   verificationCallbackUrl: Schema.URLFromString,
   ip: OptionalString,
 });
@@ -556,6 +558,10 @@ export interface AuthHttpListSessionsResponse {
   readonly sessions: ReadonlyArray<ListedSession>;
 }
 
+export interface AuthHttpListAccountsResponse {
+  readonly accounts: ReadonlyArray<PublicAuthAccount>;
+}
+
 export interface AuthHttpOkResponse {
   readonly ok: true;
 }
@@ -593,6 +599,19 @@ const MountedChangePasswordPayload = Schema.Struct({
 
 const RevokeListedSessionPayload = Schema.Struct({
   sessionId: Schema.String,
+});
+
+const UpdateUserPayload = Schema.Struct({
+  name: Schema.optionalKey(Schema.Unknown),
+  image: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  email: Schema.optionalKey(Schema.Unknown),
+});
+
+const UpdateUserCommandPayload = Schema.Struct({
+  sessionToken: Schema.String,
+  name: Schema.optionalKey(Schema.Unknown),
+  image: Schema.optionalKey(Schema.NullOr(Schema.String)),
+  email: Schema.optionalKey(Schema.Unknown),
 });
 
 const AuthApiGroup = HttpApiGroup.make("auth").add(
@@ -646,6 +665,16 @@ const AuthApiGroup = HttpApiGroup.make("auth").add(
     success: Schema.Unknown,
     error: Schema.Unknown,
   }),
+  HttpApiEndpoint.post("updateUser", "/auth/update-user", {
+    payload: UpdateUserCommandPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
+  HttpApiEndpoint.get("listAccounts", "/auth/accounts", {
+    query: SessionTokenPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
   HttpApiEndpoint.post("revokeSession", "/auth/sessions/revoke", {
     payload: Schema.Struct({
       sessionToken: Schema.String,
@@ -679,6 +708,8 @@ export const AuthApiEndpoints: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/auth/password-reset/complete"],
   ["POST", "/auth/password/change"],
   ["GET", "/auth/sessions"],
+  ["POST", "/auth/update-user"],
+  ["GET", "/auth/accounts"],
   ["POST", "/auth/sessions/revoke"],
   ["POST", "/auth/sessions/revoke-others"],
   ["POST", "/auth/sessions/revoke-all"],
@@ -724,6 +755,16 @@ export const AuthHttpAdapter = Effect.gen(function* () {
         yield* SessionCookie.appendFromConfig(result.currentSessionToken);
         return result;
       }),
+    updateUser: (input: UpdateUserInput) =>
+      Effect.gen(function* () {
+        const auth = yield* Auth;
+        return yield* auth.updateUser(input);
+      }),
+    listAccounts: (input: { readonly sessionToken: SessionTokenValue }) =>
+      Effect.gen(function* () {
+        const auth = yield* Auth;
+        return yield* auth.listAccounts(input);
+      }),
   };
 });
 
@@ -742,11 +783,16 @@ const parseOptionalClientIp = (value: string | undefined): Effect.Effect<ClientI
 const signUpInput = Effect.fn("signUpInput")(function* (payload: typeof SignUpEmailPayload.Type) {
   const email = yield* normalizeEmail(payload.email);
   const password = yield* normalizePassword(payload.password);
+  const name =
+    typeof payload.name === "string" && payload.name.trim() !== ""
+      ? payload.name
+      : yield* Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid request body" }));
   const verificationCallbackUrl = yield* parseCallbackUrl(payload.verificationCallbackUrl);
   const ip = yield* parseOptionalClientIp(payload.ip);
   return {
     email,
     password,
+    name,
     verificationCallbackUrl,
     ...(ip === undefined ? {} : { ip }),
   } satisfies SignUpInput;
@@ -837,6 +883,31 @@ const changePasswordInput = Effect.fn("changePasswordInput")(function* (
     newPassword,
     ...(ip === undefined ? {} : { ip }),
   } satisfies ChangePasswordInput;
+});
+
+const updateUserInput = Effect.fn("updateUserInput")(function* (
+  payload: typeof UpdateUserPayload.Type,
+  sessionToken: SessionTokenValue,
+) {
+  if (Predicate.hasProperty(payload, "email")) {
+    return yield* Effect.fail(
+      AuthHttpError.BadRequest({ reason: "Email update is not supported" }),
+    );
+  }
+  const name =
+    payload.name === undefined
+      ? undefined
+      : typeof payload.name === "string" && payload.name.trim() !== ""
+        ? payload.name
+        : yield* Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid request body" }));
+  if (name === undefined && payload.image === undefined) {
+    return yield* Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid request body" }));
+  }
+  return {
+    sessionToken,
+    ...(name === undefined ? {} : { name }),
+    ...(payload.image === undefined ? {} : { image: payload.image }),
+  } satisfies UpdateUserInput;
 });
 
 export const handleSignUpEmail = Effect.fn("handleSignUpEmail")(function* ({
@@ -1001,6 +1072,53 @@ const handleMountedListSessions = (_request: HttpServerRequest.HttpServerRequest
       return mountedJson({
         sessions: listed.sessions,
       } satisfies AuthHttpListSessionsResponse);
+    }),
+  );
+
+const handleMountedUpdateUser = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const payload = yield* request.json.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(UpdateUserPayload)),
+      );
+      const extracted = yield* extractMountedSessionToken();
+      const input = yield* updateUserInput(payload, extracted.token);
+      const auth = yield* Auth;
+      const updated = yield* auth
+        .updateUser(input)
+        .pipe(
+          Effect.mapError((error) =>
+            Predicate.isTagged(error, "BoundaryParseError")
+              ? error
+              : AuthHttpError.InvalidSessionToken(),
+          ),
+        );
+      if (extracted.source === "Cookie" && Predicate.isTagged(updated.tokenRotation, "Rotated")) {
+        yield* appendCookieInstruction(
+          sessionCookieFromConfig(updated.tokenRotation.token, config),
+        );
+      }
+      return mountedJson({ user: updated.user } satisfies AuthHttpUserResponse);
+    }),
+  );
+
+const handleMountedListAccounts = (_request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const listed = yield* auth
+        .listAccounts({ sessionToken: extracted.token })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      if (extracted.source === "Cookie" && Predicate.isTagged(listed.tokenRotation, "Rotated")) {
+        yield* appendCookieInstruction(sessionCookieFromConfig(listed.tokenRotation.token, config));
+      }
+      return mountedJson({
+        accounts: listed.accounts,
+      } satisfies AuthHttpListAccountsResponse);
     }),
   );
 
@@ -1402,6 +1520,30 @@ export const handleListSessions = Effect.fn("handleListSessions")(function* ({
   return yield* adapter.listSessions({ sessionToken });
 });
 
+export const handleUpdateUser = Effect.fn("handleUpdateUser")(function* ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof UpdateUserCommandPayload.Type;
+  readonly request: OriginRequest;
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  const input = yield* updateUserInput(payload, sessionToken);
+  return yield* adapter.updateUser(input);
+});
+
+export const handleListAccounts = Effect.fn("handleListAccounts")(function* ({
+  query,
+}: {
+  readonly query: typeof SessionTokenPayload.Type;
+}) {
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(query.sessionToken);
+  return yield* adapter.listAccounts({ sessionToken });
+});
+
 export const handleRevokeSession = Effect.fn("handleRevokeSession")(function* ({
   payload,
   request,
@@ -1493,6 +1635,8 @@ export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handl
     .handle("completePasswordReset", handleCompletePasswordReset)
     .handle("changePassword", handleChangePassword)
     .handle("listSessions", handleListSessions)
+    .handle("updateUser", handleUpdateUser)
+    .handle("listAccounts", handleListAccounts)
     .handle("revokeSession", handleRevokeSession)
     .handle("revokeOtherSessions", handleRevokeOtherSessions)
     .handle("revokeSessions", handleRevokeSessions),
@@ -1530,6 +1674,12 @@ export const AuthHttp = {
         ),
         HttpRouter.add("GET", mountedPath(options.basePath, "/sessions"), (request) =>
           handleMountedListSessions(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/update-user"), (request) =>
+          handleMountedUpdateUser(request),
+        ),
+        HttpRouter.add("GET", mountedPath(options.basePath, "/accounts"), (request) =>
+          handleMountedListAccounts(request),
         ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/sign-out"), (request) =>
           handleMountedSignOut(request),

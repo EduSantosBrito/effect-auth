@@ -24,6 +24,9 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 ## Features
 
 - Email/password sign-up and sign-in.
+- Better Auth-aligned public Users with `name`, `image`, `emailVerified`, and timestamps.
+- Credential Accounts for email/password proof material plus secret-free account listing.
+- Authenticated profile updates for `name` and `image`.
 - Email Verification with one-time hashed Verification Tokens.
 - Password Reset and authenticated Password Change.
 - Server-side Sessions with listing, revocation, policy configuration, and token rotation.
@@ -54,6 +57,7 @@ const program = Effect.gen(function* () {
   const signUp = yield* auth.signUp({
     email: "user@example.com",
     password: "correct horse battery staple",
+    name: "Ada Lovelace",
     verificationCallbackUrl: "https://app.example.com/verify",
   });
 
@@ -92,6 +96,20 @@ yield* auth.revokeSessions({ sessionToken });
 ```
 
 Listed Sessions include `id`, `userId`, `createdAt`, `updatedAt`, `expiresAt`, `isCurrent`, and optional `ipAddress` / `userAgent`. They never expose raw Session Tokens or token hashes, and listing returns active Sessions only.
+
+Programmatic Identity Core verbs are also available on `Auth`:
+
+```typescript
+const updated = yield* auth.updateUser({
+  sessionToken,
+  name: "Ada Lovelace",
+  image: "https://app.example.com/avatar.png",
+});
+
+const accounts = yield* auth.listAccounts({ sessionToken });
+```
+
+`updateUser` accepts `name` and `image` only; email changes are intentionally out of scope. `listAccounts` returns linked Accounts for the current User without password hashes or provider tokens. Email/password sign-up creates the first Credential Account automatically, and password hashes live on Credential Accounts rather than the User.
 
 ## HTTP Usage
 
@@ -149,6 +167,8 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `GET`  | `/api/auth/session`                 |
 | `POST` | `/api/auth/sign-out`                |
 | `GET`  | `/api/auth/sessions`                |
+| `POST` | `/api/auth/update-user`             |
+| `GET`  | `/api/auth/accounts`                |
 | `POST` | `/api/auth/sessions/revoke`         |
 | `POST` | `/api/auth/sessions/revoke-others`  |
 | `POST` | `/api/auth/sessions/revoke-all`     |
@@ -157,6 +177,10 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `POST` | `/api/auth/password/change`         |
 
 `GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid. Listed-session revocation is Session Id scoped; see `docs/adr/0004-session-id-scoped-revocation.md` for the design rationale.
+
+`POST /update-user` requires a valid Session Token and trusted origin, updates `name` and/or `image`, and returns `{ user }`. `GET /accounts` requires a valid Session Token and returns `{ accounts }`; account responses never include password hashes, access tokens, refresh tokens, ID tokens, or other provider secrets.
+
+Identity Core changes the `AuthStorage` contract before 1.0: storage adapters should create Users and Credential Accounts atomically via `createUserWithCredentialAccount`, store password hashes only on Credential Accounts, update User-level `emailVerified`, and expose secret-free account projections through `listUserAccounts`. No legacy credential storage shim is provided.
 
 ## Current Scope
 

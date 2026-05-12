@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Redacted, Schema } from "effect";
+import { Context, Effect, Layer, Predicate, Redacted, Schema } from "effect";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -28,6 +28,8 @@ import {
 import {
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
+  IdentityWorkflows,
+  IdentityWorkflowsLive,
   PasswordRecoveryWorkflows,
   PasswordRecoveryWorkflowsLive,
   SessionPolicy,
@@ -37,6 +39,7 @@ import {
   type ChangePasswordInput as ChangePasswordCommand,
   type ChangePasswordResult,
   type CurrentSessionInput as CurrentSessionCommand,
+  type ListAccountsResult,
   type ListSessionsInput,
   type ListSessionsResult,
   type RequestPasswordResetInput as RequestPasswordResetCommand,
@@ -49,6 +52,8 @@ import {
   type SignOutInput as SignOutCommand,
   type SignUpInput as SignUpCommand,
   type SignUpResult,
+  type UpdateUserInput as UpdateUserCommand,
+  type UpdateUserResult,
   type VerifyEmailInput as VerifyEmailCommand,
   type VerifyEmailResult,
 } from "./workflows/index.js";
@@ -56,6 +61,7 @@ import {
 export interface SignUpInput {
   readonly email: unknown;
   readonly password: unknown;
+  readonly name: unknown;
   readonly verificationCallbackUrl: unknown;
   readonly ip?: unknown;
 }
@@ -98,6 +104,12 @@ export interface ChangePasswordInput {
   readonly ip?: unknown;
 }
 
+export interface UpdateUserInput {
+  readonly sessionToken: unknown;
+  readonly name?: unknown;
+  readonly image?: unknown;
+}
+
 const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
@@ -121,7 +133,34 @@ const parseOptionalClientIp = (
   boundary: typeof AuthBoundary.Service,
   input: unknown,
 ): Effect.Effect<ClientIp | undefined, BoundaryParseError> =>
-  input === undefined ? Effect.void.pipe(Effect.as(undefined)) : boundary.parseClientIp(input);
+  input === undefined ? Effect.sync(() => undefined) : boundary.parseClientIp(input);
+
+const parseRequiredDisplayName = (input: unknown): Effect.Effect<string, BoundaryParseError> =>
+  typeof input !== "string"
+    ? Effect.fail(new BoundaryParseError({ field: "name", reason: "Expected string" }))
+    : input.trim() === ""
+      ? Effect.fail(new BoundaryParseError({ field: "name", reason: "Expected non-empty string" }))
+      : Effect.succeed(input);
+
+const parseOptionalDisplayName = (
+  input: unknown,
+): Effect.Effect<string | undefined, BoundaryParseError> =>
+  input === undefined
+    ? Effect.sync(() => undefined)
+    : parseRequiredDisplayName(input).pipe(Effect.map((name) => name));
+
+const parseOptionalProfileImage = (
+  input: unknown,
+): Effect.Effect<string | null | undefined, BoundaryParseError> =>
+  input === undefined
+    ? Effect.sync(() => undefined)
+    : input === null
+      ? Effect.succeed(null)
+      : typeof input === "string"
+        ? Effect.succeed(input)
+        : Effect.fail(
+            new BoundaryParseError({ field: "image", reason: "Expected string or null" }),
+          );
 
 const parseSignUpCommand = Effect.fn("Auth.parseSignUpCommand")(function* (
   boundary: typeof AuthBoundary.Service,
@@ -129,11 +168,13 @@ const parseSignUpCommand = Effect.fn("Auth.parseSignUpCommand")(function* (
 ) {
   const email = yield* boundary.parseEmail(input.email);
   const password = yield* boundary.parsePassword(input.password);
+  const name = yield* parseRequiredDisplayName(input.name);
   const verificationCallbackUrl = yield* boundary.parseCallbackUrl(input.verificationCallbackUrl);
   const ip = yield* parseOptionalClientIp(boundary, input.ip);
   return {
     email,
     password,
+    name,
     verificationCallbackUrl,
     ...(ip === undefined ? {} : { ip }),
   } satisfies SignUpCommand;
@@ -211,6 +252,25 @@ const parseRevokeUserSessionCommand = Effect.fn("Auth.parseRevokeUserSessionComm
 ) {
   const sessionToken = yield* parseSessionToken(input.sessionToken);
   return { sessionToken, sessionId: input.sessionId } satisfies RevokeUserSessionCommand;
+});
+
+const parseUpdateUserCommand = Effect.fn("Auth.parseUpdateUserCommand")(function* (
+  input: UpdateUserInput,
+) {
+  if (Predicate.hasProperty(input, "email")) {
+    return yield* new BoundaryParseError({
+      field: "email",
+      reason: "Email update is not supported",
+    });
+  }
+  const sessionToken = yield* parseSessionToken(input.sessionToken);
+  const name = yield* parseOptionalDisplayName(input.name);
+  const image = yield* parseOptionalProfileImage(input.image);
+  return {
+    sessionToken,
+    ...(name === undefined ? {} : { name }),
+    ...(image === undefined ? {} : { image }),
+  } satisfies UpdateUserCommand;
 });
 
 export interface AuthShape {
@@ -325,6 +385,18 @@ export interface AuthShape {
     | TokenGenerationFailure
     | RateLimitExceeded
   >;
+  readonly updateUser: (
+    input: UpdateUserInput,
+  ) => Effect.Effect<
+    UpdateUserResult,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
+  readonly listAccounts: (
+    input: SessionTokenInput,
+  ) => Effect.Effect<
+    ListAccountsResult,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
 }
 
 export class Auth extends Context.Service<
@@ -343,6 +415,8 @@ export class Auth extends Context.Service<
     readonly requestPasswordReset: AuthShape["requestPasswordReset"];
     readonly resetPassword: AuthShape["resetPassword"];
     readonly changePassword: AuthShape["changePassword"];
+    readonly updateUser: AuthShape["updateUser"];
+    readonly listAccounts: AuthShape["listAccounts"];
   }
 >()("effect-auth/Auth") {}
 
@@ -352,6 +426,7 @@ const AuthLiveLayer = Layer.effect(Auth)(
     const emailPassword = yield* EmailPasswordWorkflows;
     const sessions = yield* SessionWorkflows;
     const recovery = yield* PasswordRecoveryWorkflows;
+    const identity = yield* IdentityWorkflows;
 
     return {
       signUp: (input) =>
@@ -380,6 +455,10 @@ const AuthLiveLayer = Layer.effect(Auth)(
         parseResetPasswordCommand(boundary, input).pipe(Effect.flatMap(recovery.resetPassword)),
       changePassword: (input) =>
         parseChangePasswordCommand(boundary, input).pipe(Effect.flatMap(recovery.changePassword)),
+      updateUser: (input) =>
+        parseUpdateUserCommand(input).pipe(Effect.flatMap(identity.updateUser)),
+      listAccounts: (input) =>
+        parseSessionTokenCommand(input).pipe(Effect.flatMap(identity.listAccounts)),
     };
   }),
 );
@@ -402,12 +481,14 @@ const InternalWorkflowsLive = Layer.mergeAll(
   EmailPasswordWorkflowsLive,
   SessionWorkflowsLive,
   PasswordRecoveryWorkflowsLive,
+  IdentityWorkflowsLive,
 ).pipe(Layer.provide(AuthDefaultsLive));
 
 const InternalDevWorkflowsLive = Layer.mergeAll(
   EmailPasswordWorkflowsLive,
   SessionWorkflowsLive,
   PasswordRecoveryWorkflowsLive,
+  IdentityWorkflowsLive,
 ).pipe(Layer.provide(AuthDevDefaultsLive));
 
 export const AuthLive = {

@@ -24,6 +24,7 @@ import { RateLimiter, type RateLimitExceeded } from "../rate-limit/index.js";
 import {
   AuthStorage,
   type AuthStorageFailure as AuthStorageFailureType,
+  type PublicAuthAccount,
   type AuthUser,
   type SessionId,
   type StoredSession,
@@ -130,6 +131,7 @@ const rateAttempt = (
 export interface SignUpInput {
   readonly email: NormalizedEmail;
   readonly password: PasswordText;
+  readonly name: string;
   readonly verificationCallbackUrl: CallbackUrl;
   readonly ip?: ClientIp;
 }
@@ -232,6 +234,27 @@ export interface ChangePasswordInput {
 
 export interface ChangePasswordResult {
   readonly currentSessionToken: SessionToken;
+}
+
+export interface UpdateUserInput {
+  readonly sessionToken: SessionToken;
+  readonly name?: string;
+  readonly image?: string | null;
+}
+
+export interface UpdateUserResult {
+  readonly user: AuthUser;
+  readonly tokenRotation: TokenRotationDecision;
+}
+
+export interface ListAccountsInput {
+  readonly sessionToken: SessionToken;
+}
+
+export interface ListAccountsResult {
+  readonly user: AuthUser;
+  readonly accounts: ReadonlyArray<PublicAuthAccount>;
+  readonly tokenRotation: TokenRotationDecision;
 }
 
 export interface EmailPasswordWorkflowsShape {
@@ -342,6 +365,21 @@ export interface PasswordRecoveryWorkflowsShape {
   >;
 }
 
+export interface IdentityWorkflowsShape {
+  readonly updateUser: (
+    input: UpdateUserInput,
+  ) => Effect.Effect<
+    UpdateUserResult,
+    PublicAuthError | BoundaryParseError | AuthStorageFailureType | TokenGenerationFailure
+  >;
+  readonly listAccounts: (
+    input: ListAccountsInput,
+  ) => Effect.Effect<
+    ListAccountsResult,
+    PublicAuthError | AuthStorageFailureType | TokenGenerationFailure
+  >;
+}
+
 export class EmailPasswordWorkflows extends Context.Service<
   EmailPasswordWorkflows,
   {
@@ -370,6 +408,13 @@ export class PasswordRecoveryWorkflows extends Context.Service<
     readonly changePassword: PasswordRecoveryWorkflowsShape["changePassword"];
   }
 >()("effect-auth/PasswordRecoveryWorkflows") {}
+export class IdentityWorkflows extends Context.Service<
+  IdentityWorkflows,
+  {
+    readonly updateUser: IdentityWorkflowsShape["updateUser"];
+    readonly listAccounts: IdentityWorkflowsShape["listAccounts"];
+  }
+>()("effect-auth/IdentityWorkflows") {}
 
 export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
   Effect.gen(function* () {
@@ -391,8 +436,10 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
         yield* policy.validate({ email: input.email, password: input.password });
         const passwordHash = yield* hasher.hash(input.password);
         const now = yield* Clock.currentTimeMillis;
-        const user = yield* storage.createUserWithEmailPasswordCredential({
+        const user = yield* storage.createUserWithCredentialAccount({
           email: input.email,
+          name: input.name,
+          image: null,
           passwordHash,
           now,
         });
@@ -436,9 +483,9 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
         .check(rateAttempt("ResendVerification", parsedEmail, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
       const lookup = yield* storage
-        .findCredentialByEmail(parsedEmail)
+        .findCredentialAccountByEmail(parsedEmail)
         .pipe(Effect.mapError(() => invalidCredentials));
-      if (lookup.credential.emailVerified) return;
+      if (lookup.user.emailVerified) return;
       const now = yield* Clock.currentTimeMillis;
       const pair = yield* token.makeVerificationToken();
       yield* storage.storeVerificationToken({
@@ -462,7 +509,7 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
           .check(rateAttempt("SignIn", input.email, input.ip))
           .pipe(Effect.mapError(genericRateLimit));
         const lookup = yield* storage
-          .findCredentialByEmail(input.email)
+          .findCredentialAccountByEmail(input.email)
           .pipe(Effect.catchTag("AuthStorageFailure", () => Effect.succeed(null)));
         if (!lookup) {
           yield* hasher.hash(input.password);
@@ -470,10 +517,10 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
         }
         const verified = yield* hasher.verify({
           password: input.password,
-          hash: lookup.credential.passwordHash,
+          hash: lookup.account.passwordHash,
         });
         if (!verified) return yield* invalidCredentials;
-        if (!lookup.credential.emailVerified) return yield* emailNotVerified;
+        if (!lookup.user.emailVerified) return yield* emailNotVerified;
         const now = yield* Clock.currentTimeMillis;
         const pair = yield* token.makeSessionToken();
         const session = yield* storage.createSession({
@@ -624,7 +671,7 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         .check(rateAttempt("PasswordReset", input.email, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
       const lookup = yield* storage
-        .findCredentialByEmail(input.email)
+        .findCredentialAccountByEmail(input.email)
         .pipe(Effect.catchTag("AuthStorageFailure", () => Effect.succeed(null)));
       if (!lookup) return;
       const now = yield* Clock.currentTimeMillis;
@@ -652,7 +699,7 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
       const lookup = yield* storage
         .findVerificationToken({ purpose: "PasswordReset", tokenHash: hash, now })
         .pipe(Effect.mapError(genericFromStorageToken));
-      yield* policy.validate({ email: lookup.credential.email, password: input.password });
+      yield* policy.validate({ email: lookup.user.email, password: input.password });
       const passwordHash = yield* hasher.hash(input.password);
       yield* storage
         .completePasswordReset({
@@ -673,14 +720,14 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         .findSessionByTokenHash(sessionHash)
         .pipe(Effect.mapError(() => unauthorized));
       const credential = yield* storage
-        .findCredentialByEmail(lookup.user.email)
+        .findCredentialAccountByEmail(lookup.user.email)
         .pipe(Effect.mapError(() => unauthorized));
       const currentProof = yield* hasher.verify({
         password: input.currentPassword,
-        hash: credential.credential.passwordHash,
+        hash: credential.account.passwordHash,
       });
       if (!currentProof) return yield* invalidCredentials;
-      yield* policy.validate({ email: credential.credential.email, password: input.newPassword });
+      yield* policy.validate({ email: credential.user.email, password: input.newPassword });
       const passwordHash = yield* hasher.hash(input.newPassword);
       const now = yield* Clock.currentTimeMillis;
       const pair = yield* token.makeSessionToken();
@@ -695,5 +742,76 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
     });
 
     return { requestPasswordReset, resetPassword, changePassword };
+  }),
+);
+
+export const IdentityWorkflowsLive = Layer.effect(IdentityWorkflows)(
+  Effect.gen(function* () {
+    const token = yield* AuthToken;
+    const storage = yield* AuthStorage;
+    const sessionPolicy = yield* SessionPolicy;
+
+    const lookupCurrentSession = Effect.fn("Identity.lookupCurrentSession")(function* (
+      sessionToken: SessionToken,
+    ) {
+      const hash = yield* token.hashToken(sessionToken);
+      const lookup = yield* storage
+        .findSessionByTokenHash(hash)
+        .pipe(Effect.mapError(() => unauthorized));
+      const now = yield* Clock.currentTimeMillis;
+      if (lookup.session.updatedAt + sessionPolicy.sessionUpdateAgeMillis <= now) {
+        const pair = yield* token.makeSessionToken();
+        const session = yield* storage.rotateSessionToken({
+          previousHash: hash,
+          nextHash: pair.hash,
+          expiresAt: now + sessionPolicy.sessionTtlMillis,
+          now,
+        });
+        return {
+          user: lookup.user,
+          session,
+          tokenRotation: TokenRotationDecision.Rotated({ token: pair.token }),
+        };
+      }
+      return {
+        user: lookup.user,
+        session: lookup.session,
+        tokenRotation: TokenRotationDecision.Unchanged(),
+      };
+    });
+
+    const updateUser: IdentityWorkflowsShape["updateUser"] = Effect.fn("Identity.updateUser")(
+      function* (input) {
+        if (input.name === undefined && input.image === undefined) {
+          return yield* new BoundaryParseError({
+            field: "user",
+            reason: "Expected profile update",
+          });
+        }
+        const current = yield* lookupCurrentSession(input.sessionToken);
+        const now = yield* Clock.currentTimeMillis;
+        const user = yield* storage
+          .updateUser({
+            userId: current.user.id,
+            ...(input.name === undefined ? {} : { name: input.name }),
+            ...(input.image === undefined ? {} : { image: input.image }),
+            now,
+          })
+          .pipe(Effect.mapError(() => unauthorized));
+        return { user, tokenRotation: current.tokenRotation };
+      },
+    );
+
+    const listAccounts: IdentityWorkflowsShape["listAccounts"] = Effect.fn("Identity.listAccounts")(
+      function* (input) {
+        const current = yield* lookupCurrentSession(input.sessionToken);
+        const accounts = yield* storage
+          .listUserAccounts({ userId: current.user.id })
+          .pipe(Effect.mapError(() => unauthorized));
+        return { user: current.user, accounts, tokenRotation: current.tokenRotation };
+      },
+    );
+
+    return { updateUser, listAccounts };
   }),
 );

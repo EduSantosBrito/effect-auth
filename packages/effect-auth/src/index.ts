@@ -9,6 +9,7 @@ export {
   type ResetPasswordInput,
   type SignInInput,
   type SignUpInput,
+  type UpdateUserInput,
   type VerifyEmailInput as AuthVerifyEmailInput,
 } from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
@@ -18,11 +19,15 @@ export {
   SessionPolicy,
   SessionPolicyLive,
   type ListedSession,
+  type ListAccountsInput,
+  type ListAccountsResult,
   type ListSessionsInput,
   type ListSessionsResult,
   type RevokeUserSessionInput,
   type SessionPolicyInput,
   type SessionPolicyShape,
+  type UpdateUserInput as WorkflowUpdateUserInput,
+  type UpdateUserResult,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
 } from "./workflows/index.js";

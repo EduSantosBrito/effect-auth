@@ -4,10 +4,10 @@ Uses `effect-auth` from this monorepo with `workspace:*` and `effect-email/test`
 
 ## Flow
 
-1. Provide an `AuthStorage` layer for users, credentials, verification tokens, active session listing, and user-scoped session revocation.
+1. Provide an `AuthStorage` layer for public Users, Credential Accounts, verification tokens, active session listing, and user-scoped session revocation.
 2. Bridge `effect-email`'s `Email` service to `effect-auth`'s `AuthEmail` port.
 3. Compose those layers with `AuthLive.dev`.
-4. Call `Auth.signUp` with an email, password, and verification callback URL.
+4. Call `Auth.signUp` with an email, password, display name, and verification callback URL.
 5. Read the captured `effect-email/test` message and extract the verification token from the email URL.
 6. Call `Auth.verifyEmail`, then `Auth.signIn`, then `Auth.currentSession`.
 

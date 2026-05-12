@@ -82,6 +82,8 @@ import { AuthToken, AuthTokenLive, SessionToken, VerificationToken } from "../sr
 import {
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
+  IdentityWorkflows,
+  IdentityWorkflowsLive,
   PasswordRecoveryWorkflows,
   PasswordRecoveryWorkflowsLive,
   SessionWorkflows,
@@ -129,6 +131,7 @@ const AuthTestLive = Layer.effect(
     const emailPassword = yield* EmailPasswordWorkflows;
     const sessions = yield* SessionWorkflows;
     const recovery = yield* PasswordRecoveryWorkflows;
+    const identity = yield* IdentityWorkflows;
 
     return {
       signUp: (input: Parameters<AuthShape["signUp"]>[0]) =>
@@ -138,10 +141,21 @@ const AuthTestLive = Layer.effect(
           const verificationCallbackUrl = yield* boundary.parseCallbackUrl(
             input.verificationCallbackUrl,
           );
+          const name =
+            typeof input.name === "string" && input.name.trim() !== ""
+              ? input.name
+              : yield* new BoundaryParseError({
+                  field: "name",
+                  reason:
+                    typeof input.name === "string"
+                      ? "Expected non-empty string"
+                      : "Expected string",
+                });
           const ip = input.ip === undefined ? undefined : yield* boundary.parseClientIp(input.ip);
           return yield* emailPassword.signUp({
             email,
             password,
+            name,
             verificationCallbackUrl,
             ...(ip === undefined ? {} : { ip }),
           });
@@ -224,6 +238,22 @@ const AuthTestLive = Layer.effect(
             ...(ip === undefined ? {} : { ip }),
           });
         }),
+      updateUser: (input: Parameters<AuthShape["updateUser"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* identity.updateUser({
+            sessionToken,
+            ...(input.name === undefined ? {} : { name: String(input.name) }),
+            ...(input.image === undefined
+              ? {}
+              : { image: input.image === null ? null : String(input.image) }),
+          });
+        }),
+      listAccounts: (input: Parameters<AuthShape["listAccounts"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* identity.listAccounts({ sessionToken });
+        }),
     };
   }).pipe(Effect.annotateLogs("service", "AuthTest")),
 );
@@ -251,11 +281,15 @@ const makeWorkflowLayer = (
     VerificationTokenConfigLive(options.verificationTokenConfig),
     SessionPolicyLive(options.sessionPolicy),
   );
-  const workflowsLayer = Layer.mergeAll(
+  const workflowServicesLayer = Layer.mergeAll(
     EmailPasswordWorkflowsLive,
     SessionWorkflowsLive,
     PasswordRecoveryWorkflowsLive,
-  ).pipe(Layer.provideMerge(coreLayer));
+  );
+  const workflowsLayer = IdentityWorkflowsLive.pipe(
+    Layer.provideMerge(workflowServicesLayer),
+    Layer.provideMerge(coreLayer),
+  );
   const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
   return { storageState, emailState, layer };
 };
@@ -265,6 +299,7 @@ export {
   AuthApiEndpoints,
   AuthBoundary,
   AuthBoundaryLive,
+  BoundaryParseError,
   AuthEmail,
   AuthEmailFailure,
   AuthHttp,
@@ -286,6 +321,8 @@ export {
   Effect,
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
+  IdentityWorkflows,
+  IdentityWorkflowsLive,
   HttpClientRequest,
   HttpEffect,
   HttpRouter,
