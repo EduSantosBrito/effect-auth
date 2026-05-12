@@ -452,6 +452,27 @@ it.effect("session policy drives issue and refresh durations", () => {
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("session policy rejects zero, negative, and non-finite durations", () => {
+  return Effect.gen(function* () {
+    const zero = makeWorkflowLayer({ sessionPolicy: { sessionTtl: 0 } });
+    const zeroTtl = yield* Effect.exit(
+      Effect.service(EmailPasswordWorkflows).pipe(Effect.provide(zero.layer)),
+    );
+    const negative = makeWorkflowLayer({ sessionPolicy: { sessionUpdateAge: -1 } });
+    const negativeUpdateAge = yield* Effect.exit(
+      Effect.service(EmailPasswordWorkflows).pipe(Effect.provide(negative.layer)),
+    );
+    const infinite = makeWorkflowLayer({ sessionPolicy: { sessionTtl: Infinity } });
+    const infiniteTtl = yield* Effect.exit(
+      Effect.service(EmailPasswordWorkflows).pipe(Effect.provide(infinite.layer)),
+    );
+
+    assert.strictEqual(zeroTtl._tag, "Failure");
+    assert.strictEqual(negativeUpdateAge._tag, "Failure");
+    assert.strictEqual(infiniteTtl._tag, "Failure");
+  });
+});
+
 it.effect("session management lists and revokes current-user sessions", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {

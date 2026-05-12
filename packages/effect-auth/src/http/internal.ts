@@ -755,10 +755,12 @@ const mountedSignInInput = Effect.fn("mountedSignInInput")(function* (
   request: HttpServerRequest.HttpServerRequest,
 ) {
   const ip = yield* trustedRequestIp(request);
+  const userAgent = request.headers["user-agent"] ?? request.headers["User-Agent"];
   return {
     email: payload.email,
     password: payload.password,
     ...(ip === undefined ? {} : { ip }),
+    ...(userAgent === undefined || userAgent.trim() === "" ? {} : { userAgent }),
   };
 });
 
@@ -987,15 +989,20 @@ const handleMountedRevokeSession = (request: HttpServerRequest.HttpServerRequest
       );
       const extracted = yield* extractMountedSessionToken();
       const auth = yield* Auth;
+      const current = yield* auth
+        .currentSession({ sessionToken: extracted.token })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      const operationToken = Predicate.isTagged(current.tokenRotation, "Rotated")
+        ? current.tokenRotation.token
+        : extracted.token;
       yield* auth
-        .revokeSession({ sessionToken: extracted.token, sessionId: payload.sessionId })
+        .revokeSession({ sessionToken: operationToken, sessionId: payload.sessionId })
         .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
       if (extracted.source === "Cookie") {
-        const current = yield* Effect.option(
-          auth.currentSession({ sessionToken: extracted.token }),
-        );
-        if (Option.isNone(current)) {
+        if (payload.sessionId === current.session.id) {
           yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+        } else if (Predicate.isTagged(current.tokenRotation, "Rotated")) {
+          yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
         }
       }
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
@@ -1006,11 +1013,21 @@ const handleMountedRevokeOtherSessions = (request: HttpServerRequest.HttpServerR
   mountedErrorBoundary(
     Effect.gen(function* () {
       yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
       const extracted = yield* extractMountedSessionToken();
       const auth = yield* Auth;
-      yield* auth
-        .revokeOtherSessions({ sessionToken: extracted.token })
+      const current = yield* auth
+        .currentSession({ sessionToken: extracted.token })
         .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      const operationToken = Predicate.isTagged(current.tokenRotation, "Rotated")
+        ? current.tokenRotation.token
+        : extracted.token;
+      yield* auth
+        .revokeOtherSessions({ sessionToken: operationToken })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      if (extracted.source === "Cookie" && Predicate.isTagged(current.tokenRotation, "Rotated")) {
+        yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
+      }
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
     }),
   );

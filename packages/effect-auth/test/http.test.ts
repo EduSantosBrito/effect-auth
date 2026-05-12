@@ -94,6 +94,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
             "content-type": "application/json",
             origin: "https://app.example.com",
             "x-forwarded-for": "203.0.113.10",
+            "user-agent": "Effect Auth Browser",
           },
           body: jsonString({
             email: "mounted-sign-in@example.com",
@@ -240,6 +241,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
       headers: {
         "content-type": "application/json",
         origin: "https://app.example.com",
+        "user-agent": "Effect Auth Browser",
         ...(cookie === undefined ? {} : { cookie }),
       },
       body: jsonString(body),
@@ -308,6 +310,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
     if (!otherSession) return yield* missingFixture("missing other listed session");
     assert.strictEqual(listed.status, 200);
     assert.equal(listedText.includes("tokenHash"), false);
+    assert.equal(listedText.includes("Effect Auth Browser"), true);
 
     const revokedOne = yield* call(
       "/api/auth/sessions/revoke",
@@ -386,6 +389,131 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
     assert.strictEqual(changed.status, 200);
     assert.equal(changed.headers.get("set-cookie")?.includes("effect_auth_session="), true);
     assert.equal(changedBody.includes("sessionToken"), false);
+  });
+});
+
+it.effect("mounted session revocation preserves rotated current cookies", () => {
+  const { emailState, storageState, layer: authLayer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const json = (body: unknown, cookie?: string) => ({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://app.example.com",
+        ...(cookie === undefined ? {} : { cookie }),
+      },
+      body: jsonString(body),
+    });
+    const call = (path: string, init?: RequestInit) =>
+      Effect.promise(() =>
+        web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()),
+      );
+
+    yield* call(
+      "/api/auth/sign-up/email",
+      json({
+        email: "mounted-stale-revoke@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: "https://app.example.com/verify",
+      }),
+    );
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* call("/api/auth/verify-email", json({ token: Redacted.value(verification.token) }));
+
+    const signIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({ email: "mounted-stale-revoke@example.com", password: "correct horse battery staple" }),
+    );
+    const currentCookie = signIn.headers.get("set-cookie");
+    if (!currentCookie) return yield* missingFixture("missing current cookie");
+    const otherSignIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({ email: "mounted-stale-revoke@example.com", password: "correct horse battery staple" }),
+    );
+    const otherCookie = otherSignIn.headers.get("set-cookie");
+    if (!otherCookie) return yield* missingFixture("missing other cookie");
+
+    const listed = yield* call("/api/auth/sessions", {
+      method: "GET",
+      headers: { cookie: currentCookie },
+    });
+    const listedBody = yield* decodeMountedListSessionsResponseJson(
+      yield* Effect.promise(() => listed.text()),
+    );
+    const otherSession = listedBody.sessions.find((session) => !session.isCurrent);
+    if (!otherSession) return yield* missingFixture("missing listed other session");
+
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const revokedOne = yield* call(
+      "/api/auth/sessions/revoke",
+      json({ sessionId: otherSession.id }, currentCookie),
+    );
+    const rotatedCookie = revokedOne.headers.get("set-cookie");
+    if (!rotatedCookie) return yield* missingFixture("missing rotated revoke cookie");
+    const currentAfterRevoke = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: rotatedCookie },
+    });
+    const otherAfterRevoke = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: otherCookie },
+    });
+
+    const thirdSignIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({ email: "mounted-stale-revoke@example.com", password: "correct horse battery staple" }),
+    );
+    const thirdCookie = thirdSignIn.headers.get("set-cookie");
+    if (!thirdCookie) return yield* missingFixture("missing third cookie");
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
+      });
+    }
+    const revokedOthers = yield* call(
+      "/api/auth/sessions/revoke-others",
+      json({}, rotatedCookie),
+    );
+    const rotatedOthersCookie = revokedOthers.headers.get("set-cookie");
+    if (!rotatedOthersCookie) return yield* missingFixture("missing revoke-others rotated cookie");
+    const currentAfterOthers = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: rotatedOthersCookie },
+    });
+    const thirdAfterOthers = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: thirdCookie },
+    });
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(revokedOne.status, 200);
+    assert.equal(rotatedCookie.includes("Max-Age=0"), false);
+    assert.strictEqual(currentAfterRevoke.status, 200);
+    assert.notStrictEqual(otherAfterRevoke.status, 200);
+    assert.strictEqual(revokedOthers.status, 200);
+    assert.equal(rotatedOthersCookie.includes("Max-Age=0"), false);
+    assert.strictEqual(currentAfterOthers.status, 200);
+    assert.notStrictEqual(thirdAfterOthers.status, 200);
   });
 });
 
