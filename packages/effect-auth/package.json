@@ -52,8 +52,8 @@
       "import": "./dist/storage/index.js"
     },
     "./storage/drizzle-pg": {
-      "types": "./dist/storage/drizzle-pg.d.ts",
-      "import": "./dist/storage/drizzle-pg.js"
+      "types": "./dist/storage/drizzle-pg/index.d.ts",
+      "import": "./dist/storage/drizzle-pg/index.js"
     },
     "./email": {
       "types": "./dist/email/index.d.ts",
@@ -86,18 +86,6 @@
   "dependencies": {
     "effect": "^4.0.0-beta.64"
   },
-  "peerDependencies": {
-    "@effect/sql-pg": "^4.0.0-beta.64",
-    "drizzle-orm": "^0.45.2"
-  },
-  "peerDependenciesMeta": {
-    "@effect/sql-pg": {
-      "optional": true
-    },
-    "drizzle-orm": {
-      "optional": true
-    }
-  },
   "devDependencies": {
     "@effect/tsgo": "catalog:",
     "@effect/vitest": "catalog:",
@@ -107,5 +95,21 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "vitest": "catalog:"
+  },
+  "peerDependencies": {
+    "@effect/sql": "*",
+    "@effect/sql-pg": "^4.0.0-beta.64",
+    "drizzle-orm": "^0.45.2"
+  },
+  "peerDependenciesMeta": {
+    "@effect/sql": {
+      "optional": true
+    },
+    "@effect/sql-pg": {
+      "optional": true
+    },
+    "drizzle-orm": {
+      "optional": true
+    }
   }
 }

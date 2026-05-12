@@ -22,6 +22,8 @@
     "examples/minimal": {
       "name": "@effect-auth/example-minimal",
       "dependencies": {
+        "@effect/sql-pg": "4.0.0-beta.64",
+        "drizzle-orm": "^0.45.2",
         "effect": "catalog:",
         "effect-auth": "workspace:*",
         "effect-email": "^0.3.1",
@@ -48,10 +50,12 @@
         "vitest": "catalog:",
       },
       "peerDependencies": {
+        "@effect/sql": "*",
         "@effect/sql-pg": "^4.0.0-beta.64",
         "drizzle-orm": "^0.45.2",
       },
       "optionalPeers": [
+        "@effect/sql",
         "@effect/sql-pg",
         "drizzle-orm",
       ],

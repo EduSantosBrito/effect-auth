@@ -23,9 +23,13 @@ export interface AuthAccount {
   readonly accountId: string;
   readonly userId: AuthUserId;
   readonly scopes: ReadonlyArray<string>;
-  readonly passwordHash: PasswordHash;
+  readonly passwordHash?: PasswordHash;
   readonly createdAt: number;
   readonly updatedAt: number;
+}
+
+export interface CredentialAuthAccount extends AuthAccount {
+  readonly passwordHash: PasswordHash;
 }
 
 export interface PublicAuthAccount {
@@ -40,7 +44,7 @@ export interface PublicAuthAccount {
 
 export interface CredentialAccountLookup {
   readonly user: AuthUser;
-  readonly account: AuthAccount;
+  readonly account: CredentialAuthAccount;
 }
 
 export type VerificationTokenPurpose = "EmailVerification" | "PasswordReset";
@@ -70,7 +74,7 @@ export interface ConsumeVerificationToken {
 
 export interface VerificationTokenLookup {
   readonly user: AuthUser;
-  readonly account: AuthAccount;
+  readonly account: CredentialAuthAccount;
 }
 
 export interface CreateSession {

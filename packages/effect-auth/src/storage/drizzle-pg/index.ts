@@ -1,30 +1,36 @@
 import { Clock, Effect, Layer, Predicate, Random, Redacted, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { SqlError } from "effect/unstable/sql/SqlError";
+import { getTableName } from "drizzle-orm";
 import { boolean, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import { NormalizedEmail } from "../domain/index.js";
-import type { PasswordHash } from "../password/index.js";
-import type { TokenHash } from "../token/index.js";
+import { NormalizedEmail } from "../../domain/index.js";
+import type { PasswordHash } from "../../password/index.js";
+import type { TokenHash } from "../../token/index.js";
 import {
   AuthStorage,
   AuthStorageFailure,
   type AuthAccount,
+  type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
   type PublicAuthAccount,
   type StoredSession,
-} from "./index.js";
+} from "../index.js";
 
 export interface SchemaOptions {
   readonly prefix?: string;
 }
 
-export interface LayerOptions extends SchemaOptions {}
+export type AuthDrizzlePgSchema = ReturnType<typeof schema>;
+
+export interface LayerOptions<S extends AuthDrizzlePgSchema = AuthDrizzlePgSchema> {
+  readonly schema: S;
+}
 
 const defaultPrefix = "auth_";
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/u;
 
-const tableNames = (options: SchemaOptions = {}) => {
+const prefixedTableNames = (options: SchemaOptions = {}) => {
   const prefix = options.prefix ?? defaultPrefix;
   const safePrefix = identifierPattern.test(`${prefix}users`) ? prefix : defaultPrefix;
   return {
@@ -35,8 +41,15 @@ const tableNames = (options: SchemaOptions = {}) => {
   };
 };
 
+const tableNames = (schema: AuthDrizzlePgSchema) => ({
+  Users: getTableName(schema.Users),
+  Accounts: getTableName(schema.Accounts),
+  Sessions: getTableName(schema.Sessions),
+  Verifications: getTableName(schema.Verifications),
+});
+
 export const schema = (options: SchemaOptions = {}) => {
-  const tables = tableNames(options);
+  const tables = prefixedTableNames(options);
   const Users = pgTable(
     tables.Users,
     {
@@ -60,7 +73,7 @@ export const schema = (options: SchemaOptions = {}) => {
         .notNull()
         .references(() => Users.id, { onDelete: "cascade" }),
       scopes: text("scopes").array().notNull(),
-      passwordHash: text("password_hash").notNull(),
+      passwordHash: text("password_hash"),
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
     },
@@ -95,7 +108,8 @@ export const schema = (options: SchemaOptions = {}) => {
   const Verifications = pgTable(
     tables.Verifications,
     {
-      identifier: text("identifier").primaryKey(),
+      id: text("id").primaryKey(),
+      identifier: text("identifier").notNull(),
       value: text("value").notNull(),
       purpose: text("purpose").notNull(),
       consumedAt: timestamp("consumed_at", { withTimezone: true }),
@@ -104,6 +118,7 @@ export const schema = (options: SchemaOptions = {}) => {
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
     },
     (table) => [
+      uniqueIndex(`${tables.Verifications}_identifier_unique`).on(table.identifier),
       index(`${tables.Verifications}_value_purpose_idx`).on(table.value, table.purpose),
     ],
   );
@@ -126,7 +141,7 @@ type AccountRow = {
   readonly accountId: string;
   readonly userId: string;
   readonly scopes: ReadonlyArray<string>;
-  readonly passwordHash: string;
+  readonly passwordHash: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 };
@@ -178,7 +193,7 @@ const notFound = new AuthStorageFailure({ reason: "NotFound" });
 const backendUnavailable = new AuthStorageFailure({ reason: "BackendUnavailable" });
 
 const sqlFailure = (error: SqlError) =>
-  Predicate.isTagged(error.reason, "UniqueViolation")
+  Predicate.isTagged(error.reason, "ConstraintError")
     ? new AuthStorageFailure({ reason: "Conflict" })
     : backendUnavailable;
 
@@ -193,21 +208,23 @@ const one = <A>(rows: ReadonlyArray<A>): Effect.Effect<A, AuthStorageFailure> =>
 
 const verificationTokenFailure = Effect.fn("DrizzlePg.verificationTokenFailure")(function* (
   sql: SqlClient.SqlClient,
-  tables: ReturnType<typeof tableNames>,
+  tables: ReturnType<typeof prefixedTableNames>,
   tokenHash: TokenHash,
   purpose: string,
   now: number,
 ) {
-  const row = yield* sql.unsafe<{
-    readonly consumedAt: number | null;
-    readonly expiresAt: number;
-  }>(
-    `SELECT ${millis("consumed_at")} AS "consumedAt", ${millis("expires_at")} AS "expiresAt"
+  const row = yield* sql
+    .unsafe<{
+      readonly consumedAt: number | null;
+      readonly expiresAt: number;
+    }>(
+      `SELECT ${millis("consumed_at")} AS "consumedAt", ${millis("expires_at")} AS "expiresAt"
      FROM ${tables.Verifications}
      WHERE identifier = $1 AND purpose = $2
      LIMIT 1`,
-    [tokenKey(tokenHash), purpose],
-  ).pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
+      [tokenKey(tokenHash), purpose],
+    )
+    .pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
   if (row.consumedAt !== null) return yield* new AuthStorageFailure({ reason: "TokenConsumed" });
   if (row.expiresAt <= now) return yield* new AuthStorageFailure({ reason: "TokenExpired" });
   return yield* notFound;
@@ -215,18 +232,20 @@ const verificationTokenFailure = Effect.fn("DrizzlePg.verificationTokenFailure")
 
 const makeFindSessionByTokenHash = (
   sql: SqlClient.SqlClient,
-  tables: ReturnType<typeof tableNames>,
+  tables: ReturnType<typeof prefixedTableNames>,
 ): AuthStorageShape["findSessionByTokenHash"] =>
   Effect.fn("DrizzlePg.findSessionByTokenHash")(function* (hash) {
     const now = yield* Clock.currentTimeMillis;
-    const row = yield* sql.unsafe<SessionJoinRow>(
-      `SELECT ${sessionJoinSelect}
+    const row = yield* sql
+      .unsafe<SessionJoinRow>(
+        `SELECT ${sessionJoinSelect}
        FROM ${tables.Sessions} s
        JOIN ${tables.Users} u ON u.id = s.user_id
        WHERE s.token_hash = $1
        LIMIT 1`,
-      [tokenKey(hash)],
-    ).pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
+        [tokenKey(hash)],
+      )
+      .pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
     if (row.revokedAt !== null) return yield* notFound;
     if (row.expiresAt <= now) return yield* new AuthStorageFailure({ reason: "SessionExpired" });
     return { session: toSession(row), user: joinedSessionUser(row) };
@@ -248,13 +267,15 @@ const toAccount = (row: AccountRow): AuthAccount => ({
   accountId: row.accountId,
   userId: row.userId,
   scopes: row.scopes,
-  passwordHash: Redacted.make(row.passwordHash),
+  ...(row.passwordHash === null ? {} : { passwordHash: Redacted.make(row.passwordHash) }),
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
 
-const toPublicAccount = ({ passwordHash: _passwordHash, ...account }: AuthAccount): PublicAuthAccount =>
-  account;
+const toPublicAccount = ({
+  passwordHash: _passwordHash,
+  ...account
+}: AuthAccount): PublicAuthAccount => account;
 
 const joinedCredentialUser = (row: CredentialJoinRow): AuthUser => ({
   id: row.userId,
@@ -276,7 +297,7 @@ const joinedSessionUser = (row: SessionJoinRow): AuthUser => ({
   updatedAt: row.userUpdatedAt,
 });
 
-const joinedAccount = (row: CredentialJoinRow): AuthAccount => ({
+const joinedAccount = (row: CredentialJoinRow): CredentialAuthAccount => ({
   id: row.accountId,
   providerId: row.accountProviderId,
   accountId: row.accountAccountId,
@@ -364,315 +385,383 @@ const sessionJoinSelect = `
 const makeId = (prefix: string) =>
   Random.nextUUIDv4.pipe(Effect.map((uuid) => `${prefix}_${uuid.replaceAll("-", "")}`));
 
-export const make: (
-  options?: LayerOptions,
+const make: <S extends AuthDrizzlePgSchema>(
+  options: LayerOptions<S>,
 ) => Effect.Effect<AuthStorageShape, never, SqlClient.SqlClient> = Effect.fn("DrizzlePg.make")(
-  (options = {}) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    const tables = tableNames(options);
+  (options) =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const tables = tableNames(options.schema);
 
-    const findCredentialAccountByEmail: AuthStorageShape["findCredentialAccountByEmail"] = (
-      email,
-    ) =>
-      sql.unsafe<CredentialJoinRow>(
-        `SELECT ${credentialJoinSelect}
+      const findCredentialAccountByEmail: AuthStorageShape["findCredentialAccountByEmail"] = (
+        email,
+      ) =>
+        sql
+          .unsafe<CredentialJoinRow>(
+            `SELECT ${credentialJoinSelect}
          FROM ${tables.Users} u
          JOIN ${tables.Accounts} a ON a.user_id = u.id
-         WHERE u.email = $1 AND a.provider_id = 'credential'
+         WHERE u.email = $1 AND a.provider_id = 'credential' AND a.password_hash IS NOT NULL
          LIMIT 1`,
-        [email],
-      ).pipe(
-        Effect.flatMap(one),
-        Effect.map((row) => ({ user: joinedCredentialUser(row), account: joinedAccount(row) })),
-        Effect.mapError(storageFailure),
-      );
+            [email],
+          )
+          .pipe(
+            Effect.flatMap(one),
+            Effect.map((row) => ({ user: joinedCredentialUser(row), account: joinedAccount(row) })),
+            Effect.mapError(storageFailure),
+          );
 
-    const findSessionByTokenHash = makeFindSessionByTokenHash(sql, tables);
+      const findSessionByTokenHash = makeFindSessionByTokenHash(sql, tables);
 
-    const consumeVerificationToken: AuthStorageShape["consumeVerificationToken"] = (input) =>
-      sql.withTransaction(
-        sql.unsafe<{ readonly value: string }>(
-          `UPDATE ${tables.Verifications}
+      const consumeVerificationToken: AuthStorageShape["consumeVerificationToken"] = (input) =>
+        sql
+          .withTransaction(
+            sql
+              .unsafe<{ readonly value: string }>(
+                `UPDATE ${tables.Verifications}
            SET consumed_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
            WHERE identifier = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > to_timestamp($3 / 1000.0)
            RETURNING value`,
-          [tokenKey(input.tokenHash), input.purpose, input.now],
-        ).pipe(
-          Effect.flatMap((rows) =>
-            rows[0] === undefined
-              ? verificationTokenFailure(sql, tables, input.tokenHash, input.purpose, input.now)
-              : Effect.succeed(rows[0]),
-          ),
-          Effect.tap((row) =>
-            input.purpose === "EmailVerification"
-              ? sql.unsafe(
-                  `UPDATE ${tables.Users}
+                [tokenKey(input.tokenHash), input.purpose, input.now],
+              )
+              .pipe(
+                Effect.flatMap((rows) =>
+                  rows[0] === undefined
+                    ? verificationTokenFailure(
+                        sql,
+                        tables,
+                        input.tokenHash,
+                        input.purpose,
+                        input.now,
+                      )
+                    : Effect.succeed(rows[0]),
+                ),
+                Effect.tap((row) =>
+                  input.purpose === "EmailVerification"
+                    ? sql.unsafe(
+                        `UPDATE ${tables.Users}
                    SET email_verified = true, updated_at = to_timestamp($2 / 1000.0)
                    WHERE id = $1`,
-                  [row.value, input.now],
-                )
-              : Effect.void,
-          ),
-          Effect.flatMap((row) =>
-            sql.unsafe<CredentialJoinRow>(
-              `SELECT ${credentialJoinSelect}
+                        [row.value, input.now],
+                      )
+                    : Effect.void,
+                ),
+                Effect.flatMap((row) =>
+                  sql.unsafe<CredentialJoinRow>(
+                    `SELECT ${credentialJoinSelect}
                FROM ${tables.Users} u
                JOIN ${tables.Accounts} a ON a.user_id = u.id
-               WHERE u.id = $1 AND a.provider_id = 'credential'
+           WHERE u.id = $1 AND a.provider_id = 'credential' AND a.password_hash IS NOT NULL
                LIMIT 1`,
-              [row.value],
-            ),
-          ),
-          Effect.flatMap(one),
-          Effect.map((row) => ({ user: joinedCredentialUser(row), account: joinedAccount(row) })),
-        ),
-      ).pipe(Effect.mapError(storageFailure));
+                    [row.value],
+                  ),
+                ),
+                Effect.flatMap(one),
+                Effect.map((row) => ({
+                  user: joinedCredentialUser(row),
+                  account: joinedAccount(row),
+                })),
+              ),
+          )
+          .pipe(Effect.mapError(storageFailure));
 
-    return {
-      createUserWithCredentialAccount: (input) =>
-        sql.withTransaction(
-          Effect.gen(function* () {
-            const userId = yield* makeId("usr");
-            const accountId = yield* makeId("acc");
-            const user = yield* sql.unsafe<UserRow>(
-              `INSERT INTO ${tables.Users} (id, email, name, image, email_verified, created_at, updated_at)
+      return {
+        createUserWithCredentialAccount: (input) =>
+          sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const userId = yield* makeId("usr");
+                const accountId = yield* makeId("acc");
+                const user = yield* sql
+                  .unsafe<UserRow>(
+                    `INSERT INTO ${tables.Users} (id, email, name, image, email_verified, created_at, updated_at)
                VALUES ($1, $2, $3, $4, false, to_timestamp($5 / 1000.0), to_timestamp($5 / 1000.0))
                RETURNING ${userSelect(tables.Users)}`,
-              [userId, input.email, input.name, input.image, input.now],
-            ).pipe(Effect.flatMap(one));
-            yield* sql.unsafe(
-              `INSERT INTO ${tables.Accounts}
+                    [userId, input.email, input.name, input.image, input.now],
+                  )
+                  .pipe(Effect.flatMap(one));
+                yield* sql.unsafe(
+                  `INSERT INTO ${tables.Accounts}
                  (id, provider_id, account_id, user_id, scopes, password_hash, created_at, updated_at)
                VALUES ($1, 'credential', $2, $2, ARRAY[]::text[], $3, to_timestamp($4 / 1000.0), to_timestamp($4 / 1000.0))`,
-              [accountId, userId, passwordHash(input.passwordHash), input.now],
-            );
-            return toUser(user);
-          }),
-        ).pipe(Effect.mapError(storageFailure)),
-      findCredentialAccountByEmail,
-      updateUser: (input) =>
-        sql.unsafe<UserRow>(
-          `UPDATE ${tables.Users}
+                  [accountId, userId, passwordHash(input.passwordHash), input.now],
+                );
+                return toUser(user);
+              }),
+            )
+            .pipe(Effect.mapError(storageFailure)),
+        findCredentialAccountByEmail,
+        updateUser: (input) =>
+          sql
+            .unsafe<UserRow>(
+              `UPDATE ${tables.Users}
            SET name = COALESCE($2, name),
                image = CASE WHEN $3::boolean THEN $4 ELSE image END,
                updated_at = to_timestamp($5 / 1000.0)
            WHERE id = $1
            RETURNING ${userSelect(tables.Users)}`,
-          [
-            input.userId,
-            input.name ?? null,
-            input.image !== undefined,
-            input.image ?? null,
-            input.now,
-          ],
-        ).pipe(Effect.flatMap(one), Effect.map(toUser), Effect.mapError(storageFailure)),
-      listUserAccounts: ({ userId }) =>
-        sql.unsafe<AccountRow>(
-          `SELECT ${accountSelect(tables.Accounts)}
+              [
+                input.userId,
+                input.name ?? null,
+                input.image !== undefined,
+                input.image ?? null,
+                input.now,
+              ],
+            )
+            .pipe(Effect.flatMap(one), Effect.map(toUser), Effect.mapError(storageFailure)),
+        listUserAccounts: ({ userId }) =>
+          sql
+            .unsafe<AccountRow>(
+              `SELECT ${accountSelect(tables.Accounts)}
            FROM ${tables.Accounts}
            WHERE user_id = $1
            ORDER BY created_at ASC, id ASC`,
-          [userId],
-        ).pipe(
-          Effect.map((rows) => rows.map((row) => toPublicAccount(toAccount(row)))),
-          Effect.mapError(storageFailure),
-        ),
-      storeVerificationToken: (input) =>
-        sql.unsafe(
-          `INSERT INTO ${tables.Verifications}
-             (identifier, value, purpose, consumed_at, expires_at, created_at, updated_at)
-           VALUES ($1, $2, $3, NULL, to_timestamp($4 / 1000.0), to_timestamp($5 / 1000.0), to_timestamp($5 / 1000.0))`,
-          [tokenKey(input.tokenHash), input.userId, input.purpose, input.expiresAt, input.now],
-        ).pipe(Effect.asVoid, Effect.mapError(storageFailure)),
-      findVerificationToken: (input) =>
-        sql.unsafe<{ readonly value: string }>(
-          `SELECT value
+              [userId],
+            )
+            .pipe(
+              Effect.map((rows) => rows.map((row) => toPublicAccount(toAccount(row)))),
+              Effect.mapError(storageFailure),
+            ),
+        storeVerificationToken: (input) =>
+          Effect.gen(function* () {
+            const id = yield* makeId("ver");
+            yield* sql.unsafe(
+              `INSERT INTO ${tables.Verifications}
+               (id, identifier, value, purpose, consumed_at, expires_at, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, NULL, to_timestamp($5 / 1000.0), to_timestamp($6 / 1000.0), to_timestamp($6 / 1000.0))`,
+              [
+                id,
+                tokenKey(input.tokenHash),
+                input.userId,
+                input.purpose,
+                input.expiresAt,
+                input.now,
+              ],
+            );
+          }).pipe(Effect.mapError(storageFailure)),
+        findVerificationToken: (input) =>
+          sql
+            .unsafe<{ readonly value: string }>(
+              `SELECT value
            FROM ${tables.Verifications}
            WHERE identifier = $1 AND purpose = $2 AND consumed_at IS NULL AND expires_at > to_timestamp($3 / 1000.0)
            LIMIT 1`,
-          [tokenKey(input.tokenHash), input.purpose, input.now],
-        ).pipe(
-          Effect.flatMap((rows) =>
-            rows[0] === undefined
-              ? verificationTokenFailure(sql, tables, input.tokenHash, input.purpose, input.now)
-              : Effect.succeed(rows[0]),
-          ),
-          Effect.flatMap((row) =>
-              sql.unsafe<CredentialJoinRow>(
-                `SELECT ${credentialJoinSelect}
+              [tokenKey(input.tokenHash), input.purpose, input.now],
+            )
+            .pipe(
+              Effect.flatMap((rows) =>
+                rows[0] === undefined
+                  ? verificationTokenFailure(sql, tables, input.tokenHash, input.purpose, input.now)
+                  : Effect.succeed(rows[0]),
+              ),
+              Effect.flatMap((row) =>
+                sql.unsafe<CredentialJoinRow>(
+                  `SELECT ${credentialJoinSelect}
                  FROM ${tables.Users} u
                  JOIN ${tables.Accounts} a ON a.user_id = u.id
-                 WHERE u.id = $1 AND a.provider_id = 'credential'
+                 WHERE u.id = $1 AND a.provider_id = 'credential' AND a.password_hash IS NOT NULL
                LIMIT 1`,
-              [row.value],
+                  [row.value],
+                ),
+              ),
+              Effect.flatMap(one),
+              Effect.map((row) => ({
+                user: joinedCredentialUser(row),
+                account: joinedAccount(row),
+              })),
+              Effect.mapError(storageFailure),
             ),
-          ),
-          Effect.flatMap(one),
-          Effect.map((row) => ({ user: joinedCredentialUser(row), account: joinedAccount(row) })),
-          Effect.mapError(storageFailure),
-        ),
-      consumeVerificationToken,
-      createSession: (input) =>
-        makeId("ses").pipe(
-          Effect.flatMap((id) =>
-            sql.unsafe<SessionRow>(
-              `INSERT INTO ${tables.Sessions}
+        consumeVerificationToken,
+        createSession: (input) =>
+          makeId("ses").pipe(
+            Effect.flatMap((id) =>
+              sql.unsafe<SessionRow>(
+                `INSERT INTO ${tables.Sessions}
                  (id, user_id, token_hash, created_at, updated_at, expires_at, revoked_at, ip_address, user_agent)
                VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), to_timestamp($4 / 1000.0), to_timestamp($5 / 1000.0), NULL, $6, $7)
                RETURNING ${sessionSelect(tables.Sessions)}`,
-              [
-                id,
-                input.userId,
-                tokenKey(input.tokenHash),
-                input.now,
-                input.expiresAt,
-                input.ipAddress ?? null,
-                input.userAgent ?? null,
-              ],
-            ),
-          ),
-          Effect.flatMap(one),
-          Effect.map(toSession),
-          Effect.mapError(storageFailure),
-        ),
-      findSessionByTokenHash,
-      rotateSessionToken: (input) =>
-        sql.unsafe<SessionRow>(
-          `UPDATE ${tables.Sessions}
-           SET token_hash = $2, updated_at = to_timestamp($4 / 1000.0), expires_at = to_timestamp($3 / 1000.0)
-           WHERE token_hash = $1 AND revoked_at IS NULL
-           RETURNING ${sessionSelect(tables.Sessions)}`,
-          [tokenKey(input.previousHash), tokenKey(input.nextHash), input.expiresAt, input.now],
-        ).pipe(Effect.flatMap(one), Effect.map(toSession), Effect.mapError(storageFailure)),
-      revokeSession: (input) =>
-        sql.unsafe(
-          `UPDATE ${tables.Sessions}
-           SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
-           WHERE token_hash = $1`,
-          [tokenKey(input.tokenHash), input.now],
-        ).pipe(Effect.asVoid, Effect.mapError(storageFailure)),
-      listUserSessions: (input) =>
-        sql.unsafe<SessionRow>(
-          `SELECT ${sessionSelect(tables.Sessions)}
-           FROM ${tables.Sessions}
-           WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > to_timestamp($2 / 1000.0)
-           ORDER BY created_at DESC, id DESC`,
-          [input.userId, input.now],
-        ).pipe(Effect.map((rows) => rows.map(toSession)), Effect.mapError(storageFailure)),
-      revokeUserSession: (input) =>
-        sql.unsafe<SessionRow>(
-          `UPDATE ${tables.Sessions}
-           SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
-           WHERE user_id = $1 AND id = $2 AND revoked_at IS NULL AND expires_at > to_timestamp($3 / 1000.0)
-           RETURNING ${sessionSelect(tables.Sessions)}`,
-          [input.userId, input.sessionId, input.now],
-        ).pipe(Effect.flatMap(one), Effect.asVoid, Effect.mapError(storageFailure)),
-      revokeOtherSessions: (input) =>
-        sql.unsafe(
-          `UPDATE ${tables.Sessions}
-           SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
-           WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`,
-          [input.userId, input.currentSessionId, input.now],
-        ).pipe(Effect.asVoid, Effect.mapError(storageFailure)),
-      revokeAllUserSessions: (input) =>
-        sql.unsafe(
-          `UPDATE ${tables.Sessions}
-           SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
-           WHERE user_id = $1 AND revoked_at IS NULL`,
-          [input.userId, input.now],
-        ).pipe(Effect.asVoid, Effect.mapError(storageFailure)),
-      updateCredentialAccountPasswordHash: (input) =>
-        sql.unsafe<AccountRow>(
-          `UPDATE ${tables.Accounts}
-           SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
-           WHERE user_id = $1 AND provider_id = 'credential'
-           RETURNING ${accountSelect(tables.Accounts)}`,
-          [input.userId, passwordHash(input.passwordHash), input.now],
-        ).pipe(Effect.flatMap(one), Effect.asVoid, Effect.mapError(storageFailure)),
-      completePasswordReset: ({ token, passwordHash }) =>
-        sql.withTransaction(
-          consumeVerificationToken(token).pipe(
-            Effect.flatMap(({ user }) =>
-              sql.unsafe(
-                `UPDATE ${tables.Accounts}
-                 SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
-                 WHERE user_id = $1 AND provider_id = 'credential'`,
-                [user.id, Redacted.value(passwordHash), token.now],
-              ).pipe(
-                Effect.flatMap(() =>
-                  sql.unsafe(
-                    `UPDATE ${tables.Sessions}
-                     SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
-                     WHERE user_id = $1 AND revoked_at IS NULL`,
-                    [user.id, token.now],
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ).pipe(Effect.asVoid, Effect.mapError(storageFailure)),
-      changePasswordSession: (input) =>
-        sql.withTransaction(
-          sql.unsafe(
-            `UPDATE ${tables.Accounts}
-             SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
-             WHERE user_id = $1 AND provider_id = 'credential'`,
-            [
-              input.password.userId,
-              passwordHash(input.password.passwordHash),
-              input.password.now,
-            ],
-          ).pipe(
-            Effect.flatMap(() =>
-              sql.unsafe(
-                `UPDATE ${tables.Sessions}
-                 SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
-                 WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`,
-                [input.password.userId, input.currentSessionId, input.password.now],
-              ),
-            ),
-            Effect.flatMap(() =>
-              sql.unsafe<SessionRow>(
-                `UPDATE ${tables.Sessions}
-                 SET token_hash = $2,
-                     updated_at = to_timestamp($4 / 1000.0),
-                     expires_at = to_timestamp($3 / 1000.0)
-                 WHERE token_hash = $1 AND id = $5 AND revoked_at IS NULL
-                 RETURNING ${sessionSelect(tables.Sessions)}`,
                 [
-                  tokenKey(input.previousSessionTokenHash),
-                  tokenKey(input.nextSessionTokenHash),
-                  input.sessionExpiresAt,
-                  input.password.now,
-                  input.currentSessionId,
+                  id,
+                  input.userId,
+                  tokenKey(input.tokenHash),
+                  input.now,
+                  input.expiresAt,
+                  input.ipAddress ?? null,
+                  input.userAgent ?? null,
                 ],
               ),
             ),
             Effect.flatMap(one),
             Effect.map(toSession),
+            Effect.mapError(storageFailure),
           ),
-        ).pipe(Effect.mapError(storageFailure)),
-      deleteUser: (input) =>
-        sql.withTransaction(
-          sql.unsafe(`DELETE FROM ${tables.Verifications} WHERE value = $1`, [input.userId]).pipe(
-            Effect.flatMap(() =>
-              sql.unsafe<UserRow>(
-                `DELETE FROM ${tables.Users}
+        findSessionByTokenHash,
+        rotateSessionToken: (input) =>
+          sql
+            .unsafe<SessionRow>(
+              `UPDATE ${tables.Sessions}
+           SET token_hash = $2, updated_at = to_timestamp($4 / 1000.0), expires_at = to_timestamp($3 / 1000.0)
+           WHERE token_hash = $1 AND revoked_at IS NULL AND expires_at > to_timestamp($4 / 1000.0)
+           RETURNING ${sessionSelect(tables.Sessions)}`,
+              [tokenKey(input.previousHash), tokenKey(input.nextHash), input.expiresAt, input.now],
+            )
+            .pipe(Effect.flatMap(one), Effect.map(toSession), Effect.mapError(storageFailure)),
+        revokeSession: (input) =>
+          sql
+            .unsafe(
+              `UPDATE ${tables.Sessions}
+           SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
+           WHERE token_hash = $1`,
+              [tokenKey(input.tokenHash), input.now],
+            )
+            .pipe(Effect.asVoid, Effect.mapError(storageFailure)),
+        listUserSessions: (input) =>
+          sql
+            .unsafe<SessionRow>(
+              `SELECT ${sessionSelect(tables.Sessions)}
+           FROM ${tables.Sessions}
+           WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > to_timestamp($2 / 1000.0)
+           ORDER BY created_at DESC, id DESC`,
+              [input.userId, input.now],
+            )
+            .pipe(
+              Effect.map((rows) => rows.map(toSession)),
+              Effect.mapError(storageFailure),
+            ),
+        revokeUserSession: (input) =>
+          sql
+            .unsafe<SessionRow>(
+              `UPDATE ${tables.Sessions}
+           SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
+           WHERE user_id = $1 AND id = $2 AND revoked_at IS NULL AND expires_at > to_timestamp($3 / 1000.0)
+           RETURNING ${sessionSelect(tables.Sessions)}`,
+              [input.userId, input.sessionId, input.now],
+            )
+            .pipe(Effect.flatMap(one), Effect.asVoid, Effect.mapError(storageFailure)),
+        revokeOtherSessions: (input) =>
+          sql
+            .unsafe(
+              `UPDATE ${tables.Sessions}
+           SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
+           WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`,
+              [input.userId, input.currentSessionId, input.now],
+            )
+            .pipe(Effect.asVoid, Effect.mapError(storageFailure)),
+        revokeAllUserSessions: (input) =>
+          sql
+            .unsafe(
+              `UPDATE ${tables.Sessions}
+           SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
+           WHERE user_id = $1 AND revoked_at IS NULL`,
+              [input.userId, input.now],
+            )
+            .pipe(Effect.asVoid, Effect.mapError(storageFailure)),
+        updateCredentialAccountPasswordHash: (input) =>
+          sql
+            .unsafe<AccountRow>(
+              `UPDATE ${tables.Accounts}
+           SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
+           WHERE user_id = $1 AND provider_id = 'credential'
+           RETURNING ${accountSelect(tables.Accounts)}`,
+              [input.userId, passwordHash(input.passwordHash), input.now],
+            )
+            .pipe(Effect.flatMap(one), Effect.asVoid, Effect.mapError(storageFailure)),
+        completePasswordReset: ({ token, passwordHash }) =>
+          sql
+            .withTransaction(
+              consumeVerificationToken(token).pipe(
+                Effect.flatMap(({ user }) =>
+                  sql
+                    .unsafe(
+                      `UPDATE ${tables.Accounts}
+                 SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
+                 WHERE user_id = $1 AND provider_id = 'credential'`,
+                      [user.id, Redacted.value(passwordHash), token.now],
+                    )
+                    .pipe(
+                      Effect.flatMap(() =>
+                        sql.unsafe(
+                          `UPDATE ${tables.Sessions}
+                     SET revoked_at = to_timestamp($2 / 1000.0), updated_at = to_timestamp($2 / 1000.0)
+                     WHERE user_id = $1 AND revoked_at IS NULL`,
+                          [user.id, token.now],
+                        ),
+                      ),
+                    ),
+                ),
+              ),
+            )
+            .pipe(Effect.asVoid, Effect.mapError(storageFailure)),
+        changePasswordSession: (input) =>
+          sql
+            .withTransaction(
+              sql
+                .unsafe(
+                  `UPDATE ${tables.Accounts}
+             SET password_hash = $2, updated_at = to_timestamp($3 / 1000.0)
+             WHERE user_id = $1 AND provider_id = 'credential'`,
+                  [
+                    input.password.userId,
+                    passwordHash(input.password.passwordHash),
+                    input.password.now,
+                  ],
+                )
+                .pipe(
+                  Effect.flatMap(() =>
+                    sql.unsafe(
+                      `UPDATE ${tables.Sessions}
+                 SET revoked_at = to_timestamp($3 / 1000.0), updated_at = to_timestamp($3 / 1000.0)
+                 WHERE user_id = $1 AND id <> $2 AND revoked_at IS NULL`,
+                      [input.password.userId, input.currentSessionId, input.password.now],
+                    ),
+                  ),
+                  Effect.flatMap(() =>
+                    sql.unsafe<SessionRow>(
+                      `UPDATE ${tables.Sessions}
+                 SET token_hash = $2,
+                     updated_at = to_timestamp($4 / 1000.0),
+                     expires_at = to_timestamp($3 / 1000.0)
+                 WHERE token_hash = $1 AND id = $5 AND revoked_at IS NULL AND expires_at > to_timestamp($4 / 1000.0)
+                 RETURNING ${sessionSelect(tables.Sessions)}`,
+                      [
+                        tokenKey(input.previousSessionTokenHash),
+                        tokenKey(input.nextSessionTokenHash),
+                        input.sessionExpiresAt,
+                        input.password.now,
+                        input.currentSessionId,
+                      ],
+                    ),
+                  ),
+                  Effect.flatMap(one),
+                  Effect.map(toSession),
+                ),
+            )
+            .pipe(Effect.mapError(storageFailure)),
+        deleteUser: (input) =>
+          sql
+            .withTransaction(
+              sql
+                .unsafe(`DELETE FROM ${tables.Verifications} WHERE value = $1`, [input.userId])
+                .pipe(
+                  Effect.flatMap(() =>
+                    sql.unsafe<UserRow>(
+                      `DELETE FROM ${tables.Users}
                  WHERE id = $1
                  RETURNING ${userSelect(tables.Users)}`,
-                [input.userId],
-              ),
-            ),
-            Effect.flatMap(one),
-            Effect.asVoid,
-          ),
-        ).pipe(Effect.mapError(storageFailure)),
-    };
-  }),
+                      [input.userId],
+                    ),
+                  ),
+                  Effect.flatMap(one),
+                  Effect.asVoid,
+                ),
+            )
+            .pipe(Effect.mapError(storageFailure)),
+      };
+    }),
 );
 
-export const layer = (options: LayerOptions = {}) => Layer.effect(AuthStorage)(make(options));
+export const layer = <S extends AuthDrizzlePgSchema>(options: LayerOptions<S>) =>
+  Layer.effect(AuthStorage)(make(options));
 
 export const DrizzlePg = {
   schema,
