@@ -33,6 +33,7 @@ import {
   missingFixture,
   invalidCredentials,
   invalidToken,
+  parseClientIp,
   rateLimited,
   unauthorized,
   type PasswordHasherShape,
@@ -410,6 +411,116 @@ it.effect("session workflow rotates stale sessions and sign-out revokes them", (
   }).pipe(Effect.provide(layer));
 });
 
+it.effect("session policy drives issue and refresh durations", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer({
+    sessionPolicy: { sessionTtl: "2 hours", sessionUpdateAge: "30 minutes" },
+  });
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const sessions = yield* SessionWorkflows;
+    const beforeSignIn = yield* Clock.currentTimeMillis;
+    yield* emailPassword.signUp({
+      email: "policy@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const signedIn = yield* emailPassword.signIn({
+      email: "policy@example.com",
+      password: "correct horse battery staple",
+    });
+    const afterSignIn = yield* Clock.currentTimeMillis;
+
+    assert.equal(signedIn.session.expiresAt >= beforeSignIn + 2 * 60 * 60 * 1000, true);
+    assert.equal(signedIn.session.expiresAt <= afterSignIn + 2 * 60 * 60 * 1000, true);
+
+    for (const [key, session] of storageState.sessionsByHash) {
+      storageState.sessionsByHash.set(key, {
+        ...session,
+        updatedAt: session.updatedAt - 31 * 60 * 1000,
+      });
+    }
+    const beforeRefresh = yield* Clock.currentTimeMillis;
+    const refreshed = yield* sessions.currentSession({ sessionToken: signedIn.sessionToken });
+    const afterRefresh = yield* Clock.currentTimeMillis;
+
+    assert.strictEqual(refreshed.tokenRotation._tag, "Rotated");
+    assert.equal(refreshed.session.expiresAt >= beforeRefresh + 2 * 60 * 60 * 1000, true);
+    assert.equal(refreshed.session.expiresAt <= afterRefresh + 2 * 60 * 60 * 1000, true);
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("session management lists and revokes current-user sessions", () => {
+  const { emailState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const emailPassword = yield* EmailPasswordWorkflows;
+    const sessions = yield* SessionWorkflows;
+    yield* emailPassword.signUp({
+      email: "devices@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* emailPassword.verifyEmail({ token: verification.token });
+    const ip = yield* parseClientIp("127.0.0.1");
+    const current = yield* emailPassword.signIn({
+      email: "devices@example.com",
+      password: "correct horse battery staple",
+      ip,
+      userAgent: "Effect Auth Test",
+    });
+    const other = yield* emailPassword.signIn({
+      email: "devices@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const listed = yield* sessions.listSessions({ sessionToken: current.sessionToken });
+    const listedCurrent = listed.sessions.find((session) => session.id === current.session.id);
+    const listedOther = listed.sessions.find((session) => session.id === other.session.id);
+    if (!listedCurrent || !listedOther) return yield* missingFixture("missing listed sessions");
+
+    assert.strictEqual(listed.sessions.length, 2);
+    assert.strictEqual(listedCurrent.isCurrent, true);
+    assert.strictEqual(listedCurrent.ipAddress, "127.0.0.1");
+    assert.strictEqual(listedCurrent.userAgent, "Effect Auth Test");
+    assert.strictEqual(listedOther.isCurrent, false);
+    assert.equal(jsonString(listedCurrent).includes("tokenHash"), false);
+
+    yield* sessions.revokeSession({
+      sessionToken: current.sessionToken,
+      sessionId: other.session.id,
+    });
+    const afterSingleRevoke = yield* sessions.listSessions({ sessionToken: current.sessionToken });
+    assert.deepStrictEqual(
+      afterSingleRevoke.sessions.map((session) => session.id),
+      [current.session.id],
+    );
+
+    const third = yield* emailPassword.signIn({
+      email: "devices@example.com",
+      password: "correct horse battery staple",
+    });
+    yield* sessions.revokeOtherSessions({ sessionToken: current.sessionToken });
+    const thirdRevoked = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: third.sessionToken }),
+    );
+    const currentStillValid = yield* sessions.currentSession({
+      sessionToken: current.sessionToken,
+    });
+    yield* sessions.revokeSessions({ sessionToken: current.sessionToken });
+    const currentRevoked = yield* Effect.exit(
+      sessions.currentSession({ sessionToken: current.sessionToken }),
+    );
+
+    assert.strictEqual(thirdRevoked._tag, "Failure");
+    assert.strictEqual(currentStillValid.session.id, current.session.id);
+    assert.strictEqual(currentRevoked._tag, "Failure");
+  }).pipe(Effect.provide(layer));
+});
+
 it.effect("password reset revokes sessions and password change rotates current session", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
@@ -623,12 +734,13 @@ it.effect("password change checks rate limits before session lookup", () => {
     const recovery = yield* PasswordRecoveryWorkflows;
     const tokenService = yield* AuthToken;
     const token = yield* tokenService.makeSessionToken();
+    const ip = yield* parseClientIp("127.0.0.1");
     const limited = yield* Effect.flip(
       recovery.changePassword({
         sessionToken: token.token,
         currentPassword: "correct horse battery staple",
         newPassword: "changed correct horse battery",
-        ip: "127.0.0.1",
+        ip,
       }),
     );
 

@@ -1,5 +1,5 @@
 import { Clock, Context, Effect, Layer, Schema } from "effect";
-import type { NormalizedEmail } from "../domain/index.js";
+import type { ClientIp, NormalizedEmail } from "../domain/index.js";
 
 export const RateLimitBucket = Schema.Literals([
   "SignIn",
@@ -21,7 +21,7 @@ export class RateLimitExceeded extends Schema.TaggedErrorClass<RateLimitExceeded
 export interface RateLimitAttempt {
   readonly bucket: RateLimitBucket;
   readonly email?: NormalizedEmail;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
 }
 
 export class RateLimiter extends Context.Service<

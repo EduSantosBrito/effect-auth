@@ -1,13 +1,14 @@
-import { Clock, Context, Data, Duration, Effect, Layer } from "effect";
+import { Clock, Context, Data, Duration, Effect, Layer, Match } from "effect";
 import {
   AuthBoundary,
+  BoundaryParseError,
   emailNotVerified,
   invalidCredentials,
   invalidToken,
   rateLimited,
   unauthorized,
-  type BoundaryParseError,
   type CallbackUrl,
+  type ClientIp,
   type NormalizedEmail,
   type PublicAuthError,
 } from "../domain/index.js";
@@ -23,6 +24,7 @@ import {
   AuthStorage,
   type AuthStorageFailure as AuthStorageFailureType,
   type AuthUser,
+  type SessionId,
   type StoredSession,
 } from "../storage/index.js";
 import {
@@ -42,12 +44,57 @@ export interface VerificationTokenConfigShape {
   readonly passwordResetTtlMillis: number;
 }
 
+export interface SessionPolicyInput {
+  readonly sessionTtl?: Duration.Input;
+  readonly sessionUpdateAge?: Duration.Input;
+}
+
+export interface SessionPolicyShape {
+  readonly sessionTtlMillis: number;
+  readonly sessionUpdateAgeMillis: number;
+}
+
+const positiveFiniteDurationMillis = (
+  input: Duration.Input,
+  field: string,
+): Effect.Effect<number, BoundaryParseError> => {
+  const millis = Duration.toMillis(input);
+  return Match.value(Number.isFinite(millis) && millis > 0).pipe(
+    Match.when(true, () => Effect.succeed(millis)),
+    Match.orElse(() =>
+      Effect.fail(new BoundaryParseError({ field, reason: "Expected positive finite duration" })),
+    ),
+  );
+};
+
 const verificationTokenConfigFromInput = (
   input: VerificationTokenConfigInput = {},
 ): VerificationTokenConfigShape => ({
   emailVerificationTtlMillis: Duration.toMillis(input.emailVerificationTtl ?? Duration.days(1)),
   passwordResetTtlMillis: Duration.toMillis(input.passwordResetTtl ?? Duration.minutes(15)),
 });
+
+const defaultSessionPolicy: SessionPolicyShape = {
+  sessionTtlMillis: Duration.toMillis(Duration.days(7)),
+  sessionUpdateAgeMillis: Duration.toMillis(Duration.days(1)),
+};
+
+const sessionPolicyFromInput: (
+  input?: SessionPolicyInput,
+) => Effect.Effect<SessionPolicyShape, BoundaryParseError> = Effect.fn("sessionPolicyFromInput")(
+  (input = {}) =>
+    Effect.gen(function* () {
+      const sessionTtlMillis = yield* positiveFiniteDurationMillis(
+        input.sessionTtl ?? Duration.days(7),
+        "sessionTtl",
+      );
+      const sessionUpdateAgeMillis = yield* positiveFiniteDurationMillis(
+        input.sessionUpdateAge ?? Duration.days(1),
+        "sessionUpdateAge",
+      );
+      return { sessionTtlMillis, sessionUpdateAgeMillis };
+    }),
+);
 
 export const VerificationTokenConfig = Context.Reference<VerificationTokenConfigShape>(
   "effect-auth/VerificationTokenConfig",
@@ -57,7 +104,13 @@ export const VerificationTokenConfig = Context.Reference<VerificationTokenConfig
 export const VerificationTokenConfigLive = (input: VerificationTokenConfigInput = {}) =>
   Layer.succeed(VerificationTokenConfig)(verificationTokenConfigFromInput(input));
 
-const days = (n: number) => n * 24 * 60 * 60 * 1000;
+export const SessionPolicy = Context.Reference<SessionPolicyShape>("effect-auth/SessionPolicy", {
+  defaultValue: () => defaultSessionPolicy,
+});
+
+export const SessionPolicyLive = (input: SessionPolicyInput = {}) =>
+  Layer.effect(SessionPolicy)(sessionPolicyFromInput(input));
+
 const genericFromStorageToken = (error: AuthStorageFailureType): PublicAuthError =>
   error.reason === "TokenExpired" || error.reason === "TokenConsumed" || error.reason === "NotFound"
     ? invalidToken
@@ -66,7 +119,7 @@ const genericRateLimit = (_: RateLimitExceeded): PublicAuthError => rateLimited;
 const rateAttempt = (
   bucket: RateLimitExceeded["bucket"],
   email?: NormalizedEmail,
-  ip?: string,
+  ip?: ClientIp,
 ) => ({
   bucket,
   ...(email === undefined ? {} : { email }),
@@ -77,7 +130,7 @@ export interface SignUpInput {
   readonly email: unknown;
   readonly password: unknown;
   readonly verificationCallbackUrl: unknown;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
 }
 
 export interface SignUpResult {
@@ -95,13 +148,14 @@ export interface VerifyEmailResult {
 export interface ResendVerificationInput {
   readonly email: unknown;
   readonly verificationCallbackUrl: unknown;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
 }
 
 export interface SignInInput {
   readonly email: unknown;
   readonly password: unknown;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
+  readonly userAgent?: string;
 }
 
 export interface SignInResult {
@@ -127,6 +181,32 @@ export interface SessionLookupResult {
   readonly tokenRotation: TokenRotationDecision;
 }
 
+export interface ListedSession {
+  readonly id: SessionId;
+  readonly userId: AuthUser["id"];
+  readonly createdAt: number;
+  readonly updatedAt: number;
+  readonly expiresAt: number;
+  readonly isCurrent: boolean;
+  readonly ipAddress?: string;
+  readonly userAgent?: string;
+}
+
+export interface ListSessionsInput {
+  readonly sessionToken: SessionToken;
+}
+
+export interface ListSessionsResult {
+  readonly user: AuthUser;
+  readonly sessions: ReadonlyArray<ListedSession>;
+  readonly tokenRotation: TokenRotationDecision;
+}
+
+export interface RevokeUserSessionInput {
+  readonly sessionToken: SessionToken;
+  readonly sessionId: SessionId;
+}
+
 export interface SignOutInput {
   readonly sessionToken: SessionToken;
 }
@@ -134,7 +214,7 @@ export interface SignOutInput {
 export interface RequestPasswordResetInput {
   readonly email: unknown;
   readonly resetCallbackUrl: unknown;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
 }
 
 export interface ResetPasswordInput {
@@ -146,7 +226,7 @@ export interface ChangePasswordInput {
   readonly sessionToken: SessionToken;
   readonly currentPassword: unknown;
   readonly newPassword: unknown;
-  readonly ip?: string;
+  readonly ip?: ClientIp;
 }
 
 export interface ChangePasswordResult {
@@ -204,6 +284,21 @@ export interface SessionWorkflowsShape {
     SessionLookupResult,
     PublicAuthError | AuthStorageFailureType | TokenGenerationFailure
   >;
+  readonly listSessions: (
+    input: ListSessionsInput,
+  ) => Effect.Effect<
+    ListSessionsResult,
+    PublicAuthError | AuthStorageFailureType | TokenGenerationFailure
+  >;
+  readonly revokeSession: (
+    input: RevokeUserSessionInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailureType | TokenGenerationFailure>;
+  readonly revokeOtherSessions: (
+    input: SignOutInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailureType | TokenGenerationFailure>;
+  readonly revokeSessions: (
+    input: SignOutInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailureType | TokenGenerationFailure>;
   readonly signOut: (
     input: SignOutInput,
   ) => Effect.Effect<void, PublicAuthError | AuthStorageFailureType | TokenGenerationFailure>;
@@ -259,6 +354,10 @@ export class SessionWorkflows extends Context.Service<
   SessionWorkflows,
   {
     readonly currentSession: SessionWorkflowsShape["currentSession"];
+    readonly listSessions: SessionWorkflowsShape["listSessions"];
+    readonly revokeSession: SessionWorkflowsShape["revokeSession"];
+    readonly revokeOtherSessions: SessionWorkflowsShape["revokeOtherSessions"];
+    readonly revokeSessions: SessionWorkflowsShape["revokeSessions"];
     readonly signOut: SessionWorkflowsShape["signOut"];
   }
 >()("effect-auth/SessionWorkflows") {}
@@ -281,6 +380,7 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
     const email = yield* AuthEmail;
     const limiter = yield* RateLimiter;
     const tokenConfig = yield* VerificationTokenConfig;
+    const sessionPolicy = yield* SessionPolicy;
 
     const signUp: EmailPasswordWorkflowsShape["signUp"] = Effect.fn("EmailPassword.signUp")(
       function* (input) {
@@ -382,8 +482,10 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
         const session = yield* storage.createSession({
           userId: lookup.user.id,
           tokenHash: pair.hash,
-          expiresAt: now + days(7),
+          expiresAt: now + sessionPolicy.sessionTtlMillis,
           now,
+          ...(input.ip === undefined ? {} : { ipAddress: input.ip }),
+          ...(input.userAgent === undefined ? {} : { userAgent: input.userAgent }),
         });
         return { user: lookup.user, session, sessionToken: pair.token };
       },
@@ -397,22 +499,22 @@ export const SessionWorkflowsLive = Layer.effect(SessionWorkflows)(
   Effect.gen(function* () {
     const token = yield* AuthToken;
     const storage = yield* AuthStorage;
+    const sessionPolicy = yield* SessionPolicy;
 
-    const currentSession: SessionWorkflowsShape["currentSession"] = Effect.fn(
-      "Session.currentSession",
-    )(function* (input) {
-      const hash = yield* token.hashToken(input.sessionToken);
+    const lookupCurrentSession = Effect.fn("Session.lookupCurrentSession")(function* (
+      sessionToken: SessionToken,
+    ) {
+      const hash = yield* token.hashToken(sessionToken);
       const lookup = yield* storage
         .findSessionByTokenHash(hash)
         .pipe(Effect.mapError(() => unauthorized));
       const now = yield* Clock.currentTimeMillis;
-      if (lookup.session.expiresAt <= now) return yield* unauthorized;
-      if (lookup.session.updatedAt + days(1) <= now) {
+      if (lookup.session.updatedAt + sessionPolicy.sessionUpdateAgeMillis <= now) {
         const pair = yield* token.makeSessionToken();
         const session = yield* storage.rotateSessionToken({
           previousHash: hash,
           nextHash: pair.hash,
-          expiresAt: now + days(7),
+          expiresAt: now + sessionPolicy.sessionTtlMillis,
           now,
         });
         return {
@@ -428,6 +530,64 @@ export const SessionWorkflowsLive = Layer.effect(SessionWorkflows)(
       };
     });
 
+    const currentSession: SessionWorkflowsShape["currentSession"] = Effect.fn(
+      "Session.currentSession",
+    )(function* (input) {
+      return yield* lookupCurrentSession(input.sessionToken);
+    });
+
+    const listSessions: SessionWorkflowsShape["listSessions"] = Effect.fn("Session.listSessions")(
+      function* (input) {
+        const current = yield* lookupCurrentSession(input.sessionToken);
+        const now = yield* Clock.currentTimeMillis;
+        const sessions = yield* storage.listUserSessions({ userId: current.user.id, now });
+        return {
+          user: current.user,
+          sessions: sessions.map(
+            ({ tokenHash: _tokenHash, revokedAt: _revokedAt, ...session }) => ({
+              ...session,
+              isCurrent: session.id === current.session.id,
+            }),
+          ),
+          tokenRotation: current.tokenRotation,
+        };
+      },
+    );
+
+    const revokeSession: SessionWorkflowsShape["revokeSession"] = Effect.fn(
+      "Session.revokeSession",
+    )(function* (input) {
+      const current = yield* lookupCurrentSession(input.sessionToken);
+      const now = yield* Clock.currentTimeMillis;
+      yield* storage
+        .revokeUserSession({ userId: current.user.id, sessionId: input.sessionId, now })
+        .pipe(Effect.mapError(() => unauthorized));
+    });
+
+    const revokeOtherSessions: SessionWorkflowsShape["revokeOtherSessions"] = Effect.fn(
+      "Session.revokeOtherSessions",
+    )(function* (input) {
+      const current = yield* lookupCurrentSession(input.sessionToken);
+      const now = yield* Clock.currentTimeMillis;
+      yield* storage
+        .revokeOtherSessions({
+          userId: current.user.id,
+          currentSessionId: current.session.id,
+          now,
+        })
+        .pipe(Effect.mapError(() => unauthorized));
+    });
+
+    const revokeSessions: SessionWorkflowsShape["revokeSessions"] = Effect.fn(
+      "Session.revokeSessions",
+    )(function* (input) {
+      const current = yield* lookupCurrentSession(input.sessionToken);
+      const now = yield* Clock.currentTimeMillis;
+      yield* storage
+        .revokeAllUserSessions({ userId: current.user.id, now })
+        .pipe(Effect.mapError(() => unauthorized));
+    });
+
     const signOut: SessionWorkflowsShape["signOut"] = Effect.fn("Session.signOut")(
       function* (input) {
         const hash = yield* token.hashToken(input.sessionToken);
@@ -438,7 +598,14 @@ export const SessionWorkflowsLive = Layer.effect(SessionWorkflows)(
       },
     );
 
-    return { currentSession, signOut };
+    return {
+      currentSession,
+      listSessions,
+      revokeSession,
+      revokeOtherSessions,
+      revokeSessions,
+      signOut,
+    };
   }),
 );
 
@@ -452,6 +619,7 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
     const email = yield* AuthEmail;
     const limiter = yield* RateLimiter;
     const tokenConfig = yield* VerificationTokenConfig;
+    const sessionPolicy = yield* SessionPolicy;
 
     const requestPasswordReset: PasswordRecoveryWorkflowsShape["requestPasswordReset"] = Effect.fn(
       "PasswordRecovery.requestPasswordReset",
@@ -532,7 +700,7 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         currentSessionId: lookup.session.id,
         previousSessionTokenHash: sessionHash,
         nextSessionTokenHash: pair.hash,
-        sessionExpiresAt: now + days(7),
+        sessionExpiresAt: now + sessionPolicy.sessionTtlMillis,
       });
       return { currentSessionToken: pair.token };
     });

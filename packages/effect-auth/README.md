@@ -26,7 +26,7 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 - Email/password sign-up and sign-in.
 - Email Verification with one-time hashed Verification Tokens.
 - Password Reset and authenticated Password Change.
-- Server-side Sessions with revocation and token rotation.
+- Server-side Sessions with listing, revocation, policy configuration, and token rotation.
 - HttpOnly SameSite=Lax Session Cookie support for browser flows.
 - Bearer Session Token extraction for server-owned API flows.
 - Trusted Origin checks for state-changing browser requests.
@@ -63,16 +63,35 @@ const program = Effect.gen(function* () {
 
 `AuthLive.dev` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, workflow composition, and a permissive development Rate Limiter. `AuthLive.default` is currently an alias for `AuthLive.dev`. Applications provide Auth Storage and Auth Email as Effect layers; production apps should use `AuthLive.production` and provide a real Rate Limiter.
 
-Token TTLs are configured at the workflow seam:
+Token TTLs and Session Policy are configured at the workflow seam:
 
 ```typescript
-import { VerificationTokenConfigLive } from "effect-auth";
+import { SessionPolicyLive, VerificationTokenConfigLive } from "effect-auth";
 
 const TokenPolicyLive = VerificationTokenConfigLive({
   emailVerificationTtl: "24 hours",
   passwordResetTtl: "15 minutes",
 });
+
+const SessionPolicy = SessionPolicyLive({
+  sessionTtl: "7 days",
+  sessionUpdateAge: "1 day",
+});
 ```
+
+Session Policy controls how long issued/refreshed Sessions remain valid and how old a Session must be before lookup rotates its Session Token. Defaults remain 7 days for `sessionTtl` and 1 day for `sessionUpdateAge`.
+
+Programmatic Session Management verbs are available on `Auth`:
+
+```typescript
+const listed = yield* auth.listSessions({ sessionToken });
+
+yield* auth.revokeSession({ sessionToken, sessionId: listed.sessions[0].id });
+yield* auth.revokeOtherSessions({ sessionToken });
+yield* auth.revokeSessions({ sessionToken });
+```
+
+Listed Sessions include `id`, `userId`, `createdAt`, `updatedAt`, `expiresAt`, `isCurrent`, and optional `ipAddress` / `userAgent`. They never expose raw Session Tokens or token hashes, and listing returns active Sessions only.
 
 ## HTTP Usage
 
@@ -85,7 +104,7 @@ import * as HttpRouter from "effect/unstable/http/HttpRouter";
 const appLayer = Layer.mergeAll(
   AuthLive.production,
   AuthHttpConfig.layer({
-    trustedOrigins: ["https://app.example.com"],
+    trustedOrigins: [new URL("https://app.example.com")],
     sessionCookieName: "__Host_effect_auth_session",
     secureCookies: true,
   }),
@@ -129,9 +148,15 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `POST` | `/api/auth/sign-in/email`           |
 | `GET`  | `/api/auth/session`                 |
 | `POST` | `/api/auth/sign-out`                |
+| `GET`  | `/api/auth/sessions`                |
+| `POST` | `/api/auth/sessions/revoke`         |
+| `POST` | `/api/auth/sessions/revoke-others`  |
+| `POST` | `/api/auth/sessions/revoke-all`     |
 | `POST` | `/api/auth/password-reset/request`  |
 | `POST` | `/api/auth/password-reset/complete` |
 | `POST` | `/api/auth/password/change`         |
+
+`GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid.
 
 ## Current Scope
 

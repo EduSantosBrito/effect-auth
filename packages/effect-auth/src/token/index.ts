@@ -1,12 +1,20 @@
 import { createHash, randomBytes } from "node:crypto";
 import { Context, Effect, Layer, Redacted, Schema } from "effect";
 
-export const VerificationToken = Schema.RedactedFromValue(Schema.String, {
+const tokenFormat = Schema.String.pipe(
+  Schema.check(
+    Schema.makeFilter((value) =>
+      /^[A-Za-z0-9_-]{43}$/u.test(value) ? undefined : "Expected generated token format",
+    ),
+  ),
+);
+
+export const VerificationToken = Schema.RedactedFromValue(tokenFormat, {
   label: "VerificationToken",
 });
 export type VerificationToken = typeof VerificationToken.Type;
 
-export const SessionToken = Schema.RedactedFromValue(Schema.String, { label: "SessionToken" });
+export const SessionToken = Schema.RedactedFromValue(tokenFormat, { label: "SessionToken" });
 export type SessionToken = typeof SessionToken.Type;
 
 export const TokenHash = Schema.RedactedFromValue(Schema.String, { label: "TokenHash" });

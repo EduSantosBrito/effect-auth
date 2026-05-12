@@ -118,6 +118,35 @@ const revokeOtherSessions = (
     }
   });
 
+const isActiveSession = (session: StoredSession, now: number) =>
+  session.revokedAt === undefined && session.expiresAt > now;
+
+const listUserSessions = (
+  state: ExampleStorageState,
+  { userId, now }: Parameters<AuthStorageShape["listUserSessions"]>[0],
+) =>
+  Effect.sync(() =>
+    Array.from(state.sessionsByHash.values()).filter(
+      (session) => session.userId === userId && isActiveSession(session, now),
+    ),
+  );
+
+const revokeUserSession = (
+  state: ExampleStorageState,
+  { userId, sessionId, now }: Parameters<AuthStorageShape["revokeUserSession"]>[0],
+) =>
+  Effect.suspend(() => {
+    const entry = Array.from(state.sessionsByHash.entries()).find(
+      ([, session]) => session.id === sessionId && session.userId === userId,
+    );
+    if (!entry) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    const [key, session] = entry;
+    if (!isActiveSession(session, now))
+      return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
+    return Effect.void;
+  });
+
 const revokeAllUserSessions = (
   state: ExampleStorageState,
   { userId, now }: Parameters<AuthStorageShape["revokeAllUserSessions"]>[0],
@@ -162,7 +191,7 @@ const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
     }),
   findVerificationToken: (input) => findUsableVerificationToken(state, input),
   consumeVerificationToken: (input) => consumeVerificationToken(state, input),
-  createSession: ({ userId, tokenHash, expiresAt, now }) =>
+  createSession: ({ userId, tokenHash, expiresAt, now, ipAddress, userAgent }) =>
     Effect.sync(() => {
       const session: StoredSession = {
         id: id("ses"),
@@ -171,6 +200,8 @@ const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
         createdAt: now,
         updatedAt: now,
         expiresAt,
+        ...(ipAddress === undefined ? {} : { ipAddress }),
+        ...(userAgent === undefined ? {} : { userAgent }),
       };
       state.sessionsByHash.set(tokenKey(tokenHash), session);
       return session;
@@ -194,6 +225,8 @@ const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
       state.sessionsByHash.set(tokenKey(tokenHash), { ...session, revokedAt: now, updatedAt: now });
       return Effect.void;
     }),
+  listUserSessions: (input) => listUserSessions(state, input),
+  revokeUserSession: (input) => revokeUserSession(state, input),
   revokeOtherSessions: (input) => revokeOtherSessions(state, input),
   revokeAllUserSessions: (input) => revokeAllUserSessions(state, input),
   updatePasswordHash: (input) => updatePasswordHash(state, input),

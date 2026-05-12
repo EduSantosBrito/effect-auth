@@ -1,4 +1,5 @@
 import { assert, it } from "@effect/vitest";
+import { Schema } from "effect";
 import {
   Auth,
   AuthApiEndpoints,
@@ -46,6 +47,19 @@ import {
   type SessionToken,
 } from "./support";
 
+const MountedListSessionsResponse = Schema.Struct({
+  sessions: Schema.Array(
+    Schema.Struct({
+      id: Schema.String,
+      isCurrent: Schema.Boolean,
+    }),
+  ),
+});
+const MountedListSessionsResponseJson = Schema.fromJsonString(MountedListSessionsResponse);
+const decodeMountedListSessionsResponseJson = Schema.decodeUnknownEffect(
+  MountedListSessionsResponseJson,
+);
+
 it.effect("AuthHttp.mount adds a token-free sign-in route under the configured base path", () => {
   const { emailState, layer: authLayer } = makeWorkflowLayer();
   return Effect.gen(function* () {
@@ -65,7 +79,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
         Layer.mergeAll(
           authLayer,
           AuthHttpConfig.layer({
-            trustedOrigins: ["https://app.example.com"],
+            trustedOrigins: [new URL("https://app.example.com")],
             secureCookies: true,
           }),
         ),
@@ -125,7 +139,7 @@ it.effect("AuthHttp.mount rejects cookie state changes without trusted origin or
         Layer.mergeAll(
           authLayer,
           AuthHttpConfig.layer({
-            trustedOrigins: ["https://app.example.com"],
+            trustedOrigins: [new URL("https://app.example.com")],
             secureCookies: true,
           }),
         ),
@@ -179,7 +193,7 @@ it.effect("AuthHttp.mount uses custom HTTP error mapper when provided", () => {
         Layer.mergeAll(
           authLayer,
           AuthHttpConfig.layer({
-            trustedOrigins: ["https://app.example.com"],
+            trustedOrigins: [new URL("https://app.example.com")],
             secureCookies: true,
           }),
           Layer.succeed(AuthHttpErrorMapper)({
@@ -214,7 +228,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
         Layer.mergeAll(
           authLayer,
           AuthHttpConfig.layer({
-            trustedOrigins: ["https://app.example.com"],
+            trustedOrigins: [new URL("https://app.example.com")],
             secureCookies: true,
           }),
         ),
@@ -273,6 +287,55 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
     assert.strictEqual(current.status, 200);
     assert.equal(currentBody.includes("mounted-flow@example.com"), true);
     assert.equal(currentBody.includes("tokenHash"), false);
+
+    const secondSignIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({
+        email: "mounted-flow@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    const secondCookie = secondSignIn.headers.get("set-cookie");
+    if (!secondCookie) return yield* missingFixture("missing second sign-in cookie");
+
+    const listed = yield* call("/api/auth/sessions", {
+      method: "GET",
+      headers: { cookie: sessionCookie },
+    });
+    const listedText = yield* Effect.promise(() => listed.text());
+    const listedBody = yield* decodeMountedListSessionsResponseJson(listedText);
+    const otherSession = listedBody.sessions.find((session) => !session.isCurrent);
+    if (!otherSession) return yield* missingFixture("missing other listed session");
+    assert.strictEqual(listed.status, 200);
+    assert.equal(listedText.includes("tokenHash"), false);
+
+    const revokedOne = yield* call(
+      "/api/auth/sessions/revoke",
+      json({ sessionId: otherSession.id }, sessionCookie),
+    );
+    assert.strictEqual(revokedOne.status, 200);
+    const secondAfterRevoke = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: secondCookie },
+    });
+    assert.notStrictEqual(secondAfterRevoke.status, 200);
+
+    const thirdSignIn = yield* call(
+      "/api/auth/sign-in/email",
+      json({
+        email: "mounted-flow@example.com",
+        password: "correct horse battery staple",
+      }),
+    );
+    const thirdCookie = thirdSignIn.headers.get("set-cookie");
+    if (!thirdCookie) return yield* missingFixture("missing third sign-in cookie");
+    const revokedOthers = yield* call("/api/auth/sessions/revoke-others", json({}, sessionCookie));
+    assert.strictEqual(revokedOthers.status, 200);
+    const thirdAfterRevoke = yield* call("/api/auth/session", {
+      method: "GET",
+      headers: { cookie: thirdCookie },
+    });
+    assert.notStrictEqual(thirdAfterRevoke.status, 200);
 
     const resetRequested = yield* call(
       "/api/auth/password-reset/request",
@@ -407,7 +470,7 @@ it.effect(
         Layer.mergeAll(
           authLayer,
           AuthHttpConfig.layer({
-            trustedOrigins: ["https://app.example.com"],
+            trustedOrigins: [new URL("https://app.example.com")],
             secureCookies: true,
           }),
         ),
@@ -530,7 +593,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
         HttpServerRequest.HttpServerRequest,
         HttpServerRequest.fromClientRequest(
           HttpClientRequest.get("https://auth.example.com/navbar").pipe(
-            HttpClientRequest.setHeader("cookie", "effect_auth_session=stale"),
+            HttpClientRequest.setHeader("cookie", `effect_auth_session=${"a".repeat(43)}`),
           ),
         ),
       ),
@@ -583,7 +646,7 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
       Layer.mergeAll(
         authLayer,
         AuthHttpConfig.layer({
-          trustedOrigins: ["https://app.example.com"],
+          trustedOrigins: [new URL("https://app.example.com")],
           secureCookies: true,
         }),
       ),
@@ -741,7 +804,7 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
 it.effect("http adapter uses configured session cookie options", () => {
   const { emailState, layer } = makeWorkflowLayer({
     httpConfig: {
-      trustedOrigins: ["https://app.example.com"],
+      trustedOrigins: [new URL("https://app.example.com")],
       sessionCookieName: "__Host_effect_auth",
       sessionCookiePath: "/auth",
       secureCookies: true,
@@ -1056,6 +1119,10 @@ it.effect("auth api endpoint inventory matches the ICD paths", () =>
       ["POST", "/auth/password-reset/request"],
       ["POST", "/auth/password-reset/complete"],
       ["POST", "/auth/password/change"],
+      ["GET", "/auth/sessions"],
+      ["POST", "/auth/sessions/revoke"],
+      ["POST", "/auth/sessions/revoke-others"],
+      ["POST", "/auth/sessions/revoke-all"],
     ]);
   }),
 );

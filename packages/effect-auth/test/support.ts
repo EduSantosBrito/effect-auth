@@ -22,6 +22,7 @@ import {
   unauthorized,
   normalizeEmail,
   normalizePassword,
+  parseClientIp,
 } from "../src/domain/index";
 import { AuthEmail, AuthEmailFailure } from "../src/email/index";
 import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
@@ -83,6 +84,7 @@ import {
   PasswordRecoveryWorkflowsLive,
   SessionWorkflows,
   SessionWorkflowsLive,
+  SessionPolicyLive,
   VerificationTokenConfigLive,
 } from "../src/workflows/index";
 
@@ -115,6 +117,10 @@ const AuthTestLive = Layer.effect(
       resendVerification: emailPassword.resendVerification,
       signIn: emailPassword.signIn,
       currentSession: sessions.currentSession,
+      listSessions: sessions.listSessions,
+      revokeSession: sessions.revokeSession,
+      revokeOtherSessions: sessions.revokeOtherSessions,
+      revokeSessions: sessions.revokeSessions,
       signOut: sessions.signOut,
       requestPasswordReset: recovery.requestPasswordReset,
       resetPassword: recovery.resetPassword,
@@ -126,6 +132,7 @@ const AuthTestLive = Layer.effect(
 const makeWorkflowLayer = (
   options: {
     readonly httpConfig?: Parameters<typeof AuthHttpConfig.layer>[0];
+    readonly sessionPolicy?: Parameters<typeof SessionPolicyLive>[0];
     readonly verificationTokenConfig?: Parameters<typeof VerificationTokenConfigLive>[0];
   } = {},
 ) => {
@@ -139,8 +146,11 @@ const makeWorkflowLayer = (
     DevMemoryAuthStorage(storageState),
     MockAuthEmail(emailState),
     PermissiveDevRateLimiter,
-    AuthHttpConfig.layer(options.httpConfig ?? { trustedOrigins: ["https://app.example.com"] }),
+    AuthHttpConfig.layer(
+      options.httpConfig ?? { trustedOrigins: [new URL("https://app.example.com")] },
+    ),
     VerificationTokenConfigLive(options.verificationTokenConfig),
+    SessionPolicyLive(options.sessionPolicy),
   );
   const workflowsLayer = Layer.mergeAll(
     EmailPasswordWorkflowsLive,
@@ -196,6 +206,7 @@ export {
   Redacted,
   SecureDefaultPasswordPolicy,
   SessionCookie,
+  SessionPolicyLive,
   SessionWorkflows,
   TrustedOrigins,
   TestPasswordHasher,
@@ -226,6 +237,7 @@ export {
   missingFixture,
   normalizeEmail,
   normalizePassword,
+  parseClientIp,
   rateLimited,
   unauthorized,
 };

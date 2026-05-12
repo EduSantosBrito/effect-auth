@@ -3,6 +3,14 @@ export type { PublicAuthError } from "./domain/index.js";
 export {
   VerificationTokenConfig,
   VerificationTokenConfigLive,
+  SessionPolicy,
+  SessionPolicyLive,
+  type ListedSession,
+  type ListSessionsInput,
+  type ListSessionsResult,
+  type RevokeUserSessionInput,
+  type SessionPolicyInput,
+  type SessionPolicyShape,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
 } from "./workflows/index.js";

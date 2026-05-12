@@ -19,13 +19,17 @@ import {
   EmailPasswordWorkflowsLive,
   PasswordRecoveryWorkflows,
   PasswordRecoveryWorkflowsLive,
+  SessionPolicy,
   SessionWorkflows,
   SessionWorkflowsLive,
   VerificationTokenConfigLive,
   type ChangePasswordInput,
   type ChangePasswordResult,
   type CurrentSessionInput,
+  type ListSessionsInput,
+  type ListSessionsResult,
   type RequestPasswordResetInput,
+  type RevokeUserSessionInput,
   type ResendVerificationInput,
   type ResetPasswordInput,
   type SessionLookupResult,
@@ -86,6 +90,21 @@ export interface AuthShape {
     SessionLookupResult,
     PublicAuthError | AuthStorageFailure | TokenGenerationFailure
   >;
+  readonly listSessions: (
+    input: ListSessionsInput,
+  ) => Effect.Effect<
+    ListSessionsResult,
+    PublicAuthError | AuthStorageFailure | TokenGenerationFailure
+  >;
+  readonly revokeSession: (
+    input: RevokeUserSessionInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+  readonly revokeOtherSessions: (
+    input: SignOutInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+  readonly revokeSessions: (
+    input: SignOutInput,
+  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
   readonly signOut: (
     input: SignOutInput,
   ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
@@ -133,6 +152,10 @@ export class Auth extends Context.Service<
     readonly resendVerification: AuthShape["resendVerification"];
     readonly signIn: AuthShape["signIn"];
     readonly currentSession: AuthShape["currentSession"];
+    readonly listSessions: AuthShape["listSessions"];
+    readonly revokeSession: AuthShape["revokeSession"];
+    readonly revokeOtherSessions: AuthShape["revokeOtherSessions"];
+    readonly revokeSessions: AuthShape["revokeSessions"];
     readonly signOut: AuthShape["signOut"];
     readonly requestPasswordReset: AuthShape["requestPasswordReset"];
     readonly resetPassword: AuthShape["resetPassword"];
@@ -152,6 +175,10 @@ const AuthLiveLayer = Layer.effect(Auth)(
       resendVerification: emailPassword.resendVerification,
       signIn: emailPassword.signIn,
       currentSession: sessions.currentSession,
+      listSessions: sessions.listSessions,
+      revokeSession: sessions.revokeSession,
+      revokeOtherSessions: sessions.revokeOtherSessions,
+      revokeSessions: sessions.revokeSessions,
       signOut: sessions.signOut,
       requestPasswordReset: recovery.requestPasswordReset,
       resetPassword: recovery.resetPassword,
@@ -166,6 +193,10 @@ const AuthDefaultsLive = Layer.mergeAll(
   NativeScryptPasswordHasher,
   AuthTokenLive,
   VerificationTokenConfigLive(),
+  Layer.succeed(SessionPolicy)({
+    sessionTtlMillis: 7 * 24 * 60 * 60 * 1000,
+    sessionUpdateAgeMillis: 24 * 60 * 60 * 1000,
+  }),
 );
 
 const AuthDevDefaultsLive = Layer.mergeAll(AuthDefaultsLive, PermissiveDevRateLimiter);

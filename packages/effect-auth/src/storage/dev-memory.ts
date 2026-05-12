@@ -1,4 +1,4 @@
-import { Clock, Effect, Layer, Redacted } from "effect";
+import { Clock, Effect, Layer, Match, Redacted } from "effect";
 import type { TokenHash } from "../token/index.js";
 import {
   AuthStorage,
@@ -36,6 +36,17 @@ export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
 let nextId = 0;
 const id = (prefix: string) => `${prefix}_${++nextId}`;
 const tokenKey = (hash: TokenHash) => Redacted.value(hash);
+
+const isStoredSessionRecord = (session: StoredSession | undefined): session is StoredSession =>
+  session !== undefined &&
+  typeof session.id === "string" &&
+  typeof session.userId === "string" &&
+  typeof session.createdAt === "number" &&
+  typeof session.updatedAt === "number" &&
+  typeof session.expiresAt === "number" &&
+  (session.revokedAt === undefined || typeof session.revokedAt === "number") &&
+  (session.ipAddress === undefined || typeof session.ipAddress === "string") &&
+  (session.userAgent === undefined || typeof session.userAgent === "string");
 
 const findUsableVerificationToken = (
   state: DevMemoryStorageState,
@@ -96,7 +107,9 @@ const rotateSessionToken = (
 ) =>
   Effect.suspend(() => {
     const session = state.sessionsByHash.get(tokenKey(previousHash));
-    if (!session || session.revokedAt !== undefined)
+    if (!isStoredSessionRecord(session))
+      return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
+    if (session.revokedAt !== undefined)
       return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
     state.sessionsByHash.delete(tokenKey(previousHash));
     const rotated = { ...session, tokenHash: nextHash, updatedAt: now, expiresAt };
@@ -114,6 +127,45 @@ const revokeOtherSessions = (
         state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
       }
     }
+  });
+
+const isActiveSession = (session: StoredSession, now: number) =>
+  session.revokedAt === undefined && session.expiresAt > now;
+
+const listUserSessions = (
+  state: DevMemoryStorageState,
+  { userId, now }: Parameters<AuthStorageShape["listUserSessions"]>[0],
+) =>
+  Effect.sync(() =>
+    Array.from(state.sessionsByHash.values()).filter(
+      (session) =>
+        isStoredSessionRecord(session) &&
+        session.userId === userId &&
+        isActiveSession(session, now),
+    ),
+  );
+
+const revokeUserSession = (
+  state: DevMemoryStorageState,
+  { userId, sessionId, now }: Parameters<AuthStorageShape["revokeUserSession"]>[0],
+) =>
+  Effect.suspend(() => {
+    const entry: readonly [string, StoredSession] | undefined = Array.from(
+      state.sessionsByHash.entries(),
+    ).find(([, session]) => session.id === sessionId && session.userId === userId);
+    return Match.value(entry).pipe(
+      Match.when(
+        (
+          entry: readonly [string, StoredSession] | undefined,
+        ): entry is readonly [string, StoredSession] =>
+          entry !== undefined && isActiveSession(entry[1], now),
+        ([key, session]) =>
+          Effect.sync(() => {
+            state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
+          }),
+      ),
+      Match.orElse(() => Effect.fail(new AuthStorageFailure({ reason: "NotFound" }))),
+    );
   });
 
 const revokeAllUserSessions = (
@@ -160,7 +212,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     }),
   findVerificationToken: (input) => findUsableVerificationToken(state, input),
   consumeVerificationToken: (input) => consumeVerificationToken(state, input),
-  createSession: ({ userId, tokenHash, expiresAt, now }) =>
+  createSession: ({ userId, tokenHash, expiresAt, now, ipAddress, userAgent }) =>
     Effect.sync(() => {
       const session: StoredSession = {
         id: id("ses"),
@@ -169,6 +221,8 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
         createdAt: now,
         updatedAt: now,
         expiresAt,
+        ...(ipAddress === undefined ? {} : { ipAddress }),
+        ...(userAgent === undefined ? {} : { userAgent }),
       };
       state.sessionsByHash.set(tokenKey(tokenHash), session);
       return session;
@@ -177,6 +231,8 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     Effect.gen(function* () {
       const now = yield* Clock.currentTimeMillis;
       const session = state.sessionsByHash.get(tokenKey(hash));
+      if (session !== undefined && !isStoredSessionRecord(session))
+        return yield* new AuthStorageFailure({ reason: "BackendUnavailable" });
       const user = session ? state.users.get(session.userId) : undefined;
       if (!session || !user || session.revokedAt !== undefined)
         return yield* new AuthStorageFailure({ reason: "NotFound" });
@@ -186,16 +242,27 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     }),
   rotateSessionToken: (input) => rotateSessionToken(state, input),
   revokeSession: ({ tokenHash, now }) =>
-    Effect.suspend(() => {
-      const session = state.sessionsByHash.get(tokenKey(tokenHash));
-      if (!session) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
-      state.sessionsByHash.set(tokenKey(tokenHash), {
+    Effect.gen(function* () {
+      const key = tokenKey(tokenHash);
+      const session = yield* Match.value(state.sessionsByHash.get(key)).pipe(
+        Match.when(
+          (session) => session !== undefined && !isStoredSessionRecord(session),
+          () => new AuthStorageFailure({ reason: "BackendUnavailable" }),
+        ),
+        Match.when(
+          (session) => session === undefined,
+          () => new AuthStorageFailure({ reason: "NotFound" }),
+        ),
+        Match.orElse((session) => Effect.succeed(session)),
+      );
+      state.sessionsByHash.set(key, {
         ...session,
         revokedAt: now,
         updatedAt: now,
       });
-      return Effect.void;
     }),
+  listUserSessions: (input) => listUserSessions(state, input),
+  revokeUserSession: (input) => revokeUserSession(state, input),
   revokeOtherSessions: (input) => revokeOtherSessions(state, input),
   revokeAllUserSessions: (input) => revokeAllUserSessions(state, input),
   updatePasswordHash: (input) => updatePasswordHash(state, input),
