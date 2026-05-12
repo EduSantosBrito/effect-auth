@@ -161,7 +161,6 @@ export interface ChangePasswordSession {
 
 export interface DeleteUserStorageInput {
   readonly userId: AuthUserId;
-  readonly now: number;
 }
 
 export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailure>()(
