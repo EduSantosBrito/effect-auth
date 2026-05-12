@@ -1,5 +1,5 @@
 import { isIP } from "node:net";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Redacted, Schema } from "effect";
 
 export const NormalizedEmail = Schema.String.pipe(Schema.brand("NormalizedEmail"));
 export type NormalizedEmail = typeof NormalizedEmail.Type;
@@ -98,13 +98,19 @@ export const normalizeEmail = (
 export const normalizePassword = (
   input: unknown,
 ): Effect.Effect<PasswordText, BoundaryParseError> =>
-  typeof input !== "string"
-    ? Effect.fail(new BoundaryParseError({ field: "password", reason: "Expected string" }))
-    : decodePasswordText(input.normalize("NFKC")).pipe(
+  Redacted.isRedacted(input)
+    ? decodePasswordText(Redacted.value(input)).pipe(
         Effect.mapError(
           () => new BoundaryParseError({ field: "password", reason: "Invalid password" }),
         ),
-      );
+      )
+    : typeof input !== "string"
+      ? Effect.fail(new BoundaryParseError({ field: "password", reason: "Expected string" }))
+      : decodePasswordText(input.normalize("NFKC")).pipe(
+          Effect.mapError(
+            () => new BoundaryParseError({ field: "password", reason: "Invalid password" }),
+          ),
+        );
 
 export const parseCallbackUrl = (input: unknown): Effect.Effect<CallbackUrl, BoundaryParseError> =>
   Effect.try({

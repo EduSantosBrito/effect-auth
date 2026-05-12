@@ -1,10 +1,18 @@
 import { assert, it } from "@effect/vitest";
+import type {
+  ChangePasswordInput as WorkflowChangePasswordInput,
+  RequestPasswordResetInput as WorkflowRequestPasswordResetInput,
+  ResetPasswordInput as WorkflowResetPasswordInput,
+  SignInInput as WorkflowSignInInput,
+  SignUpInput as WorkflowSignUpInput,
+} from "../src/workflows/index";
 import {
   Auth,
   AuthBoundaryLive,
   AuthEmail,
   AuthEmailFailure,
   AuthLive,
+  AuthTestLive,
   AuthStorageFailure,
   AuthToken,
   AuthTokenLive,
@@ -17,7 +25,6 @@ import {
   MockAuthEmail,
   PasswordHasher,
   PasswordPolicyFailure,
-  PasswordRecoveryWorkflows,
   PasswordRecoveryWorkflowsLive,
   Predicate,
   RateLimitExceeded,
@@ -25,6 +32,7 @@ import {
   Redacted,
   SecureDefaultPasswordPolicy,
   SessionWorkflows,
+  SessionWorkflowsLive,
   TestPasswordHasher,
   jsonString,
   makeDevMemoryStorageState,
@@ -39,10 +47,57 @@ import {
   type PasswordHasherShape,
 } from "./support";
 
+type ExpectFalse<T extends false> = T;
+
+export type WorkflowCommandBoundaryContract = {
+  readonly signUpRejectsRawUnknown: ExpectFalse<
+    {
+      readonly email: string;
+      readonly password: string;
+      readonly verificationCallbackUrl: string;
+    } extends WorkflowSignUpInput
+      ? true
+      : false
+  >;
+  readonly signInRejectsRawUnknown: ExpectFalse<
+    {
+      readonly email: string;
+      readonly password: string;
+    } extends WorkflowSignInInput
+      ? true
+      : false
+  >;
+  readonly requestResetRejectsRawUnknown: ExpectFalse<
+    {
+      readonly email: string;
+      readonly resetCallbackUrl: string;
+    } extends WorkflowRequestPasswordResetInput
+      ? true
+      : false
+  >;
+  readonly completeResetRejectsRawUnknown: ExpectFalse<
+    {
+      readonly token: string;
+      readonly password: string;
+    } extends WorkflowResetPasswordInput
+      ? true
+      : false
+  >;
+  readonly changePasswordRejectsRawUnknown: ExpectFalse<
+    {
+      readonly sessionToken: string;
+      readonly currentPassword: string;
+      readonly newPassword: string;
+    } extends WorkflowChangePasswordInput
+      ? true
+      : false
+  >;
+};
+
 it.effect("email password workflows verify email before issuing sessions", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     yield* emailPassword.signUp({
       email: " USER@example.COM ",
       password: "correct horse battery staple",
@@ -84,8 +139,8 @@ it.effect("verification token TTLs are configured at the workflow seam", () => {
     },
   });
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
-    const recovery = yield* PasswordRecoveryWorkflows;
+    const emailPassword = yield* Auth;
+    const recovery = yield* Auth;
     const beforeSignUp = yield* Clock.currentTimeMillis;
     yield* emailPassword.signUp({
       email: "ttl@example.com",
@@ -156,7 +211,7 @@ it.effect(
   () => {
     const { emailState, layer } = makeWorkflowLayer();
     return Effect.gen(function* () {
-      const emailPassword = yield* EmailPasswordWorkflows;
+      const emailPassword = yield* Auth;
       yield* emailPassword.signUp({
         email: "duplicate@example.com",
         password: "correct horse battery staple",
@@ -184,7 +239,11 @@ it.effect("auth email port preserves typed delivery failures", () => {
       Effect.fail(new AuthEmailFailure({ reason: "DeliveryUnavailable" })),
     sendPasswordReset: () => Effect.fail(new AuthEmailFailure({ reason: "InvalidRecipient" })),
   });
-  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive, PasswordRecoveryWorkflowsLive).pipe(
+  const workflowsLayer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+  ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         AuthBoundaryLive,
@@ -197,9 +256,10 @@ it.effect("auth email port preserves typed delivery failures", () => {
       ),
     ),
   );
+  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
 
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const failed = yield* Effect.flip(
       emailPassword.signUp({
         email: "delivery@example.com",
@@ -222,7 +282,7 @@ it.effect("auth email port preserves typed delivery failures", () => {
 it.effect("verify and resend cover expired tokens and already-verified no-op", () => {
   const { emailState, storageState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     yield* emailPassword.signUp({
       email: "verify-expired@example.com",
       password: "correct horse battery staple",
@@ -257,7 +317,11 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
     check: (attempt) =>
       Effect.fail(new RateLimitExceeded({ bucket: attempt.bucket, retryAfterMillis: 1_000 })),
   });
-  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive, PasswordRecoveryWorkflowsLive).pipe(
+  const workflowsLayer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+  ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         AuthBoundaryLive,
@@ -270,10 +334,11 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
       ),
     ),
   );
+  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
 
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
-    const recovery = yield* PasswordRecoveryWorkflows;
+    const emailPassword = yield* Auth;
+    const recovery = yield* Auth;
     const signUp = yield* Effect.flip(
       emailPassword.signUp({
         email: "limited@example.com",
@@ -325,7 +390,11 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
         return yield* hasher.verify(input);
       }).pipe(Effect.provide(TestPasswordHasher)),
   };
-  const layer = Layer.mergeAll(EmailPasswordWorkflowsLive).pipe(
+  const workflowsLayer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+  ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         AuthBoundaryLive,
@@ -338,9 +407,10 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
       ),
     ),
   );
+  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
 
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     yield* emailPassword.signUp({
       email: "enumeration@example.com",
       password: "correct horse battery staple",
@@ -373,7 +443,7 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
 it.effect("session workflow rotates stale sessions and sign-out revokes them", () => {
   const { emailState, storageState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const sessions = yield* SessionWorkflows;
     yield* emailPassword.signUp({
       email: "session@example.com",
@@ -416,7 +486,7 @@ it.effect("session policy drives issue and refresh durations", () => {
     sessionPolicy: { sessionTtl: "2 hours", sessionUpdateAge: "30 minutes" },
   });
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const sessions = yield* SessionWorkflows;
     const beforeSignIn = yield* Clock.currentTimeMillis;
     yield* emailPassword.signUp({
@@ -476,7 +546,7 @@ it.effect("session policy rejects zero, negative, and non-finite durations", () 
 it.effect("session management lists and revokes current-user sessions", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const sessions = yield* SessionWorkflows;
     yield* emailPassword.signUp({
       email: "devices@example.com",
@@ -545,8 +615,8 @@ it.effect("session management lists and revokes current-user sessions", () => {
 it.effect("password reset revokes sessions and password change rotates current session", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
-    const recovery = yield* PasswordRecoveryWorkflows;
+    const emailPassword = yield* Auth;
+    const recovery = yield* Auth;
     const sessions = yield* SessionWorkflows;
     yield* emailPassword.signUp({
       email: "reset@example.com",
@@ -621,8 +691,8 @@ it.effect("password reset revokes sessions and password change rotates current s
 it.effect("password reset rejects expired and consumed tokens", () => {
   const { emailState, storageState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
-    const recovery = yield* PasswordRecoveryWorkflows;
+    const emailPassword = yield* Auth;
+    const recovery = yield* Auth;
     yield* emailPassword.signUp({
       email: "reset-token@example.com",
       password: "correct horse battery staple",
@@ -676,8 +746,8 @@ it.effect(
   () => {
     const { emailState, storageState, layer } = makeWorkflowLayer();
     return Effect.gen(function* () {
-      const emailPassword = yield* EmailPasswordWorkflows;
-      const recovery = yield* PasswordRecoveryWorkflows;
+      const emailPassword = yield* Auth;
+      const recovery = yield* Auth;
       const tokenService = yield* AuthToken;
       yield* emailPassword.signUp({
         email: "change-failures@example.com",
@@ -737,7 +807,11 @@ it.effect("password change checks rate limits before session lookup", () => {
     check: (attempt) =>
       Effect.fail(new RateLimitExceeded({ bucket: attempt.bucket, retryAfterMillis: 1_000 })),
   });
-  const layer = PasswordRecoveryWorkflowsLive.pipe(
+  const workflowsLayer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+  ).pipe(
     Layer.provideMerge(
       Layer.mergeAll(
         AuthBoundaryLive,
@@ -750,9 +824,10 @@ it.effect("password change checks rate limits before session lookup", () => {
       ),
     ),
   );
+  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
 
   return Effect.gen(function* () {
-    const recovery = yield* PasswordRecoveryWorkflows;
+    const recovery = yield* Auth;
     const tokenService = yield* AuthToken;
     const token = yield* tokenService.makeSessionToken();
     const ip = yield* parseClientIp("127.0.0.1");

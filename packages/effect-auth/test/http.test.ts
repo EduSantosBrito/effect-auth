@@ -14,7 +14,6 @@ import {
   Cookies,
   CurrentAuthSession,
   Effect,
-  EmailPasswordWorkflows,
   HttpClientRequest,
   HttpEffect,
   HttpRouter,
@@ -42,6 +41,9 @@ import {
   makeWorkflowLayer,
   mapPublicHttpError,
   missingFixture,
+  normalizeEmail,
+  normalizePassword,
+  parseCallbackUrl,
   rateLimited,
   unauthorized,
   type SessionToken,
@@ -108,7 +110,7 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
     const bodyText = yield* Effect.promise(() => response.text());
     yield* Effect.promise(() => web.dispose());
 
-    assert.strictEqual(response.status, 200);
+    assert.strictEqual(response.status, 200, bodyText);
     assert.equal(response.headers.get("set-cookie")?.includes("effect_auth_session="), true);
     assert.equal(response.headers.get("set-cookie")?.includes("HttpOnly"), true);
     assert.equal(response.headers.get("set-cookie")?.includes("SameSite=Lax"), true);
@@ -259,7 +261,7 @@ it.effect("AuthHttp.mount serves email, session, sign-out, and password routes",
         verificationCallbackUrl: "https://app.example.com/verify",
       }),
     );
-    assert.strictEqual(signUp.status, 200);
+    assert.strictEqual(signUp.status, 200, yield* Effect.promise(() => signUp.clone().text()));
 
     const verification = emailState.sent[0];
     if (!verification) return yield* missingFixture("missing verification email");
@@ -490,10 +492,7 @@ it.effect("mounted session revocation preserves rotated current cookies", () => 
         updatedAt: session.updatedAt - 2 * 24 * 60 * 60 * 1000,
       });
     }
-    const revokedOthers = yield* call(
-      "/api/auth/sessions/revoke-others",
-      json({}, rotatedCookie),
-    );
+    const revokedOthers = yield* call("/api/auth/sessions/revoke-others", json({}, rotatedCookie));
     const rotatedOthersCookie = revokedOthers.headers.get("set-cookie");
     if (!rotatedOthersCookie) return yield* missingFixture("missing revoke-others rotated cookie");
     const currentAfterOthers = yield* call("/api/auth/session", {
@@ -818,7 +817,7 @@ it.effect("http helpers preserve cookie defaults and public error mapping", () =
 it.effect("http adapter appends rotated session cookies to handled responses", () => {
   const { emailState, storageState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const adapter = yield* AuthHttpAdapter;
     yield* emailPassword.signUp({
       email: "http-cookie@example.com",
@@ -867,7 +866,7 @@ it.effect("http adapter appends rotated session cookies to handled responses", (
 it.effect("http adapter appends sign-in and sign-out session cookie instructions", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const adapter = yield* AuthHttpAdapter;
     yield* emailPassword.signUp({
       email: "http-sign-in-out@example.com",
@@ -882,9 +881,11 @@ it.effect("http adapter appends sign-in and sign-out session cookie instructions
     let signedInToken: SessionToken | undefined;
     yield* HttpEffect.toHandled(
       Effect.gen(function* () {
+        const email = yield* normalizeEmail("http-sign-in-out@example.com");
+        const password = yield* normalizePassword("correct horse battery staple");
         const result = yield* adapter.signInEmail({
-          email: "http-sign-in-out@example.com",
-          password: "correct horse battery staple",
+          email,
+          password,
         });
         signedInToken = result.sessionToken;
         return HttpServerResponse.jsonUnsafe(result);
@@ -939,7 +940,7 @@ it.effect("http adapter uses configured session cookie options", () => {
     },
   });
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const adapter = yield* AuthHttpAdapter;
     yield* emailPassword.signUp({
       email: "configured-cookie@example.com",
@@ -953,9 +954,11 @@ it.effect("http adapter uses configured session cookie options", () => {
     const signInCookies: Array<string> = [];
     yield* HttpEffect.toHandled(
       Effect.gen(function* () {
+        const email = yield* normalizeEmail("configured-cookie@example.com");
+        const password = yield* normalizePassword("correct horse battery staple");
         yield* adapter.signInEmail({
-          email: "configured-cookie@example.com",
-          password: "correct horse battery staple",
+          email,
+          password,
         });
         return HttpServerResponse.jsonUnsafe(null);
       }),
@@ -980,7 +983,7 @@ it.effect("http adapter uses configured session cookie options", () => {
 it.effect("http adapter delegates password reset and password change behavior", () => {
   const { emailState, layer } = makeWorkflowLayer();
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const adapter = yield* AuthHttpAdapter;
     const sessions = yield* SessionWorkflows;
 
@@ -993,9 +996,10 @@ it.effect("http adapter delegates password reset and password change behavior", 
     if (!verification) return yield* missingFixture("missing verification email");
     yield* adapter.verifyEmail({ token: verification.token });
 
+    const email = yield* normalizeEmail("http-adapter@example.com");
     yield* adapter.requestPasswordReset({
-      email: "http-adapter@example.com",
-      resetCallbackUrl: new URL("https://app.example.com/reset"),
+      email,
+      resetCallbackUrl: yield* parseCallbackUrl(new URL("https://app.example.com/reset")),
     });
     const reset = emailState.sent[1];
     if (!reset) return yield* missingFixture("missing reset email");
@@ -1003,7 +1007,7 @@ it.effect("http adapter delegates password reset and password change behavior", 
 
     yield* adapter.completePasswordReset({
       token: reset.token,
-      password: "new correct horse battery",
+      password: yield* normalizePassword("new correct horse battery"),
     });
     const signedIn = yield* emailPassword.signIn({
       email: "http-adapter@example.com",
@@ -1012,8 +1016,8 @@ it.effect("http adapter delegates password reset and password change behavior", 
     const changed = yield* adapter
       .changePassword({
         sessionToken: signedIn.sessionToken,
-        currentPassword: "new correct horse battery",
-        newPassword: "changed correct horse battery",
+        currentPassword: yield* normalizePassword("new correct horse battery"),
+        newPassword: yield* normalizePassword("changed correct horse battery"),
       })
       .pipe(
         Effect.provideService(
@@ -1150,7 +1154,7 @@ it.effect("http handler functions exercise password reset and change endpoints",
   const request = { headers: { origin: "https://app.example.com" } };
   const trustedLayer = Layer.mergeAll(layer, TrustedOrigins([new URL("https://app.example.com")]));
   return Effect.gen(function* () {
-    const emailPassword = yield* EmailPasswordWorkflows;
+    const emailPassword = yield* Auth;
     const sessions = yield* SessionWorkflows;
     yield* emailPassword.signUp({
       email: "http-handler-password@example.com",
