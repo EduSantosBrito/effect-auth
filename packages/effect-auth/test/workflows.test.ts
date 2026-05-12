@@ -18,6 +18,7 @@ import {
   AuthTokenLive,
   Clock,
   DevMemoryAuthStorage,
+  decodePasswordHash,
   Effect,
   EmailPasswordWorkflows,
   EmailPasswordWorkflowsLive,
@@ -203,6 +204,30 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
       jsonString(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
       false,
     );
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthLive rejects malformed verification tokens before workflow storage lookup", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const authLayer = AuthLive.default.pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    const verify = yield* Effect.flip(auth.verifyEmail({ token: "malformed-token" }));
+    const reset = yield* Effect.flip(
+      auth.resetPassword({
+        token: "malformed-token",
+        password: "new correct horse battery",
+      }),
+    );
+
+    assert.equal(Predicate.isTagged(verify, "BoundaryParseError"), true);
+    assert.equal(Predicate.isTagged(reset, "BoundaryParseError"), true);
+    assert.strictEqual(storageState.tokensByHash.size, 0);
   }).pipe(Effect.provide(authLayer));
 });
 
@@ -798,6 +823,45 @@ it.effect(
       assert.deepStrictEqual(wrongPassword, invalidCredentials);
       assert.deepStrictEqual(weakPassword, new PasswordPolicyFailure({ reason: "TooShort" }));
       assert.deepStrictEqual(expiredSession, unauthorized);
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect(
+  "password change accepts a legacy weak current password when the new password is strong",
+  () => {
+    const { emailState, storageState, layer } = makeWorkflowLayer();
+    return Effect.gen(function* () {
+      const auth = yield* Auth;
+      yield* auth.signUp({
+        email: "legacy-current-password@example.com",
+        password: "correct horse battery staple",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      });
+      const verification = emailState.sent[0];
+      if (!verification) return yield* missingFixture("missing verification email");
+      yield* auth.verifyEmail({ token: verification.token });
+      const signedIn = yield* auth.signIn({
+        email: "legacy-current-password@example.com",
+        password: "correct horse battery staple",
+      });
+
+      const credential = storageState.credentialsByEmail.get("legacy-current-password@example.com");
+      if (!credential) return yield* missingFixture("missing credential");
+      const legacyWeakHash = yield* decodePasswordHash("effect-auth-test:short");
+      storageState.credentialsByEmail.set("legacy-current-password@example.com", {
+        ...credential,
+        passwordHash: legacyWeakHash,
+      });
+
+      const changed = yield* auth.changePassword({
+        sessionToken: signedIn.sessionToken,
+        currentPassword: "short",
+        newPassword: "new correct horse battery",
+      });
+      const current = yield* auth.currentSession({ sessionToken: changed.currentSessionToken });
+
+      assert.strictEqual(current.session.userId, signedIn.user.id);
     }).pipe(Effect.provide(layer));
   },
 );

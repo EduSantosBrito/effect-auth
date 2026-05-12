@@ -7,7 +7,10 @@ import {
   VerificationTokenConfigLive,
   createEffectAuthClient,
   packageName,
+  type AuthRevokeUserSessionInput,
+  type AuthSessionTokenInput,
   type AuthShape,
+  type AuthVerifyEmailInput,
   type ChangePasswordInput,
   type EffectAuthClient,
   type EffectAuthClientOptions,
@@ -167,7 +170,10 @@ type PublicApiContract = {
     | typeof VerificationTokenConfigLive
     | typeof createEffectAuthClient
     | typeof packageName
+    | AuthRevokeUserSessionInput
+    | AuthSessionTokenInput
     | AuthShape
+    | AuthVerifyEmailInput
     | ChangePasswordInput
     | EffectAuthClient
     | EffectAuthClientOptions

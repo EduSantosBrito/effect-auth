@@ -2,11 +2,14 @@ export {
   Auth,
   AuthLive,
   type AuthShape,
+  type RevokeUserSessionInput as AuthRevokeUserSessionInput,
+  type SessionTokenInput as AuthSessionTokenInput,
   type ChangePasswordInput,
   type RequestPasswordResetInput,
   type ResetPasswordInput,
   type SignInInput,
   type SignUpInput,
+  type VerifyEmailInput as AuthVerifyEmailInput,
 } from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
 export {

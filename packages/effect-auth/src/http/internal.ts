@@ -94,6 +94,23 @@ export interface AuthHttpConfigInput {
   readonly baseUrl?: URL;
 }
 
+const cookieNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
+const cookiePathPattern = /^\/[\u0020-\u003a\u003c-\u007e]*$/u;
+
+const parseSessionCookieName = (value: string | undefined): Effect.Effect<string, AuthHttpError> =>
+  value === undefined
+    ? Effect.succeed("effect_auth_session")
+    : value.length > 0 && cookieNamePattern.test(value)
+      ? Effect.succeed(value)
+      : Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid session cookie name" }));
+
+const parseSessionCookiePath = (value: string | undefined): Effect.Effect<string, AuthHttpError> =>
+  value === undefined
+    ? Effect.succeed("/")
+    : cookiePathPattern.test(value)
+      ? Effect.succeed(value)
+      : Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid session cookie path" }));
+
 const deriveSecureCookies = (input: AuthHttpConfigInput, nodeEnv: string): boolean => {
   if (input.secureCookies !== undefined) return input.secureCookies;
   if (input.baseUrl !== undefined) {
@@ -105,13 +122,22 @@ const deriveSecureCookies = (input: AuthHttpConfigInput, nodeEnv: string): boole
   return nodeEnv === "production";
 };
 
-const makeAuthHttpConfig = (input: AuthHttpConfigInput, nodeEnv: string): AuthHttpConfigShape => ({
-  trustedOrigins: new Set(input.trustedOrigins.map((origin) => origin.origin)),
-  sessionCookieName: input.sessionCookieName ?? "effect_auth_session",
-  sessionCookiePath: input.sessionCookiePath ?? "/",
-  secureCookies: deriveSecureCookies(input, nodeEnv),
-  defaultTokenExtractor: Option.fromUndefinedOr(input.defaultTokenExtractor),
-});
+const makeAuthHttpConfig: (
+  input: AuthHttpConfigInput,
+  nodeEnv: string,
+) => Effect.Effect<AuthHttpConfigShape, AuthHttpError> = Effect.fn("makeAuthHttpConfig")(
+  function* (input, nodeEnv) {
+    const sessionCookieName = yield* parseSessionCookieName(input.sessionCookieName);
+    const sessionCookiePath = yield* parseSessionCookiePath(input.sessionCookiePath);
+    return {
+      trustedOrigins: new Set(input.trustedOrigins.map((origin) => origin.origin)),
+      sessionCookieName,
+      sessionCookiePath,
+      secureCookies: deriveSecureCookies(input, nodeEnv),
+      defaultTokenExtractor: Option.fromUndefinedOr(input.defaultTokenExtractor),
+    };
+  },
+);
 
 export class AuthHttpConfig extends Context.Service<
   AuthHttpConfig,
@@ -124,7 +150,7 @@ export class AuthHttpConfig extends Context.Service<
   }
 >()("effect-auth/AuthHttpConfig") {
   static readonly layer = (input: AuthHttpConfigInput) =>
-    Layer.succeed(AuthHttpConfig)(makeAuthHttpConfig(input, "development"));
+    Layer.effect(AuthHttpConfig)(makeAuthHttpConfig(input, "development"));
 }
 export type AuthHttpConfigShape = typeof AuthHttpConfig.Service;
 

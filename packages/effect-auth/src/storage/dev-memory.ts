@@ -132,16 +132,29 @@ const revokeOtherSessions = (
 const isActiveSession = (session: StoredSession, now: number) =>
   session.revokedAt === undefined && session.expiresAt > now;
 
+const failOnMalformedSessions = (
+  state: DevMemoryStorageState,
+): Effect.Effect<void, AuthStorageFailure> =>
+  Effect.suspend(() => {
+    for (const session of state.sessionsByHash.values()) {
+      if (!isStoredSessionRecord(session)) {
+        return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
+      }
+    }
+    return Effect.void;
+  });
+
 const listUserSessions = (
   state: DevMemoryStorageState,
   { userId, now }: Parameters<AuthStorageShape["listUserSessions"]>[0],
 ) =>
-  Effect.sync(() =>
-    Array.from(state.sessionsByHash.values()).filter(
-      (session) =>
-        isStoredSessionRecord(session) &&
-        session.userId === userId &&
-        isActiveSession(session, now),
+  failOnMalformedSessions(state).pipe(
+    Effect.flatMap(() =>
+      Effect.sync(() =>
+        Array.from(state.sessionsByHash.values()).filter(
+          (session) => session.userId === userId && isActiveSession(session, now),
+        ),
+      ),
     ),
   );
 
@@ -149,24 +162,28 @@ const revokeUserSession = (
   state: DevMemoryStorageState,
   { userId, sessionId, now }: Parameters<AuthStorageShape["revokeUserSession"]>[0],
 ) =>
-  Effect.suspend(() => {
-    const entry: readonly [string, StoredSession] | undefined = Array.from(
-      state.sessionsByHash.entries(),
-    ).find(([, session]) => session.id === sessionId && session.userId === userId);
-    return Match.value(entry).pipe(
-      Match.when(
-        (
-          entry: readonly [string, StoredSession] | undefined,
-        ): entry is readonly [string, StoredSession] =>
-          entry !== undefined && isActiveSession(entry[1], now),
-        ([key, session]) =>
-          Effect.sync(() => {
-            state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
-          }),
-      ),
-      Match.orElse(() => Effect.fail(new AuthStorageFailure({ reason: "NotFound" }))),
-    );
-  });
+  failOnMalformedSessions(state).pipe(
+    Effect.flatMap(() =>
+      Effect.suspend(() => {
+        const entry: readonly [string, StoredSession] | undefined = Array.from(
+          state.sessionsByHash.entries(),
+        ).find(([, session]) => session.id === sessionId && session.userId === userId);
+        return Match.value(entry).pipe(
+          Match.when(
+            (
+              entry: readonly [string, StoredSession] | undefined,
+            ): entry is readonly [string, StoredSession] =>
+              entry !== undefined && isActiveSession(entry[1], now),
+            ([key, session]) =>
+              Effect.sync(() => {
+                state.sessionsByHash.set(key, { ...session, revokedAt: now, updatedAt: now });
+              }),
+          ),
+          Match.orElse(() => Effect.fail(new AuthStorageFailure({ reason: "NotFound" }))),
+        );
+      }),
+    ),
+  );
 
 const revokeAllUserSessions = (
   state: DevMemoryStorageState,
