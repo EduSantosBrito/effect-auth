@@ -146,7 +146,11 @@ const AuthTestLive = Layer.effect(
             ...(ip === undefined ? {} : { ip }),
           });
         }),
-      verifyEmail: emailPassword.verifyEmail,
+      verifyEmail: (input: Parameters<AuthShape["verifyEmail"]>[0]) =>
+        Effect.gen(function* () {
+          const token = yield* parseTestVerificationToken(input.token);
+          return yield* emailPassword.verifyEmail({ token });
+        }),
       resendVerification: emailPassword.resendVerification,
       signIn: (input: Parameters<AuthShape["signIn"]>[0]) =>
         Effect.gen(function* () {
@@ -160,12 +164,36 @@ const AuthTestLive = Layer.effect(
             ...(input.userAgent === undefined ? {} : { userAgent: input.userAgent }),
           });
         }),
-      currentSession: sessions.currentSession,
-      listSessions: sessions.listSessions,
-      revokeSession: sessions.revokeSession,
-      revokeOtherSessions: sessions.revokeOtherSessions,
-      revokeSessions: sessions.revokeSessions,
-      signOut: sessions.signOut,
+      currentSession: (input: Parameters<AuthShape["currentSession"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.currentSession({ sessionToken });
+        }),
+      listSessions: (input: Parameters<AuthShape["listSessions"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.listSessions({ sessionToken });
+        }),
+      revokeSession: (input: Parameters<AuthShape["revokeSession"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.revokeSession({ sessionToken, sessionId: input.sessionId });
+        }),
+      revokeOtherSessions: (input: Parameters<AuthShape["revokeOtherSessions"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.revokeOtherSessions({ sessionToken });
+        }),
+      revokeSessions: (input: Parameters<AuthShape["revokeSessions"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.revokeSessions({ sessionToken });
+        }),
+      signOut: (input: Parameters<AuthShape["signOut"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          return yield* sessions.signOut({ sessionToken });
+        }),
       requestPasswordReset: (input: Parameters<AuthShape["requestPasswordReset"]>[0]) =>
         Effect.gen(function* () {
           const email = yield* boundary.parseEmail(input.email);

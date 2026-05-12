@@ -36,20 +36,20 @@ import {
   VerificationTokenConfigLive,
   type ChangePasswordInput as ChangePasswordCommand,
   type ChangePasswordResult,
-  type CurrentSessionInput,
+  type CurrentSessionInput as CurrentSessionCommand,
   type ListSessionsInput,
   type ListSessionsResult,
   type RequestPasswordResetInput as RequestPasswordResetCommand,
-  type RevokeUserSessionInput,
+  type RevokeUserSessionInput as RevokeUserSessionCommand,
   type ResendVerificationInput,
   type ResetPasswordInput as ResetPasswordCommand,
   type SessionLookupResult,
   type SignInInput as SignInCommand,
   type SignInResult,
-  type SignOutInput,
+  type SignOutInput as SignOutCommand,
   type SignUpInput as SignUpCommand,
   type SignUpResult,
-  type VerifyEmailInput,
+  type VerifyEmailInput as VerifyEmailCommand,
   type VerifyEmailResult,
 } from "./workflows/index.js";
 
@@ -65,6 +65,19 @@ export interface SignInInput {
   readonly password: unknown;
   readonly ip?: unknown;
   readonly userAgent?: string;
+}
+
+export interface VerifyEmailInput {
+  readonly token: unknown;
+}
+
+export interface SessionTokenInput {
+  readonly sessionToken: unknown;
+}
+
+export interface RevokeUserSessionInput {
+  readonly sessionToken: unknown;
+  readonly sessionId: RevokeUserSessionCommand["sessionId"];
 }
 
 export interface RequestPasswordResetInput {
@@ -141,6 +154,13 @@ const parseSignInCommand = Effect.fn("Auth.parseSignInCommand")(function* (
   } satisfies SignInCommand;
 });
 
+const parseVerifyEmailCommand = Effect.fn("Auth.parseVerifyEmailCommand")(function* (
+  input: VerifyEmailInput,
+) {
+  const token = yield* parseVerificationToken(input.token);
+  return { token } satisfies VerifyEmailCommand;
+});
+
 const parseRequestPasswordResetCommand = Effect.fn("Auth.parseRequestPasswordResetCommand")(
   function* (boundary: typeof AuthBoundary.Service, input: RequestPasswordResetInput) {
     const email = yield* boundary.parseEmail(input.email);
@@ -179,6 +199,20 @@ const parseChangePasswordCommand = Effect.fn("Auth.parseChangePasswordCommand")(
   } satisfies ChangePasswordCommand;
 });
 
+const parseSessionTokenCommand = Effect.fn("Auth.parseSessionTokenCommand")(function* (
+  input: SessionTokenInput,
+) {
+  const sessionToken = yield* parseSessionToken(input.sessionToken);
+  return { sessionToken } satisfies CurrentSessionCommand & ListSessionsInput & SignOutCommand;
+});
+
+const parseRevokeUserSessionCommand = Effect.fn("Auth.parseRevokeUserSessionCommand")(function* (
+  input: RevokeUserSessionInput,
+) {
+  const sessionToken = yield* parseSessionToken(input.sessionToken);
+  return { sessionToken, sessionId: input.sessionId } satisfies RevokeUserSessionCommand;
+});
+
 export interface AuthShape {
   readonly signUp: (
     input: SignUpInput,
@@ -197,7 +231,7 @@ export interface AuthShape {
     input: VerifyEmailInput,
   ) => Effect.Effect<
     VerifyEmailResult,
-    PublicAuthError | AuthStorageFailure | TokenGenerationFailure
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
   >;
   readonly resendVerification: (
     input: ResendVerificationInput,
@@ -222,29 +256,41 @@ export interface AuthShape {
     | RateLimitExceeded
   >;
   readonly currentSession: (
-    input: CurrentSessionInput,
+    input: SessionTokenInput,
   ) => Effect.Effect<
     SessionLookupResult,
-    PublicAuthError | AuthStorageFailure | TokenGenerationFailure
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
   >;
   readonly listSessions: (
-    input: ListSessionsInput,
+    input: SessionTokenInput,
   ) => Effect.Effect<
     ListSessionsResult,
-    PublicAuthError | AuthStorageFailure | TokenGenerationFailure
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
   >;
   readonly revokeSession: (
     input: RevokeUserSessionInput,
-  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+  ) => Effect.Effect<
+    void,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
   readonly revokeOtherSessions: (
-    input: SignOutInput,
-  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+    input: SessionTokenInput,
+  ) => Effect.Effect<
+    void,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
   readonly revokeSessions: (
-    input: SignOutInput,
-  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+    input: SessionTokenInput,
+  ) => Effect.Effect<
+    void,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
   readonly signOut: (
-    input: SignOutInput,
-  ) => Effect.Effect<void, PublicAuthError | AuthStorageFailure | TokenGenerationFailure>;
+    input: SessionTokenInput,
+  ) => Effect.Effect<
+    void,
+    PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
+  >;
   readonly requestPasswordReset: (
     input: RequestPasswordResetInput,
   ) => Effect.Effect<
@@ -310,16 +356,22 @@ const AuthLiveLayer = Layer.effect(Auth)(
     return {
       signUp: (input) =>
         parseSignUpCommand(boundary, input).pipe(Effect.flatMap(emailPassword.signUp)),
-      verifyEmail: emailPassword.verifyEmail,
+      verifyEmail: (input) =>
+        parseVerifyEmailCommand(input).pipe(Effect.flatMap(emailPassword.verifyEmail)),
       resendVerification: emailPassword.resendVerification,
       signIn: (input) =>
         parseSignInCommand(boundary, input).pipe(Effect.flatMap(emailPassword.signIn)),
-      currentSession: sessions.currentSession,
-      listSessions: sessions.listSessions,
-      revokeSession: sessions.revokeSession,
-      revokeOtherSessions: sessions.revokeOtherSessions,
-      revokeSessions: sessions.revokeSessions,
-      signOut: sessions.signOut,
+      currentSession: (input) =>
+        parseSessionTokenCommand(input).pipe(Effect.flatMap(sessions.currentSession)),
+      listSessions: (input) =>
+        parseSessionTokenCommand(input).pipe(Effect.flatMap(sessions.listSessions)),
+      revokeSession: (input) =>
+        parseRevokeUserSessionCommand(input).pipe(Effect.flatMap(sessions.revokeSession)),
+      revokeOtherSessions: (input) =>
+        parseSessionTokenCommand(input).pipe(Effect.flatMap(sessions.revokeOtherSessions)),
+      revokeSessions: (input) =>
+        parseSessionTokenCommand(input).pipe(Effect.flatMap(sessions.revokeSessions)),
+      signOut: (input) => parseSessionTokenCommand(input).pipe(Effect.flatMap(sessions.signOut)),
       requestPasswordReset: (input) =>
         parseRequestPasswordResetCommand(boundary, input).pipe(
           Effect.flatMap(recovery.requestPasswordReset),

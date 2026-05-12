@@ -21,6 +21,7 @@ import {
   HttpServerResponse,
   Layer,
   Option,
+  Predicate,
   Redacted,
   SessionCookie,
   SessionWorkflows,
@@ -116,6 +117,69 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
     assert.equal(response.headers.get("set-cookie")?.includes("SameSite=Lax"), true);
     assert.equal(bodyText.includes("sessionToken"), false);
     assert.equal(bodyText.includes("tokenHash"), false);
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthHttp.mount ignores malformed forwarded client IPs", () => {
+  const { emailState, layer: authLayer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "mounted-malformed-ip@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const signIn = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sign-in/email", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+            "x-forwarded-for": "not-an-ip, 203.0.113.10",
+          },
+          body: jsonString({
+            email: "mounted-malformed-ip@example.com",
+            password: "correct horse battery staple",
+          }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const sessionCookie = signIn.headers.get("set-cookie");
+    if (!sessionCookie) return yield* missingFixture("missing sign-in cookie");
+    const listed = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/sessions", {
+          headers: { cookie: sessionCookie },
+        }),
+        Context.empty(),
+      ),
+    );
+    const listedBody = yield* Effect.promise(() => listed.text());
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(signIn.status, 200);
+    assert.strictEqual(listed.status, 200);
+    assert.equal(listedBody.includes("not-an-ip"), false);
+    assert.equal(listedBody.includes("203.0.113.10"), false);
   }).pipe(Effect.provide(authLayer));
 });
 
@@ -780,6 +844,179 @@ it.effect("AuthHttp.optionalAuth provides CurrentAuthSession and cleans stale co
     ),
   );
 });
+
+it.effect("AuthHttp rejects malformed session tokens at HTTP boundaries", () => {
+  const { layer: authLayer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const routes = AuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          authLayer,
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            defaultTokenExtractor: AuthHttpToken.cookieOrBearer,
+            secureCookies: true,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+
+    const mountedBearer = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/session", {
+          headers: { authorization: "Bearer malformed-session-token" },
+        }),
+        Context.empty(),
+      ),
+    );
+    const mountedCookie = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://auth.example.com/api/auth/session", {
+          headers: { cookie: "effect_auth_session=malformed-session-token" },
+        }),
+        Context.empty(),
+      ),
+    );
+    yield* Effect.promise(() => web.dispose());
+
+    const requireBearer = yield* Effect.exit(
+      AuthHttp.requireAuth({ extractor: AuthHttpToken.bearer })(
+        Effect.gen(function* () {
+          const session = yield* AuthSession;
+          return session.user.id;
+        }),
+      ).pipe(
+        Effect.provideService(
+          HttpServerRequest.HttpServerRequest,
+          HttpServerRequest.fromClientRequest(
+            HttpClientRequest.get("https://auth.example.com/me").pipe(
+              HttpClientRequest.setHeader("authorization", "Bearer malformed-session-token"),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    const clearCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      AuthHttp.optionalAuth(
+        Effect.gen(function* () {
+          const session = yield* CurrentAuthSession;
+          return HttpServerResponse.jsonUnsafe({ signedIn: Option.isSome(session.current) });
+        }),
+      ),
+      (_request, response) =>
+        Effect.sync(() => {
+          clearCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.get("https://auth.example.com/navbar").pipe(
+            HttpClientRequest.setHeader("cookie", "effect_auth_session=malformed-session-token"),
+          ),
+        ),
+      ),
+    );
+
+    assert.strictEqual(mountedBearer.status, 400);
+    assert.strictEqual(mountedCookie.status, 400);
+    assert.strictEqual(requireBearer._tag, "Failure");
+    if (Predicate.isTagged(requireBearer, "Failure")) {
+      assert.equal(String(requireBearer.cause).includes("InvalidSessionToken"), true);
+    }
+    assert.equal(clearCookies[0]?.includes("Max-Age=0"), true);
+  }).pipe(
+    Effect.provide(
+      Layer.mergeAll(
+        authLayer,
+        AuthHttpConfig.layer({
+          trustedOrigins: [new URL("https://app.example.com")],
+          secureCookies: true,
+        }),
+      ),
+    ),
+  );
+});
+
+it.effect("HTTP token extraction treats bearer auth as a non-cookie source", () => {
+  const { emailState, layer: authLayer } = makeWorkflowLayer({
+    httpConfig: {
+      trustedOrigins: [new URL("https://app.example.com")],
+      defaultTokenExtractor: AuthHttpToken.cookieOrBearer,
+      secureCookies: true,
+    },
+  });
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "bearer-revoke-all@example.com",
+      password: "correct horse battery staple",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const signedIn = yield* auth.signIn({
+      email: "bearer-revoke-all@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const extracted = yield* AuthHttpToken.cookieOrBearer.extract.pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(
+          HttpClientRequest.post("https://auth.example.com/api/auth/sessions/revoke-all").pipe(
+            HttpClientRequest.bearerToken(signedIn.sessionToken),
+            HttpClientRequest.setHeader("cookie", "effect_auth_session=malformed-session-token"),
+          ),
+        ),
+      ),
+    );
+
+    assert.strictEqual(extracted._tag, "Found");
+    if (Predicate.isTagged(extracted, "Found")) {
+      assert.strictEqual(extracted.source, "Bearer");
+    }
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthHttpConfig rejects invalid session cookie settings before use", () =>
+  Effect.gen(function* () {
+    const invalidName = yield* Effect.exit(
+      Effect.gen(function* () {
+        const config = yield* AuthHttpConfig;
+        return config.sessionCookieName;
+      }).pipe(
+        Effect.provide(
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            sessionCookieName: "bad cookie name",
+          }),
+        ),
+      ),
+    );
+    const invalidPath = yield* Effect.exit(
+      Effect.gen(function* () {
+        const config = yield* AuthHttpConfig;
+        return config.sessionCookiePath;
+      }).pipe(
+        Effect.provide(
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            sessionCookiePath: "not/absolute",
+          }),
+        ),
+      ),
+    );
+
+    assert.strictEqual(invalidName._tag, "Failure");
+    assert.strictEqual(invalidPath._tag, "Failure");
+  }),
+);
 
 it.effect("http helpers preserve cookie defaults and public error mapping", () => {
   const { layer } = makeWorkflowLayer();

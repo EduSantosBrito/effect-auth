@@ -156,7 +156,7 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `POST` | `/api/auth/password-reset/complete` |
 | `POST` | `/api/auth/password/change`         |
 
-`GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid.
+`GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid. Listed-session revocation is Session Id scoped; see `docs/adr/0004-session-id-scoped-revocation.md` for the design rationale.
 
 ## Current Scope
 

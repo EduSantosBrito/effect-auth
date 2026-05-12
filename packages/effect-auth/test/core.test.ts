@@ -357,16 +357,6 @@ it.effect("dev memory storage lists active sessions and revokes by current user 
       now: 1,
     });
     yield* storage.revokeSession({ tokenHash: revokedPair.hash, now: 2 });
-    const malformedPair = yield* tokenService.makeSessionToken();
-    const malformed = Object.assign({}, current, {
-      id: "ses_malformed",
-      tokenHash: malformedPair.hash,
-      expiresAt: "not-a-number",
-    });
-    Reflect.apply(Map.prototype.set, storageState.sessionsByHash, [
-      Redacted.value(malformedPair.hash),
-      malformed,
-    ]);
     yield* storage.createSession({
       userId: other.id,
       tokenHash: otherPair.hash,
@@ -381,9 +371,23 @@ it.effect("dev memory storage lists active sessions and revokes by current user 
     const revokeInactive = yield* Effect.flip(
       storage.revokeUserSession({ userId: user.id, sessionId: revoked.id, now: 3 }),
     );
-    const malformedLookup = yield* Effect.flip(storage.findSessionByTokenHash(malformedPair.hash));
     yield* storage.revokeUserSession({ userId: user.id, sessionId: current.id, now: 3 });
     const afterRevoke = yield* storage.listUserSessions({ userId: user.id, now: 4 });
+    const malformedPair = yield* tokenService.makeSessionToken();
+    const malformed = Object.assign({}, current, {
+      id: "ses_malformed",
+      tokenHash: malformedPair.hash,
+      expiresAt: "not-a-number",
+    });
+    Reflect.apply(Map.prototype.set, storageState.sessionsByHash, [
+      Redacted.value(malformedPair.hash),
+      malformed,
+    ]);
+    const malformedLookup = yield* Effect.flip(storage.findSessionByTokenHash(malformedPair.hash));
+    const malformedList = yield* Effect.flip(storage.listUserSessions({ userId: user.id, now: 4 }));
+    const malformedRevoke = yield* Effect.flip(
+      storage.revokeUserSession({ userId: user.id, sessionId: "ses_malformed", now: 4 }),
+    );
 
     assert.deepStrictEqual(
       listed.map((session) => session.id),
@@ -395,6 +399,11 @@ it.effect("dev memory storage lists active sessions and revokes by current user 
     assert.deepStrictEqual(revokeInactive, new AuthStorageFailure({ reason: "NotFound" }));
     assert.deepStrictEqual(
       malformedLookup,
+      new AuthStorageFailure({ reason: "BackendUnavailable" }),
+    );
+    assert.deepStrictEqual(malformedList, new AuthStorageFailure({ reason: "BackendUnavailable" }));
+    assert.deepStrictEqual(
+      malformedRevoke,
       new AuthStorageFailure({ reason: "BackendUnavailable" }),
     );
     assert.deepStrictEqual(afterRevoke, []);
