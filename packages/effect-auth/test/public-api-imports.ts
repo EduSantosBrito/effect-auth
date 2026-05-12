@@ -1,6 +1,8 @@
 import {
   Auth,
   AuthLive,
+  SessionPolicy,
+  SessionPolicyLive,
   VerificationTokenConfig,
   VerificationTokenConfigLive,
   createEffectAuthClient,
@@ -8,7 +10,13 @@ import {
   type AuthShape,
   type EffectAuthClient,
   type EffectAuthClientOptions,
+  type ListedSession,
+  type ListSessionsInput,
+  type ListSessionsResult,
   type PublicAuthError,
+  type RevokeUserSessionInput,
+  type SessionPolicyInput,
+  type SessionPolicyShape,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
 } from "effect-auth";
@@ -17,6 +25,7 @@ import {
   AuthBoundaryLive,
   BoundaryParseError,
   CallbackUrl,
+  ClientIp,
   OriginUrl,
   PasswordText,
   emailNotVerified,
@@ -25,10 +34,12 @@ import {
   normalizeEmail,
   normalizePassword,
   parseCallbackUrl,
+  parseClientIp,
   parseOrigin,
   rateLimited,
   unauthorized,
   type AuthBoundaryShape,
+  type ClientIp as ClientIpValue,
   type NormalizedEmail,
 } from "effect-auth/domain";
 import {
@@ -59,6 +70,7 @@ import {
   type AuthHttpConfigShape,
   type AuthHttpErrorMapperShape,
   type AuthHttpErrorResponse,
+  type AuthHttpListSessionsResponse,
   type AuthHttpMountOptions,
   type AuthHttpOkResponse,
   type AuthHttpOptionalAuthOptions,
@@ -112,9 +124,11 @@ import {
   type CredentialId,
   type EmailPasswordCredential,
   type EmailPasswordCredentialLookup,
+  type ListUserSessions,
   type RevokeAllUserSessions,
   type RevokeOtherSessions,
   type RevokeSession,
+  type RevokeUserSession,
   type RotateSessionToken,
   type SessionId,
   type StoreVerificationToken,
@@ -142,6 +156,8 @@ type PublicApiContract = {
   readonly root:
     | typeof Auth
     | typeof AuthLive
+    | typeof SessionPolicy
+    | typeof SessionPolicyLive
     | typeof VerificationTokenConfig
     | typeof VerificationTokenConfigLive
     | typeof createEffectAuthClient
@@ -149,7 +165,13 @@ type PublicApiContract = {
     | AuthShape
     | EffectAuthClient
     | EffectAuthClientOptions
+    | ListedSession
+    | ListSessionsInput
+    | ListSessionsResult
     | PublicAuthError
+    | RevokeUserSessionInput
+    | SessionPolicyInput
+    | SessionPolicyShape
     | VerificationTokenConfigInput
     | VerificationTokenConfigShape;
   readonly domain:
@@ -157,6 +179,7 @@ type PublicApiContract = {
     | typeof AuthBoundaryLive
     | typeof BoundaryParseError
     | typeof CallbackUrl
+    | typeof ClientIp
     | typeof OriginUrl
     | typeof PasswordText
     | typeof emailNotVerified
@@ -165,10 +188,12 @@ type PublicApiContract = {
     | typeof normalizeEmail
     | typeof normalizePassword
     | typeof parseCallbackUrl
+    | typeof parseClientIp
     | typeof parseOrigin
     | typeof rateLimited
     | typeof unauthorized
     | AuthBoundaryShape
+    | ClientIpValue
     | NormalizedEmail;
   readonly email: typeof AuthEmail | typeof AuthEmailFailure | AuthEmailShape | SentAuthEmail;
   readonly http:
@@ -193,6 +218,7 @@ type PublicApiContract = {
     | AuthHttpConfigShape
     | AuthHttpErrorMapperShape
     | AuthHttpErrorResponse
+    | AuthHttpListSessionsResponse
     | AuthHttpMountOptions
     | AuthHttpOkResponse
     | AuthHttpOptionalAuthOptions
@@ -243,9 +269,11 @@ type PublicApiContract = {
     | CredentialId
     | EmailPasswordCredential
     | EmailPasswordCredentialLookup
+    | ListUserSessions
     | RevokeAllUserSessions
     | RevokeOtherSessions
     | RevokeSession
+    | RevokeUserSession
     | RotateSessionToken
     | SessionId
     | StoreVerificationToken

@@ -8,8 +8,10 @@ import { Auth } from "../auth.js";
 import {
   invalidCredentials,
   invalidToken,
+  parseClientIp,
   rateLimited,
   unauthorized,
+  type ClientIp,
   type PublicAuthError,
 } from "../domain/index.js";
 import {
@@ -23,10 +25,8 @@ import {
   PasswordRecoveryWorkflows,
   SessionWorkflows,
   type ChangePasswordInput,
-  type RequestPasswordResetInput,
-  type ResendVerificationInput,
+  type ListedSession,
   type SignInInput,
-  type SignUpInput,
   type TokenRotationDecision,
 } from "../workflows/index.js";
 
@@ -80,7 +80,7 @@ export const AuthHttpErrorMapper = Context.Reference<AuthHttpErrorMapperShape>(
 );
 
 export interface AuthHttpConfigInput {
-  readonly trustedOrigins: ReadonlyArray<string | URL>;
+  readonly trustedOrigins: ReadonlyArray<URL>;
   readonly sessionCookieName?: string;
   readonly sessionCookiePath?: string;
   readonly secureCookies?: boolean;
@@ -100,11 +100,7 @@ const deriveSecureCookies = (input: AuthHttpConfigInput, nodeEnv: string): boole
 };
 
 const makeAuthHttpConfig = (input: AuthHttpConfigInput, nodeEnv: string): AuthHttpConfigShape => ({
-  trustedOrigins: new Set(
-    input.trustedOrigins.map((origin) =>
-      origin instanceof URL ? origin.origin : new URL(origin).origin,
-    ),
-  ),
+  trustedOrigins: new Set(input.trustedOrigins.map((origin) => origin.origin)),
   sessionCookieName: input.sessionCookieName ?? "effect_auth_session",
   sessionCookiePath: input.sessionCookiePath ?? "/",
   secureCookies: deriveSecureCookies(input, nodeEnv),
@@ -147,6 +143,7 @@ export class CurrentAuthSession extends Context.Service<
 
 export type SessionTokenExtractResult = Data.TaggedEnum<{
   Missing: {};
+  Invalid: { readonly source: "Cookie" | "Bearer" };
   Found: {
     readonly token: SessionTokenValue;
     readonly source: "Cookie" | "Bearer";
@@ -179,7 +176,7 @@ const decodeExtractedToken = (
     ? Effect.succeed(SessionTokenExtractResult.Missing())
     : decodeSessionTokenValue(value).pipe(
         Effect.map((token) => SessionTokenExtractResult.Found({ token, source })),
-        Effect.catch(() => Effect.succeed(SessionTokenExtractResult.Missing())),
+        Effect.catch(() => Effect.succeed(SessionTokenExtractResult.Invalid({ source }))),
       );
 
 const cookieTokenExtractor: AuthHttpTokenExtractor = {
@@ -202,6 +199,7 @@ const cookieOrBearerTokenExtractor: AuthHttpTokenExtractor = {
     const bearer = yield* bearerTokenExtractor.extract;
     return yield* Match.valueTags(bearer, {
       Found: (found) => Effect.succeed(found),
+      Invalid: (invalid) => Effect.succeed(invalid),
       Missing: () => cookieTokenExtractor.extract,
     });
   }),
@@ -469,10 +467,8 @@ export const StateChangingRequest = {
   check: checkAuthHttpConfigRequestOrigin,
 };
 
-export const TrustedOrigins = (origins: ReadonlyArray<string | URL>) => {
-  const allowed = new Set(
-    origins.map((origin) => (origin instanceof URL ? origin.origin : new URL(origin).origin)),
-  );
+export const TrustedOrigins = (origins: ReadonlyArray<URL>) => {
+  const allowed = new Set(origins.map((origin) => origin.origin));
   return Layer.succeed(TrustedOriginPolicy)({
     isTrusted: (origin) => Effect.succeed(allowed.has(origin.origin)),
   });
@@ -524,6 +520,10 @@ export interface AuthHttpSessionResponse {
   readonly session: AuthHttpSession;
 }
 
+export interface AuthHttpListSessionsResponse {
+  readonly sessions: ReadonlyArray<ListedSession>;
+}
+
 export interface AuthHttpOkResponse {
   readonly ok: true;
 }
@@ -557,6 +557,10 @@ const ChangePasswordPayload = Schema.Struct({
 const MountedChangePasswordPayload = Schema.Struct({
   currentPassword: Schema.Unknown,
   newPassword: Schema.Unknown,
+});
+
+const RevokeListedSessionPayload = Schema.Struct({
+  sessionId: Schema.String,
 });
 
 const AuthApiGroup = HttpApiGroup.make("auth").add(
@@ -605,6 +609,29 @@ const AuthApiGroup = HttpApiGroup.make("auth").add(
     success: Schema.Unknown,
     error: Schema.Unknown,
   }),
+  HttpApiEndpoint.get("listSessions", "/auth/sessions", {
+    query: SessionTokenPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
+  HttpApiEndpoint.post("revokeSession", "/auth/sessions/revoke", {
+    payload: Schema.Struct({
+      sessionToken: Schema.String,
+      sessionId: Schema.String,
+    }),
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
+  HttpApiEndpoint.post("revokeOtherSessions", "/auth/sessions/revoke-others", {
+    payload: SessionTokenPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
+  HttpApiEndpoint.post("revokeSessions", "/auth/sessions/revoke-all", {
+    payload: SessionTokenPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
 );
 
 export const AuthApi = HttpApi.make("auth").add(AuthApiGroup);
@@ -619,6 +646,10 @@ export const AuthApiEndpoints: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/auth/password-reset/request"],
   ["POST", "/auth/password-reset/complete"],
   ["POST", "/auth/password/change"],
+  ["GET", "/auth/sessions"],
+  ["POST", "/auth/sessions/revoke"],
+  ["POST", "/auth/sessions/revoke-others"],
+  ["POST", "/auth/sessions/revoke-all"],
 ];
 
 export const AuthHttpAdapter = Effect.gen(function* () {
@@ -649,6 +680,10 @@ export const AuthHttpAdapter = Effect.gen(function* () {
         yield* SessionCookie.appendClearFromConfig;
         return null;
       }),
+    listSessions: sessions.listSessions,
+    revokeSession: sessions.revokeSession,
+    revokeOtherSessions: sessions.revokeOtherSessions,
+    revokeSessions: sessions.revokeSessions,
     requestPasswordReset: recovery.requestPasswordReset,
     completePasswordReset: recovery.resetPassword,
     changePassword: (input: ChangePasswordInput) =>
@@ -667,64 +702,88 @@ const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 const decodeMountedSignInEmailPayload = Schema.decodeUnknownEffect(MountedSignInEmailPayload);
 const decodeMountedChangePasswordPayload = Schema.decodeUnknownEffect(MountedChangePasswordPayload);
 
-const signUpInput = (payload: typeof SignUpEmailPayload.Type): SignUpInput => ({
-  email: payload.email,
-  password: payload.password,
-  verificationCallbackUrl: payload.verificationCallbackUrl,
-  ...(payload.ip === undefined ? {} : { ip: payload.ip }),
+const parseOptionalClientIp = (value: string | undefined): Effect.Effect<ClientIp | undefined> =>
+  value === undefined
+    ? Effect.void.pipe(Effect.as(undefined))
+    : parseClientIp(value).pipe(Effect.option, Effect.map(Option.getOrUndefined));
+
+const signUpInput = Effect.fn("signUpInput")(function* (payload: typeof SignUpEmailPayload.Type) {
+  const ip = yield* parseOptionalClientIp(payload.ip);
+  return {
+    email: payload.email,
+    password: payload.password,
+    verificationCallbackUrl: payload.verificationCallbackUrl,
+    ...(ip === undefined ? {} : { ip }),
+  };
 });
 
-const resendVerificationInput = (
+const resendVerificationInput = Effect.fn("resendVerificationInput")(function* (
   payload: typeof ResendVerificationPayload.Type,
-): ResendVerificationInput => ({
-  email: payload.email,
-  verificationCallbackUrl: payload.verificationCallbackUrl,
-  ...(payload.ip === undefined ? {} : { ip: payload.ip }),
+) {
+  const ip = yield* parseOptionalClientIp(payload.ip);
+  return {
+    email: payload.email,
+    verificationCallbackUrl: payload.verificationCallbackUrl,
+    ...(ip === undefined ? {} : { ip }),
+  };
 });
 
-const signInInput = (payload: typeof SignInEmailPayload.Type): SignInInput => ({
-  email: payload.email,
-  password: payload.password,
-  ...(payload.ip === undefined ? {} : { ip: payload.ip }),
-});
-
-const trustedRequestIp = (request: HttpServerRequest.HttpServerRequest): string | undefined => {
-  const forwarded = request.headers["x-forwarded-for"];
-  if (forwarded !== undefined && forwarded.trim() !== "") {
-    return forwarded.split(",")[0]?.trim();
-  }
-  const realIp = request.headers["x-real-ip"];
-  return realIp === undefined || realIp.trim() === "" ? undefined : realIp.trim();
-};
-
-const mountedSignInInput = (
-  payload: typeof MountedSignInEmailPayload.Type,
-  request: HttpServerRequest.HttpServerRequest,
-): SignInInput => {
-  const ip = trustedRequestIp(request);
+const signInInput = Effect.fn("signInInput")(function* (payload: typeof SignInEmailPayload.Type) {
+  const ip = yield* parseOptionalClientIp(payload.ip);
   return {
     email: payload.email,
     password: payload.password,
     ...(ip === undefined ? {} : { ip }),
   };
-};
-
-const requestPasswordResetInput = (
-  payload: typeof RequestPasswordResetPayload.Type,
-): RequestPasswordResetInput => ({
-  email: payload.email,
-  resetCallbackUrl: payload.resetCallbackUrl,
-  ...(payload.ip === undefined ? {} : { ip: payload.ip }),
 });
 
-const changePasswordInput = (
+const trustedRequestIp = (
+  request: HttpServerRequest.HttpServerRequest,
+): Effect.Effect<ClientIp | undefined> => {
+  const forwarded = request.headers["x-forwarded-for"];
+  if (forwarded !== undefined && forwarded.trim() !== "") {
+    return parseOptionalClientIp(forwarded.split(",")[0]?.trim());
+  }
+  const realIp = request.headers["x-real-ip"];
+  return parseOptionalClientIp(
+    realIp === undefined || realIp.trim() === "" ? undefined : realIp.trim(),
+  );
+};
+
+const mountedSignInInput = Effect.fn("mountedSignInInput")(function* (
+  payload: typeof MountedSignInEmailPayload.Type,
+  request: HttpServerRequest.HttpServerRequest,
+) {
+  const ip = yield* trustedRequestIp(request);
+  return {
+    email: payload.email,
+    password: payload.password,
+    ...(ip === undefined ? {} : { ip }),
+  };
+});
+
+const requestPasswordResetInput = Effect.fn("requestPasswordResetInput")(function* (
+  payload: typeof RequestPasswordResetPayload.Type,
+) {
+  const ip = yield* parseOptionalClientIp(payload.ip);
+  return {
+    email: payload.email,
+    resetCallbackUrl: payload.resetCallbackUrl,
+    ...(ip === undefined ? {} : { ip }),
+  };
+});
+
+const changePasswordInput = Effect.fn("changePasswordInput")(function* (
   payload: typeof ChangePasswordPayload.Type,
   sessionToken: SessionTokenValue,
-): ChangePasswordInput => ({
-  sessionToken,
-  currentPassword: payload.currentPassword,
-  newPassword: payload.newPassword,
-  ...(payload.ip === undefined ? {} : { ip: payload.ip }),
+) {
+  const ip = yield* parseOptionalClientIp(payload.ip);
+  return {
+    sessionToken,
+    currentPassword: payload.currentPassword,
+    newPassword: payload.newPassword,
+    ...(ip === undefined ? {} : { ip }),
+  };
 });
 
 export const handleSignUpEmail = Effect.fn("handleSignUpEmail")(function* ({
@@ -736,7 +795,8 @@ export const handleSignUpEmail = Effect.fn("handleSignUpEmail")(function* ({
 }) {
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
-  return yield* adapter.signUpEmail(signUpInput(payload));
+  const input = yield* signUpInput(payload);
+  return yield* adapter.signUpEmail(input);
 });
 
 export const handleVerifyEmail = Effect.fn("handleVerifyEmail")(function* ({
@@ -761,7 +821,8 @@ const handleResendVerification = Effect.fn("handleResendVerification")(function*
 }) {
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
-  return yield* adapter.resendVerification(resendVerificationInput(payload));
+  const input = yield* resendVerificationInput(payload);
+  return yield* adapter.resendVerification(input);
 });
 
 export const handleSignInEmail = Effect.fn("handleSignInEmail")(function* ({
@@ -773,7 +834,8 @@ export const handleSignInEmail = Effect.fn("handleSignInEmail")(function* ({
 }) {
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
-  return yield* adapter.signInEmail(signInInput(payload));
+  const input = yield* signInInput(payload);
+  return yield* adapter.signInEmail(input);
 });
 
 const handleMountedSignInEmail = (request: HttpServerRequest.HttpServerRequest) =>
@@ -782,7 +844,8 @@ const handleMountedSignInEmail = (request: HttpServerRequest.HttpServerRequest) 
     const payload = yield* request.json.pipe(Effect.flatMap(decodeMountedSignInEmailPayload));
     const auth = yield* Auth;
     const config = yield* AuthHttpConfig;
-    const result = yield* auth.signIn(mountedSignInInput(payload, request));
+    const input = yield* mountedSignInInput(payload, request);
+    const result = yield* auth.signIn(input);
     const body: AuthHttpSignInResponse = {
       user: result.user,
       session: authHttpSession(result.session),
@@ -802,6 +865,7 @@ const extractMountedSessionToken = Effect.fn("extractMountedSessionToken")(funct
   const extracted = yield* extractor.extract;
   return yield* Match.valueTags(extracted, {
     Missing: () => Effect.fail(AuthHttpError.MissingSessionToken()),
+    Invalid: () => Effect.fail(AuthHttpError.InvalidSessionToken()),
     Found: (found) => Effect.succeed(found),
   });
 });
@@ -814,7 +878,8 @@ const handleMountedSignUpEmail = (request: HttpServerRequest.HttpServerRequest) 
         Effect.flatMap(Schema.decodeUnknownEffect(SignUpEmailPayload)),
       );
       const auth = yield* Auth;
-      const result = yield* auth.signUp(signUpInput(payload));
+      const input = yield* signUpInput(payload);
+      const result = yield* auth.signUp(input);
       return mountedJson({ user: result.user } satisfies AuthHttpUserResponse);
     }),
   );
@@ -841,7 +906,8 @@ const handleMountedResendVerification = (request: HttpServerRequest.HttpServerRe
         Effect.flatMap(Schema.decodeUnknownEffect(ResendVerificationPayload)),
       );
       const auth = yield* Auth;
-      yield* auth.resendVerification(resendVerificationInput(payload));
+      const input = yield* resendVerificationInput(payload);
+      yield* auth.resendVerification(input);
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
     }),
   );
@@ -864,6 +930,24 @@ const handleMountedCurrentSession = (_request: HttpServerRequest.HttpServerReque
         user: current.user,
         session: authHttpSession(current.session),
       } satisfies AuthHttpSessionResponse);
+    }),
+  );
+
+const handleMountedListSessions = (_request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const listed = yield* auth
+        .listSessions({ sessionToken: extracted.token })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      if (extracted.source === "Cookie" && Predicate.isTagged(listed.tokenRotation, "Rotated")) {
+        yield* appendCookieInstruction(sessionCookieFromConfig(listed.tokenRotation.token, config));
+      }
+      return mountedJson({
+        sessions: listed.sessions,
+      } satisfies AuthHttpListSessionsResponse);
     }),
   );
 
@@ -893,6 +977,61 @@ const handleMountedSignOut = (request: HttpServerRequest.HttpServerRequest) =>
     }),
   );
 
+const handleMountedRevokeSession = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const payload = yield* request.json.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(RevokeListedSessionPayload)),
+      );
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      yield* auth
+        .revokeSession({ sessionToken: extracted.token, sessionId: payload.sessionId })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      if (extracted.source === "Cookie") {
+        const current = yield* Effect.option(
+          auth.currentSession({ sessionToken: extracted.token }),
+        );
+        if (Option.isNone(current)) {
+          yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+        }
+      }
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+const handleMountedRevokeOtherSessions = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      yield* auth
+        .revokeOtherSessions({ sessionToken: extracted.token })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
+const handleMountedRevokeSessions = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      yield* auth
+        .revokeSessions({ sessionToken: extracted.token })
+        .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
+      if (extracted.source === "Cookie") {
+        yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+      }
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
 const handleMountedRequestPasswordReset = (request: HttpServerRequest.HttpServerRequest) =>
   mountedErrorBoundary(
     Effect.gen(function* () {
@@ -901,7 +1040,8 @@ const handleMountedRequestPasswordReset = (request: HttpServerRequest.HttpServer
         Effect.flatMap(Schema.decodeUnknownEffect(RequestPasswordResetPayload)),
       );
       const auth = yield* Auth;
-      yield* auth.requestPasswordReset(requestPasswordResetInput(payload));
+      const input = yield* requestPasswordResetInput(payload);
+      yield* auth.requestPasswordReset(input);
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
     }),
   );
@@ -928,7 +1068,7 @@ const handleMountedChangePassword = (request: HttpServerRequest.HttpServerReques
       const payload = yield* request.json.pipe(Effect.flatMap(decodeMountedChangePasswordPayload));
       const extracted = yield* extractMountedSessionToken();
       const auth = yield* Auth;
-      const ip = trustedRequestIp(request);
+      const ip = yield* trustedRequestIp(request);
       const result = yield* auth.changePassword({
         sessionToken: extracted.token,
         currentPassword: payload.currentPassword,
@@ -970,6 +1110,7 @@ const resolveAuthSession = Effect.fn("resolveAuthSession")(function* (
   const extracted = yield* extractor.extract;
   return yield* Match.valueTags(extracted, {
     Missing: () => Effect.fail(AuthHttpError.MissingSessionToken()),
+    Invalid: () => Effect.fail(AuthHttpError.InvalidSessionToken()),
     Found: (found) =>
       Effect.gen(function* () {
         const auth = yield* Auth;
@@ -1018,6 +1159,7 @@ const resolveOptionalAuthSession = Effect.fn("resolveOptionalAuthSession")(funct
           Effect.option,
           Effect.map((session) => Option.map(session, (_) => _.authSession)),
         ),
+      Invalid: () => Effect.succeed(Option.none<AuthSessionShape>()),
       Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
     });
     if (Option.isSome(bearerSession)) return bearerSession;
@@ -1025,6 +1167,11 @@ const resolveOptionalAuthSession = Effect.fn("resolveOptionalAuthSession")(funct
     const cookie = yield* AuthHttpToken.cookie.extract;
     return yield* Match.valueTags(cookie, {
       Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
+      Invalid: () =>
+        Effect.gen(function* () {
+          yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+          return Option.none<AuthSessionShape>();
+        }),
       Found: (found) =>
         Effect.gen(function* () {
           const cookieSession = yield* Effect.option(currentSessionFromToken(found.token));
@@ -1043,6 +1190,13 @@ const resolveOptionalAuthSession = Effect.fn("resolveOptionalAuthSession")(funct
   const extracted = yield* extractor.extract;
   return yield* Match.valueTags(extracted, {
     Missing: () => Effect.succeed(Option.none<AuthSessionShape>()),
+    Invalid: (invalid) =>
+      Effect.gen(function* () {
+        if (invalid.source === "Cookie") {
+          yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+        }
+        return Option.none<AuthSessionShape>();
+      }),
     Found: (found) =>
       Effect.gen(function* () {
         const session = yield* Effect.option(currentSessionFromToken(found.token));
@@ -1166,6 +1320,55 @@ export const handleSignOut = Effect.fn("handleSignOut")(function* ({
   return yield* adapter.signOut({ sessionToken });
 });
 
+export const handleListSessions = Effect.fn("handleListSessions")(function* ({
+  query,
+}: {
+  readonly query: typeof SessionTokenPayload.Type;
+}) {
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(query.sessionToken);
+  return yield* adapter.listSessions({ sessionToken });
+});
+
+export const handleRevokeSession = Effect.fn("handleRevokeSession")(function* ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof RevokeListedSessionPayload.Type & { readonly sessionToken: string };
+  readonly request: OriginRequest;
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  return yield* adapter.revokeSession({ sessionToken, sessionId: payload.sessionId });
+});
+
+export const handleRevokeOtherSessions = Effect.fn("handleRevokeOtherSessions")(function* ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof SessionTokenPayload.Type;
+  readonly request: OriginRequest;
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  return yield* adapter.revokeOtherSessions({ sessionToken });
+});
+
+export const handleRevokeSessions = Effect.fn("handleRevokeSessions")(function* ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof SessionTokenPayload.Type;
+  readonly request: OriginRequest;
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  return yield* adapter.revokeSessions({ sessionToken });
+});
+
 export const handleRequestPasswordReset = Effect.fn("handleRequestPasswordReset")(function* ({
   payload,
   request,
@@ -1175,7 +1378,8 @@ export const handleRequestPasswordReset = Effect.fn("handleRequestPasswordReset"
 }) {
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
-  return yield* adapter.requestPasswordReset(requestPasswordResetInput(payload));
+  const input = yield* requestPasswordResetInput(payload);
+  return yield* adapter.requestPasswordReset(input);
 });
 
 export const handleCompletePasswordReset = Effect.fn("handleCompletePasswordReset")(function* ({
@@ -1201,7 +1405,8 @@ export const handleChangePassword = Effect.fn("handleChangePassword")(function* 
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
   const sessionToken = yield* decodeSessionToken(payload.sessionToken);
-  return yield* adapter.changePassword(changePasswordInput(payload, sessionToken));
+  const input = yield* changePasswordInput(payload, sessionToken);
+  return yield* adapter.changePassword(input);
 });
 
 export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handlers) =>
@@ -1214,7 +1419,11 @@ export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handl
     .handle("signOut", handleSignOut)
     .handle("requestPasswordReset", handleRequestPasswordReset)
     .handle("completePasswordReset", handleCompletePasswordReset)
-    .handle("changePassword", handleChangePassword),
+    .handle("changePassword", handleChangePassword)
+    .handle("listSessions", handleListSessions)
+    .handle("revokeSession", handleRevokeSession)
+    .handle("revokeOtherSessions", handleRevokeOtherSessions)
+    .handle("revokeSessions", handleRevokeSessions),
 );
 
 export interface AuthHttpMountOptions {
@@ -1247,8 +1456,22 @@ export const AuthHttp = {
         HttpRouter.add("GET", mountedPath(options.basePath, "/session"), (request) =>
           handleMountedCurrentSession(request),
         ),
+        HttpRouter.add("GET", mountedPath(options.basePath, "/sessions"), (request) =>
+          handleMountedListSessions(request),
+        ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/sign-out"), (request) =>
           handleMountedSignOut(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sessions/revoke"), (request) =>
+          handleMountedRevokeSession(request),
+        ),
+        HttpRouter.add(
+          "POST",
+          mountedPath(options.basePath, "/sessions/revoke-others"),
+          (request) => handleMountedRevokeOtherSessions(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sessions/revoke-all"), (request) =>
+          handleMountedRevokeSessions(request),
         ),
         HttpRouter.add(
           "POST",

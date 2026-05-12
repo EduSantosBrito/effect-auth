@@ -4,6 +4,7 @@ import {
   AuthBoundaryLive,
   AuthToken,
   AuthTokenLive,
+  AuthStorageFailure,
   Effect,
   NativeScryptPasswordHasher,
   PasswordHasher,
@@ -17,9 +18,11 @@ import {
   deriveRateLimitKey,
   makeBoundedDevRateLimiter,
   makeDevMemoryStorage,
+  makeDevMemoryStorageState,
   makeNativeScryptPasswordHasher,
   normalizeEmail,
   normalizePassword,
+  parseClientIp,
 } from "./support";
 
 it.effect("creates effect-auth client", () =>
@@ -137,8 +140,9 @@ it.effect("auth token service returns redacted 32-byte base64url tokens and SHA-
 it.effect("rate limiter derives bounded retry-after failures", () =>
   Effect.gen(function* () {
     const limiter = makeBoundedDevRateLimiter({ limit: 1, windowMillis: 10_000 });
-    yield* limiter.check({ bucket: "SignIn", ip: "127.0.0.1" });
-    const exit = yield* Effect.exit(limiter.check({ bucket: "SignIn", ip: "127.0.0.1" }));
+    const ip = yield* parseClientIp("127.0.0.1");
+    yield* limiter.check({ bucket: "SignIn", ip });
+    const exit = yield* Effect.exit(limiter.check({ bucket: "SignIn", ip }));
 
     assert.strictEqual(exit._tag, "Failure");
   }),
@@ -147,18 +151,16 @@ it.effect("rate limiter derives bounded retry-after failures", () =>
 it.effect("rate limiter key derivation covers default and custom bucket semantics", () =>
   Effect.gen(function* () {
     const email = yield* normalizeEmail("USER@example.com");
+    const ip = yield* parseClientIp("127.0.0.1");
     assert.strictEqual(
-      deriveRateLimitKey({ bucket: "SignIn", email, ip: "127.0.0.1" }),
+      deriveRateLimitKey({ bucket: "SignIn", email, ip }),
       "SignIn|email:user@example.com|ip:127.0.0.1",
     );
     assert.strictEqual(
       deriveRateLimitKey({ bucket: "SignIn", email }),
       "SignIn|email:user@example.com",
     );
-    assert.strictEqual(
-      deriveRateLimitKey({ bucket: "SignUp", ip: "127.0.0.1" }),
-      "SignUp|ip:127.0.0.1",
-    );
+    assert.strictEqual(deriveRateLimitKey({ bucket: "SignUp", ip }), "SignUp|ip:127.0.0.1");
 
     const defaultLimiter = makeBoundedDevRateLimiter();
     for (let index = 0; index < 100; index++) {
@@ -171,9 +173,7 @@ it.effect("rate limiter key derivation covers default and custom bucket semantic
     yield* customLimiter.check({ bucket: "SignIn", email });
     const customLimited = yield* Effect.exit(customLimiter.check({ bucket: "SignIn", email }));
     const otherBucket = yield* Effect.exit(customLimiter.check({ bucket: "SignUp", email }));
-    const otherIp = yield* Effect.exit(
-      customLimiter.check({ bucket: "SignIn", email, ip: "127.0.0.1" }),
-    );
+    const otherIp = yield* Effect.exit(customLimiter.check({ bucket: "SignIn", email, ip }));
 
     assert.strictEqual(defaultLimited._tag, "Failure");
     assert.strictEqual(customLimited._tag, "Failure");
@@ -199,7 +199,8 @@ it.effect("dev memory storage enforces unique email and one-time tokens", () =>
       yield* Effect.void;
       return yield* PasswordHasher;
     }).pipe(Effect.provide(TestPasswordHasher));
-    const storage = makeDevMemoryStorage();
+    const storageState = makeDevMemoryStorageState();
+    const storage = makeDevMemoryStorage(storageState);
     const email = yield* boundary.parseEmail("user@example.com");
     const password = yield* boundary.parsePassword("correct horse battery staple");
     const passwordHash = yield* hasher.hash(password);
@@ -259,7 +260,8 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
       yield* Effect.void;
       return yield* PasswordHasher;
     }).pipe(Effect.provide(NativeScryptPasswordHasher));
-    const storage = makeDevMemoryStorage();
+    const storageState = makeDevMemoryStorageState();
+    const storage = makeDevMemoryStorage(storageState);
     const email = yield* boundary.parseEmail("sessions@example.com");
     const password = yield* boundary.parsePassword("correct horse battery staple");
     const passwordHash = yield* hasher.hash(password);
@@ -297,5 +299,104 @@ it.effect("dev memory storage enforces session expiry and atomic rotation", () =
     assert.strictEqual(expired._tag, "Failure");
     assert.strictEqual(oldLookup._tag, "Failure");
     assert.strictEqual(newLookup.session.id, rotated.id);
+  }),
+);
+
+it.effect("dev memory storage lists active sessions and revokes by current user scope", () =>
+  Effect.gen(function* () {
+    const boundary = yield* Effect.gen(function* () {
+      yield* Effect.void;
+      return yield* AuthBoundary;
+    }).pipe(Effect.provide(AuthBoundaryLive));
+    const tokenService = yield* Effect.gen(function* () {
+      yield* Effect.void;
+      return yield* AuthToken;
+    }).pipe(Effect.provide(AuthTokenLive));
+    const hasher = yield* Effect.gen(function* () {
+      yield* Effect.void;
+      return yield* PasswordHasher;
+    }).pipe(Effect.provide(TestPasswordHasher));
+    const storageState = makeDevMemoryStorageState();
+    const storage = makeDevMemoryStorage(storageState);
+    const email = yield* boundary.parseEmail("active-sessions@example.com");
+    const otherEmail = yield* boundary.parseEmail("other-sessions@example.com");
+    const password = yield* boundary.parsePassword("correct horse battery staple");
+    const passwordHash = yield* hasher.hash(password);
+    const user = yield* storage.createUserWithEmailPasswordCredential({
+      email,
+      passwordHash,
+      now: 1,
+    });
+    const other = yield* storage.createUserWithEmailPasswordCredential({
+      email: otherEmail,
+      passwordHash,
+      now: 1,
+    });
+    const currentPair = yield* tokenService.makeSessionToken();
+    const expiredPair = yield* tokenService.makeSessionToken();
+    const revokedPair = yield* tokenService.makeSessionToken();
+    const otherPair = yield* tokenService.makeSessionToken();
+    const current = yield* storage.createSession({
+      userId: user.id,
+      tokenHash: currentPair.hash,
+      expiresAt: 100,
+      now: 1,
+      ipAddress: "127.0.0.1",
+      userAgent: "Effect Auth Test",
+    });
+    yield* storage.createSession({
+      userId: user.id,
+      tokenHash: expiredPair.hash,
+      expiresAt: 1,
+      now: 1,
+    });
+    const revoked = yield* storage.createSession({
+      userId: user.id,
+      tokenHash: revokedPair.hash,
+      expiresAt: 100,
+      now: 1,
+    });
+    yield* storage.revokeSession({ tokenHash: revokedPair.hash, now: 2 });
+    const malformedPair = yield* tokenService.makeSessionToken();
+    const malformed = Object.assign({}, current, {
+      id: "ses_malformed",
+      tokenHash: malformedPair.hash,
+      expiresAt: "not-a-number",
+    });
+    Reflect.apply(Map.prototype.set, storageState.sessionsByHash, [
+      Redacted.value(malformedPair.hash),
+      malformed,
+    ]);
+    yield* storage.createSession({
+      userId: other.id,
+      tokenHash: otherPair.hash,
+      expiresAt: 100,
+      now: 1,
+    });
+
+    const listed = yield* storage.listUserSessions({ userId: user.id, now: 3 });
+    const crossUser = yield* Effect.flip(
+      storage.revokeUserSession({ userId: other.id, sessionId: current.id, now: 3 }),
+    );
+    const revokeInactive = yield* Effect.flip(
+      storage.revokeUserSession({ userId: user.id, sessionId: revoked.id, now: 3 }),
+    );
+    const malformedLookup = yield* Effect.flip(storage.findSessionByTokenHash(malformedPair.hash));
+    yield* storage.revokeUserSession({ userId: user.id, sessionId: current.id, now: 3 });
+    const afterRevoke = yield* storage.listUserSessions({ userId: user.id, now: 4 });
+
+    assert.deepStrictEqual(
+      listed.map((session) => session.id),
+      [current.id],
+    );
+    assert.strictEqual(listed[0]?.ipAddress, "127.0.0.1");
+    assert.strictEqual(listed[0]?.userAgent, "Effect Auth Test");
+    assert.deepStrictEqual(crossUser, new AuthStorageFailure({ reason: "NotFound" }));
+    assert.deepStrictEqual(revokeInactive, new AuthStorageFailure({ reason: "NotFound" }));
+    assert.deepStrictEqual(
+      malformedLookup,
+      new AuthStorageFailure({ reason: "BackendUnavailable" }),
+    );
+    assert.deepStrictEqual(afterRevoke, []);
   }),
 );

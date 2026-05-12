@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import { Context, Effect, Layer, Schema } from "effect";
 
 export const NormalizedEmail = Schema.String.pipe(Schema.brand("NormalizedEmail"));
@@ -11,6 +12,9 @@ export type CallbackUrl = typeof CallbackUrl.Type;
 
 export const OriginUrl = Schema.instanceOf(URL).pipe(Schema.brand("OriginUrl"));
 export type OriginUrl = typeof OriginUrl.Type;
+
+export const ClientIp = Schema.String.pipe(Schema.brand("ClientIp"));
+export type ClientIp = typeof ClientIp.Type;
 
 export class BoundaryParseError extends Schema.TaggedErrorClass<BoundaryParseError>()(
   "BoundaryParseError",
@@ -63,6 +67,7 @@ export class AuthBoundary extends Context.Service<
     readonly parsePassword: (input: unknown) => Effect.Effect<PasswordText, BoundaryParseError>;
     readonly parseCallbackUrl: (input: unknown) => Effect.Effect<CallbackUrl, BoundaryParseError>;
     readonly parseOrigin: (input: unknown) => Effect.Effect<OriginUrl, BoundaryParseError>;
+    readonly parseClientIp: (input: unknown) => Effect.Effect<ClientIp, BoundaryParseError>;
   }
 >()("effect-auth/AuthBoundary") {}
 export type AuthBoundaryShape = typeof AuthBoundary.Service;
@@ -72,6 +77,7 @@ const decodeNormalizedEmail = Schema.decodeUnknownEffect(NormalizedEmail);
 const decodePasswordText = Schema.decodeUnknownEffect(PasswordText);
 const decodeCallbackUrl = Schema.decodeUnknownEffect(CallbackUrl);
 const decodeOriginUrl = Schema.decodeUnknownEffect(OriginUrl);
+const decodeClientIp = Schema.decodeUnknownEffect(ClientIp);
 
 export const normalizeEmail = (
   input: unknown,
@@ -118,9 +124,32 @@ export const parseOrigin = (input: unknown): Effect.Effect<OriginUrl, BoundaryPa
     Effect.mapError(() => new BoundaryParseError({ field: "origin", reason: "Invalid URL" })),
   );
 
+const canonicalIp = (input: string): string | undefined => {
+  const value = input.trim();
+  if (value === "") return undefined;
+  if (isIP(value) === 4) return new URL(`http://${value}/`).hostname;
+  if (isIP(value) === 6) return new URL(`http://[${value}]/`).hostname.slice(1, -1);
+  return undefined;
+};
+
+export const parseClientIp = (input: unknown): Effect.Effect<ClientIp, BoundaryParseError> =>
+  typeof input !== "string"
+    ? Effect.fail(new BoundaryParseError({ field: "ip", reason: "Expected string" }))
+    : Effect.suspend(() => {
+        const normalized = canonicalIp(input);
+        return normalized === undefined
+          ? Effect.fail(new BoundaryParseError({ field: "ip", reason: "Invalid IP address" }))
+          : decodeClientIp(normalized).pipe(
+              Effect.mapError(
+                () => new BoundaryParseError({ field: "ip", reason: "Invalid IP address" }),
+              ),
+            );
+      });
+
 export const AuthBoundaryLive = Layer.succeed(AuthBoundary)({
   parseEmail: normalizeEmail,
   parsePassword: normalizePassword,
   parseCallbackUrl,
   parseOrigin,
+  parseClientIp,
 });

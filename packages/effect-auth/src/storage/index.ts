@@ -61,6 +61,8 @@ export interface CreateSession {
   readonly tokenHash: TokenHash;
   readonly expiresAt: number;
   readonly now: number;
+  readonly ipAddress?: string;
+  readonly userAgent?: string;
 }
 
 export interface StoredSession {
@@ -71,6 +73,8 @@ export interface StoredSession {
   readonly updatedAt: number;
   readonly expiresAt: number;
   readonly revokedAt?: number;
+  readonly ipAddress?: string;
+  readonly userAgent?: string;
 }
 
 export interface StoredSessionLookup {
@@ -87,6 +91,17 @@ export interface RotateSessionToken {
 
 export interface RevokeSession {
   readonly tokenHash: TokenHash;
+  readonly now: number;
+}
+
+export interface ListUserSessions {
+  readonly userId: AuthUserId;
+  readonly now: number;
+}
+
+export interface RevokeUserSession {
+  readonly userId: AuthUserId;
+  readonly sessionId: SessionId;
   readonly now: number;
 }
 
@@ -162,6 +177,12 @@ export class AuthStorage extends Context.Service<
       input: RotateSessionToken,
     ) => Effect.Effect<StoredSession, AuthStorageFailure>;
     readonly revokeSession: (input: RevokeSession) => Effect.Effect<void, AuthStorageFailure>;
+    readonly listUserSessions: (
+      input: ListUserSessions,
+    ) => Effect.Effect<ReadonlyArray<StoredSession>, AuthStorageFailure>;
+    readonly revokeUserSession: (
+      input: RevokeUserSession,
+    ) => Effect.Effect<void, AuthStorageFailure>;
     readonly revokeOtherSessions: (
       input: RevokeOtherSessions,
     ) => Effect.Effect<void, AuthStorageFailure>;
