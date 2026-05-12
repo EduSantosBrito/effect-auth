@@ -10,6 +10,7 @@
       "effect-auth/http": ["./src/http/index.ts"],
       "effect-auth/password": ["./src/password/index.ts"],
       "effect-auth/rate-limit": ["./src/rate-limit/index.ts"],
+      "effect-auth/storage/drizzle-pg": ["./src/storage/drizzle-pg.ts"],
       "effect-auth/storage": ["./src/storage/index.ts"],
       "effect-auth/token": ["./src/token/index.ts"],
       "effect-auth/workflows": ["./src/workflows/index.ts"]

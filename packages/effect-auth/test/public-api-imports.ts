@@ -158,6 +158,14 @@ import {
   type VerificationTokenPurpose,
 } from "effect-auth/storage";
 import {
+  DrizzlePg,
+  layer as drizzlePgLayer,
+  make as makeDrizzlePgStorage,
+  schema as drizzlePgSchema,
+  type LayerOptions as DrizzlePgLayerOptions,
+  type SchemaOptions as DrizzlePgSchemaOptions,
+} from "effect-auth/storage/drizzle-pg";
+import {
   AuthToken,
   AuthTokenLive,
   SessionToken,
@@ -320,6 +328,13 @@ type PublicApiContract = {
     | UpdateUserStorageInput
     | VerificationTokenLookup
     | VerificationTokenPurpose;
+  readonly drizzlePg:
+    | typeof DrizzlePg
+    | typeof drizzlePgLayer
+    | typeof makeDrizzlePgStorage
+    | typeof drizzlePgSchema
+    | DrizzlePgLayerOptions
+    | DrizzlePgSchemaOptions;
   readonly token:
     | typeof AuthToken
     | typeof AuthTokenLive

@@ -256,7 +256,7 @@ it.effect("Identity Core exposes public user profile fields and credential accou
     const account = accounts.accounts[0];
     if (!account) return yield* missingFixture("missing credential account");
     assert.strictEqual(account.providerId, "credential");
-    assert.strictEqual(account.accountId, "identity-core@example.com");
+    assert.strictEqual(account.accountId, signedIn.user.id);
     assert.strictEqual(account.userId, signedIn.user.id);
     assert.deepStrictEqual(account.scopes, []);
     assert.strictEqual(typeof account.id, "string");

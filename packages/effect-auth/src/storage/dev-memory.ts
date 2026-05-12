@@ -13,7 +13,7 @@ import {
 
 interface TokenRecord {
   readonly userId: AuthUserId;
-  readonly email: AuthAccount["accountId"];
+  readonly email: AuthUser["email"];
   readonly purpose: "EmailVerification" | "PasswordReset";
   readonly tokenHash: TokenHash;
   readonly expiresAt: number;
@@ -240,7 +240,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       const account: AuthAccount = {
         id: id("acc"),
         providerId: "credential",
-        accountId: email,
+        accountId: user.id,
         userId: user.id,
         scopes: [],
         passwordHash,
