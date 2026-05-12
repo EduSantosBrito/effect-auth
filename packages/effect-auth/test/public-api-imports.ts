@@ -8,15 +8,20 @@ import {
   createEffectAuthClient,
   packageName,
   type AuthShape,
+  type ChangePasswordInput,
   type EffectAuthClient,
   type EffectAuthClientOptions,
   type ListedSession,
   type ListSessionsInput,
   type ListSessionsResult,
   type PublicAuthError,
+  type RequestPasswordResetInput,
   type RevokeUserSessionInput,
+  type ResetPasswordInput,
   type SessionPolicyInput,
   type SessionPolicyShape,
+  type SignInInput,
+  type SignUpInput,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
 } from "effect-auth";
@@ -163,15 +168,20 @@ type PublicApiContract = {
     | typeof createEffectAuthClient
     | typeof packageName
     | AuthShape
+    | ChangePasswordInput
     | EffectAuthClient
     | EffectAuthClientOptions
     | ListedSession
     | ListSessionsInput
     | ListSessionsResult
     | PublicAuthError
+    | RequestPasswordResetInput
     | RevokeUserSessionInput
+    | ResetPasswordInput
     | SessionPolicyInput
     | SessionPolicyShape
+    | SignInInput
+    | SignUpInput
     | VerificationTokenConfigInput
     | VerificationTokenConfigShape;
   readonly domain:

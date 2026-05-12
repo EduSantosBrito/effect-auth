@@ -8,6 +8,9 @@ import { Auth } from "../auth.js";
 import {
   invalidCredentials,
   invalidToken,
+  normalizeEmail,
+  normalizePassword,
+  parseCallbackUrl,
   parseClientIp,
   rateLimited,
   unauthorized,
@@ -26,6 +29,9 @@ import {
   SessionWorkflows,
   type ChangePasswordInput,
   type ListedSession,
+  type RequestPasswordResetInput,
+  type ResetPasswordInput,
+  type SignUpInput,
   type SignInInput,
   type TokenRotationDecision,
 } from "../workflows/index.js";
@@ -708,13 +714,16 @@ const parseOptionalClientIp = (value: string | undefined): Effect.Effect<ClientI
     : parseClientIp(value).pipe(Effect.option, Effect.map(Option.getOrUndefined));
 
 const signUpInput = Effect.fn("signUpInput")(function* (payload: typeof SignUpEmailPayload.Type) {
+  const email = yield* normalizeEmail(payload.email);
+  const password = yield* normalizePassword(payload.password);
+  const verificationCallbackUrl = yield* parseCallbackUrl(payload.verificationCallbackUrl);
   const ip = yield* parseOptionalClientIp(payload.ip);
   return {
-    email: payload.email,
-    password: payload.password,
-    verificationCallbackUrl: payload.verificationCallbackUrl,
+    email,
+    password,
+    verificationCallbackUrl,
     ...(ip === undefined ? {} : { ip }),
-  };
+  } satisfies SignUpInput;
 });
 
 const resendVerificationInput = Effect.fn("resendVerificationInput")(function* (
@@ -729,12 +738,14 @@ const resendVerificationInput = Effect.fn("resendVerificationInput")(function* (
 });
 
 const signInInput = Effect.fn("signInInput")(function* (payload: typeof SignInEmailPayload.Type) {
+  const email = yield* normalizeEmail(payload.email);
+  const password = yield* normalizePassword(payload.password);
   const ip = yield* parseOptionalClientIp(payload.ip);
   return {
-    email: payload.email,
-    password: payload.password,
+    email,
+    password,
     ...(ip === undefined ? {} : { ip }),
-  };
+  } satisfies SignInInput;
 });
 
 const trustedRequestIp = (
@@ -754,38 +765,52 @@ const mountedSignInInput = Effect.fn("mountedSignInInput")(function* (
   payload: typeof MountedSignInEmailPayload.Type,
   request: HttpServerRequest.HttpServerRequest,
 ) {
+  const email = yield* normalizeEmail(payload.email);
+  const password = yield* normalizePassword(payload.password);
   const ip = yield* trustedRequestIp(request);
   const userAgent = request.headers["user-agent"] ?? request.headers["User-Agent"];
   return {
-    email: payload.email,
-    password: payload.password,
+    email,
+    password,
     ...(ip === undefined ? {} : { ip }),
     ...(userAgent === undefined || userAgent.trim() === "" ? {} : { userAgent }),
-  };
+  } satisfies SignInInput;
 });
 
 const requestPasswordResetInput = Effect.fn("requestPasswordResetInput")(function* (
   payload: typeof RequestPasswordResetPayload.Type,
 ) {
+  const email = yield* normalizeEmail(payload.email);
+  const resetCallbackUrl = yield* parseCallbackUrl(payload.resetCallbackUrl);
   const ip = yield* parseOptionalClientIp(payload.ip);
   return {
-    email: payload.email,
-    resetCallbackUrl: payload.resetCallbackUrl,
+    email,
+    resetCallbackUrl,
     ...(ip === undefined ? {} : { ip }),
-  };
+  } satisfies RequestPasswordResetInput;
+});
+
+const resetPasswordInput = Effect.fn("resetPasswordInput")(function* (
+  payload: typeof CompletePasswordResetPayload.Type,
+) {
+  const token = yield* decodeVerificationToken(payload.token);
+  const password = yield* normalizePassword(payload.password);
+  return { token, password } satisfies ResetPasswordInput;
 });
 
 const changePasswordInput = Effect.fn("changePasswordInput")(function* (
   payload: typeof ChangePasswordPayload.Type,
   sessionToken: SessionTokenValue,
 ) {
+  const currentPassword = yield* normalizePassword(payload.currentPassword);
+  const newPassword = yield* normalizePassword(payload.newPassword);
   const ip = yield* parseOptionalClientIp(payload.ip);
   return {
     sessionToken,
-    currentPassword: payload.currentPassword,
-    newPassword: payload.newPassword,
+    currentPassword,
+    newPassword,
     ...(ip === undefined ? {} : { ip }),
-  };
+  } satisfies ChangePasswordInput;
 });
 
 export const handleSignUpEmail = Effect.fn("handleSignUpEmail")(function* ({
@@ -1002,7 +1027,9 @@ const handleMountedRevokeSession = (request: HttpServerRequest.HttpServerRequest
         if (payload.sessionId === current.session.id) {
           yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
         } else if (Predicate.isTagged(current.tokenRotation, "Rotated")) {
-          yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
+          yield* appendCookieInstruction(
+            sessionCookieFromConfig(current.tokenRotation.token, config),
+          );
         }
       }
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
@@ -1026,7 +1053,9 @@ const handleMountedRevokeOtherSessions = (request: HttpServerRequest.HttpServerR
         .revokeOtherSessions({ sessionToken: operationToken })
         .pipe(Effect.mapError(() => AuthHttpError.InvalidSessionToken()));
       if (extracted.source === "Cookie" && Predicate.isTagged(current.tokenRotation, "Rotated")) {
-        yield* appendCookieInstruction(sessionCookieFromConfig(current.tokenRotation.token, config));
+        yield* appendCookieInstruction(
+          sessionCookieFromConfig(current.tokenRotation.token, config),
+        );
       }
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
     }),
@@ -1070,9 +1099,9 @@ const handleMountedCompletePasswordReset = (request: HttpServerRequest.HttpServe
       const payload = yield* request.json.pipe(
         Effect.flatMap(Schema.decodeUnknownEffect(CompletePasswordResetPayload)),
       );
-      const token = yield* decodeVerificationToken(payload.token);
       const auth = yield* Auth;
-      yield* auth.resetPassword({ token, password: payload.password });
+      const input = yield* resetPasswordInput(payload);
+      yield* auth.resetPassword(input);
       return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
     }),
   );
@@ -1408,8 +1437,8 @@ export const handleCompletePasswordReset = Effect.fn("handleCompletePasswordRese
 }) {
   yield* checkTrustedRequestOrigin(request);
   const adapter = yield* AuthHttpAdapter;
-  const token = yield* decodeVerificationToken(payload.token);
-  return yield* adapter.completePasswordReset({ token, password: payload.password });
+  const input = yield* resetPasswordInput(payload);
+  return yield* adapter.completePasswordReset(input);
 });
 
 export const handleChangePassword = Effect.fn("handleChangePassword")(function* ({

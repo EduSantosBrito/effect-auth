@@ -1,4 +1,13 @@
-export { Auth, AuthLive, type AuthShape } from "./auth.js";
+export {
+  Auth,
+  AuthLive,
+  type AuthShape,
+  type ChangePasswordInput,
+  type RequestPasswordResetInput,
+  type ResetPasswordInput,
+  type SignInInput,
+  type SignUpInput,
+} from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
 export {
   VerificationTokenConfig,

@@ -10,6 +10,7 @@ import {
   type CallbackUrl,
   type ClientIp,
   type NormalizedEmail,
+  type PasswordText,
   type PublicAuthError,
 } from "../domain/index.js";
 import { AuthEmail, type AuthEmailFailure } from "../email/index.js";
@@ -127,9 +128,9 @@ const rateAttempt = (
 });
 
 export interface SignUpInput {
-  readonly email: unknown;
-  readonly password: unknown;
-  readonly verificationCallbackUrl: unknown;
+  readonly email: NormalizedEmail;
+  readonly password: PasswordText;
+  readonly verificationCallbackUrl: CallbackUrl;
   readonly ip?: ClientIp;
 }
 
@@ -152,8 +153,8 @@ export interface ResendVerificationInput {
 }
 
 export interface SignInInput {
-  readonly email: unknown;
-  readonly password: unknown;
+  readonly email: NormalizedEmail;
+  readonly password: PasswordText;
   readonly ip?: ClientIp;
   readonly userAgent?: string;
 }
@@ -212,20 +213,20 @@ export interface SignOutInput {
 }
 
 export interface RequestPasswordResetInput {
-  readonly email: unknown;
-  readonly resetCallbackUrl: unknown;
+  readonly email: NormalizedEmail;
+  readonly resetCallbackUrl: CallbackUrl;
   readonly ip?: ClientIp;
 }
 
 export interface ResetPasswordInput {
   readonly token: VerificationToken;
-  readonly password: unknown;
+  readonly password: PasswordText;
 }
 
 export interface ChangePasswordInput {
   readonly sessionToken: SessionToken;
-  readonly currentPassword: unknown;
-  readonly newPassword: unknown;
+  readonly currentPassword: PasswordText;
+  readonly newPassword: PasswordText;
   readonly ip?: ClientIp;
 }
 
@@ -384,35 +385,30 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
 
     const signUp: EmailPasswordWorkflowsShape["signUp"] = Effect.fn("EmailPassword.signUp")(
       function* (input) {
-        const parsedEmail = yield* boundary.parseEmail(input.email);
-        const password = yield* boundary.parsePassword(input.password);
-        const verificationCallbackUrl: CallbackUrl = yield* boundary.parseCallbackUrl(
-          input.verificationCallbackUrl,
-        );
         yield* limiter
-          .check(rateAttempt("SignUp", parsedEmail, input.ip))
+          .check(rateAttempt("SignUp", input.email, input.ip))
           .pipe(Effect.mapError(genericRateLimit));
-        yield* policy.validate({ email: parsedEmail, password });
-        const passwordHash = yield* hasher.hash(password);
+        yield* policy.validate({ email: input.email, password: input.password });
+        const passwordHash = yield* hasher.hash(input.password);
         const now = yield* Clock.currentTimeMillis;
         const user = yield* storage.createUserWithEmailPasswordCredential({
-          email: parsedEmail,
+          email: input.email,
           passwordHash,
           now,
         });
         const pair = yield* token.makeVerificationToken();
         yield* storage.storeVerificationToken({
           userId: user.id,
-          email: parsedEmail,
+          email: input.email,
           purpose: "EmailVerification",
           tokenHash: pair.hash,
           expiresAt: now + tokenConfig.emailVerificationTtlMillis,
           now,
         });
         yield* email.sendEmailVerification({
-          to: parsedEmail,
+          to: input.email,
           token: pair.token,
-          callbackUrl: verificationCallbackUrl,
+          callbackUrl: input.verificationCallbackUrl,
         });
         return { user };
       },
@@ -462,19 +458,20 @@ export const EmailPasswordWorkflowsLive = Layer.effect(EmailPasswordWorkflows)(
 
     const signIn: EmailPasswordWorkflowsShape["signIn"] = Effect.fn("EmailPassword.signIn")(
       function* (input) {
-        const parsedEmail = yield* boundary.parseEmail(input.email);
-        const password = yield* boundary.parsePassword(input.password);
         yield* limiter
-          .check(rateAttempt("SignIn", parsedEmail, input.ip))
+          .check(rateAttempt("SignIn", input.email, input.ip))
           .pipe(Effect.mapError(genericRateLimit));
         const lookup = yield* storage
-          .findCredentialByEmail(parsedEmail)
+          .findCredentialByEmail(input.email)
           .pipe(Effect.catchTag("AuthStorageFailure", () => Effect.succeed(null)));
         if (!lookup) {
-          yield* hasher.hash(password);
+          yield* hasher.hash(input.password);
           return yield* invalidCredentials;
         }
-        const verified = yield* hasher.verify({ password, hash: lookup.credential.passwordHash });
+        const verified = yield* hasher.verify({
+          password: input.password,
+          hash: lookup.credential.passwordHash,
+        });
         if (!verified) return yield* invalidCredentials;
         if (!lookup.credential.emailVerified) return yield* emailNotVerified;
         const now = yield* Clock.currentTimeMillis;
@@ -611,7 +608,6 @@ export const SessionWorkflowsLive = Layer.effect(SessionWorkflows)(
 
 export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkflows)(
   Effect.gen(function* () {
-    const boundary = yield* AuthBoundary;
     const policy = yield* PasswordPolicy;
     const hasher = yield* PasswordHasher;
     const token = yield* AuthToken;
@@ -624,45 +620,40 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
     const requestPasswordReset: PasswordRecoveryWorkflowsShape["requestPasswordReset"] = Effect.fn(
       "PasswordRecovery.requestPasswordReset",
     )(function* (input) {
-      const parsedEmail = yield* boundary.parseEmail(input.email);
-      const resetCallbackUrl: CallbackUrl = yield* boundary.parseCallbackUrl(
-        input.resetCallbackUrl,
-      );
       yield* limiter
-        .check(rateAttempt("PasswordReset", parsedEmail, input.ip))
+        .check(rateAttempt("PasswordReset", input.email, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
       const lookup = yield* storage
-        .findCredentialByEmail(parsedEmail)
+        .findCredentialByEmail(input.email)
         .pipe(Effect.catchTag("AuthStorageFailure", () => Effect.succeed(null)));
       if (!lookup) return;
       const now = yield* Clock.currentTimeMillis;
       const pair = yield* token.makeVerificationToken();
       yield* storage.storeVerificationToken({
         userId: lookup.user.id,
-        email: parsedEmail,
+        email: input.email,
         purpose: "PasswordReset",
         tokenHash: pair.hash,
         expiresAt: now + tokenConfig.passwordResetTtlMillis,
         now,
       });
       yield* email.sendPasswordReset({
-        to: parsedEmail,
+        to: input.email,
         token: pair.token,
-        callbackUrl: resetCallbackUrl,
+        callbackUrl: input.resetCallbackUrl,
       });
     });
 
     const resetPassword: PasswordRecoveryWorkflowsShape["resetPassword"] = Effect.fn(
       "PasswordRecovery.resetPassword",
     )(function* (input) {
-      const password = yield* boundary.parsePassword(input.password);
       const hash = yield* token.hashToken(input.token);
       const now = yield* Clock.currentTimeMillis;
       const lookup = yield* storage
         .findVerificationToken({ purpose: "PasswordReset", tokenHash: hash, now })
         .pipe(Effect.mapError(genericFromStorageToken));
-      yield* policy.validate({ email: lookup.credential.email, password });
-      const passwordHash = yield* hasher.hash(password);
+      yield* policy.validate({ email: lookup.credential.email, password: input.password });
+      const passwordHash = yield* hasher.hash(input.password);
       yield* storage
         .completePasswordReset({
           token: { purpose: "PasswordReset", tokenHash: hash, now },
@@ -674,8 +665,6 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
     const changePassword: PasswordRecoveryWorkflowsShape["changePassword"] = Effect.fn(
       "PasswordRecovery.changePassword",
     )(function* (input) {
-      const currentPassword = yield* boundary.parsePassword(input.currentPassword);
-      const newPassword = yield* boundary.parsePassword(input.newPassword);
       yield* limiter
         .check(rateAttempt("PasswordChange", undefined, input.ip))
         .pipe(Effect.mapError(genericRateLimit));
@@ -687,12 +676,12 @@ export const PasswordRecoveryWorkflowsLive = Layer.effect(PasswordRecoveryWorkfl
         .findCredentialByEmail(lookup.user.email)
         .pipe(Effect.mapError(() => unauthorized));
       const currentProof = yield* hasher.verify({
-        password: currentPassword,
+        password: input.currentPassword,
         hash: credential.credential.passwordHash,
       });
       if (!currentProof) return yield* invalidCredentials;
-      yield* policy.validate({ email: credential.credential.email, password: newPassword });
-      const passwordHash = yield* hasher.hash(newPassword);
+      yield* policy.validate({ email: credential.credential.email, password: input.newPassword });
+      const passwordHash = yield* hasher.hash(input.newPassword);
       const now = yield* Clock.currentTimeMillis;
       const pair = yield* token.makeSessionToken();
       yield* storage.changePasswordSession({
