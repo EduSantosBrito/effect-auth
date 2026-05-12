@@ -1003,3 +1003,104 @@ it.effect("password change checks rate limits before session lookup", () => {
     assert.deepStrictEqual(limited, rateLimited);
   }).pipe(Effect.provide(layer));
 });
+
+it.effect("deleteUser requires password proof and deletes auth records", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "delete-user@example.com",
+      password: "correct horse battery staple",
+      name: "Delete User",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const firstSession = yield* auth.signIn({
+      email: "delete-user@example.com",
+      password: "correct horse battery staple",
+    });
+    yield* auth.signIn({
+      email: "delete-user@example.com",
+      password: "correct horse battery staple",
+    });
+    yield* auth.requestPasswordReset({
+      email: "delete-user@example.com",
+      resetCallbackUrl: new URL("https://app.example.com/reset"),
+    });
+
+    const wrongPassword = yield* Effect.flip(
+      auth.deleteUser({
+        sessionToken: firstSession.sessionToken,
+        password: "incorrect horse battery staple",
+      }),
+    );
+    yield* auth.deleteUser({
+      sessionToken: firstSession.sessionToken,
+      password: "correct horse battery staple",
+    });
+    const deletedSession = yield* Effect.flip(
+      auth.currentSession({ sessionToken: firstSession.sessionToken }),
+    );
+
+    assert.deepStrictEqual(wrongPassword, invalidCredentials);
+    assert.deepStrictEqual(deletedSession, unauthorized);
+    assert.strictEqual(storageState.users.has(firstSession.user.id), false);
+    assert.strictEqual(storageState.accountsByEmail.has("delete-user@example.com"), false);
+    assert.deepStrictEqual(
+      Array.from(storageState.tokensByHash.values()).filter(
+        (token) => token.userId === firstSession.user.id,
+      ),
+      [],
+    );
+    assert.deepStrictEqual(
+      Array.from(storageState.sessionsByHash.values()).filter(
+        (session) => session.userId === firstSession.user.id,
+      ),
+      [],
+    );
+  }).pipe(Effect.provide(layer));
+});
+
+it.effect("deleteUser checks rate limits before session lookup", () => {
+  const limited = Layer.succeed(RateLimiter)({
+    check: (attempt) =>
+      Effect.fail(new RateLimitExceeded({ bucket: attempt.bucket, retryAfterMillis: 1_000 })),
+  });
+  const workflowsLayer = Layer.mergeAll(
+    EmailPasswordWorkflowsLive,
+    SessionWorkflowsLive,
+    PasswordRecoveryWorkflowsLive,
+    IdentityWorkflowsLive,
+  ).pipe(
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthBoundaryLive,
+        SecureDefaultPasswordPolicy,
+        TestPasswordHasher,
+        AuthTokenLive,
+        DevMemoryAuthStorage(makeDevMemoryStorageState()),
+        MockAuthEmail(makeMockAuthEmailState()),
+        limited,
+      ),
+    ),
+  );
+  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    const tokenService = yield* AuthToken;
+    const token = yield* tokenService.makeSessionToken();
+    const ip = yield* parseClientIp("127.0.0.1");
+    const limited = yield* Effect.flip(
+      auth.deleteUser({
+        sessionToken: token.token,
+        password: "correct horse battery staple",
+        ip,
+      }),
+    );
+
+    assert.deepStrictEqual(limited, rateLimited);
+  }).pipe(Effect.provide(layer));
+});

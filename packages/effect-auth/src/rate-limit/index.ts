@@ -7,6 +7,7 @@ export const RateLimitBucket = Schema.Literals([
   "ResendVerification",
   "PasswordReset",
   "PasswordChange",
+  "DeleteUser",
 ]);
 export type RateLimitBucket = typeof RateLimitBucket.Type;
 

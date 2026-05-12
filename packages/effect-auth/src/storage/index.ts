@@ -159,6 +159,11 @@ export interface ChangePasswordSession {
   readonly sessionExpiresAt: number;
 }
 
+export interface DeleteUserStorageInput {
+  readonly userId: AuthUserId;
+  readonly now: number;
+}
+
 export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailure>()(
   "AuthStorageFailure",
   {
@@ -228,6 +233,7 @@ export class AuthStorage extends Context.Service<
     readonly changePasswordSession: (
       input: ChangePasswordSession,
     ) => Effect.Effect<StoredSession, AuthStorageFailure>;
+    readonly deleteUser: (input: DeleteUserStorageInput) => Effect.Effect<void, AuthStorageFailure>;
   }
 >()("effect-auth/AuthStorage") {}
 export type AuthStorageShape = typeof AuthStorage.Service;

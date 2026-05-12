@@ -104,6 +104,12 @@ export interface ChangePasswordInput {
   readonly ip?: unknown;
 }
 
+export interface DeleteUserInput {
+  readonly sessionToken: unknown;
+  readonly password: unknown;
+  readonly ip?: unknown;
+}
+
 export interface UpdateUserInput {
   readonly sessionToken: unknown;
   readonly name?: unknown;
@@ -238,6 +244,20 @@ const parseChangePasswordCommand = Effect.fn("Auth.parseChangePasswordCommand")(
     newPassword,
     ...(ip === undefined ? {} : { ip }),
   } satisfies ChangePasswordCommand;
+});
+
+const parseDeleteUserCommand = Effect.fn("Auth.parseDeleteUserCommand")(function* (
+  boundary: typeof AuthBoundary.Service,
+  input: DeleteUserInput,
+) {
+  const sessionToken = yield* parseSessionToken(input.sessionToken);
+  const password = yield* boundary.parsePassword(input.password);
+  const ip = yield* parseOptionalClientIp(boundary, input.ip);
+  return {
+    sessionToken,
+    password,
+    ...(ip === undefined ? {} : { ip }),
+  };
 });
 
 const parseSessionTokenCommand = Effect.fn("Auth.parseSessionTokenCommand")(function* (
@@ -397,6 +417,17 @@ export interface AuthShape {
     ListAccountsResult,
     PublicAuthError | BoundaryParseError | AuthStorageFailure | TokenGenerationFailure
   >;
+  readonly deleteUser: (
+    input: DeleteUserInput,
+  ) => Effect.Effect<
+    void,
+    | PublicAuthError
+    | BoundaryParseError
+    | PasswordHashFailure
+    | AuthStorageFailure
+    | TokenGenerationFailure
+    | RateLimitExceeded
+  >;
 }
 
 export class Auth extends Context.Service<
@@ -417,6 +448,7 @@ export class Auth extends Context.Service<
     readonly changePassword: AuthShape["changePassword"];
     readonly updateUser: AuthShape["updateUser"];
     readonly listAccounts: AuthShape["listAccounts"];
+    readonly deleteUser: AuthShape["deleteUser"];
   }
 >()("effect-auth/Auth") {}
 
@@ -459,6 +491,8 @@ const AuthLiveLayer = Layer.effect(Auth)(
         parseUpdateUserCommand(input).pipe(Effect.flatMap(identity.updateUser)),
       listAccounts: (input) =>
         parseSessionTokenCommand(input).pipe(Effect.flatMap(identity.listAccounts)),
+      deleteUser: (input) =>
+        parseDeleteUserCommand(boundary, input).pipe(Effect.flatMap(identity.deleteUser)),
     };
   }),
 );

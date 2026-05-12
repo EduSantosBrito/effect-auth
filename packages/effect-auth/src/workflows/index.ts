@@ -247,6 +247,12 @@ export interface UpdateUserResult {
   readonly tokenRotation: TokenRotationDecision;
 }
 
+export interface DeleteUserInput {
+  readonly sessionToken: SessionToken;
+  readonly password: PasswordText;
+  readonly ip?: ClientIp;
+}
+
 export interface ListAccountsInput {
   readonly sessionToken: SessionToken;
 }
@@ -378,6 +384,16 @@ export interface IdentityWorkflowsShape {
     ListAccountsResult,
     PublicAuthError | AuthStorageFailureType | TokenGenerationFailure
   >;
+  readonly deleteUser: (
+    input: DeleteUserInput,
+  ) => Effect.Effect<
+    void,
+    | PublicAuthError
+    | PasswordHashFailure
+    | AuthStorageFailureType
+    | TokenGenerationFailure
+    | RateLimitExceeded
+  >;
 }
 
 export class EmailPasswordWorkflows extends Context.Service<
@@ -413,6 +429,7 @@ export class IdentityWorkflows extends Context.Service<
   {
     readonly updateUser: IdentityWorkflowsShape["updateUser"];
     readonly listAccounts: IdentityWorkflowsShape["listAccounts"];
+    readonly deleteUser: IdentityWorkflowsShape["deleteUser"];
   }
 >()("effect-auth/IdentityWorkflows") {}
 
@@ -750,6 +767,8 @@ export const IdentityWorkflowsLive = Layer.effect(IdentityWorkflows)(
     const token = yield* AuthToken;
     const storage = yield* AuthStorage;
     const sessionPolicy = yield* SessionPolicy;
+    const hasher = yield* PasswordHasher;
+    const limiter = yield* RateLimiter;
 
     const lookupCurrentSession = Effect.fn("Identity.lookupCurrentSession")(function* (
       sessionToken: SessionToken,
@@ -812,6 +831,25 @@ export const IdentityWorkflowsLive = Layer.effect(IdentityWorkflows)(
       },
     );
 
-    return { updateUser, listAccounts };
+    const deleteUser: IdentityWorkflowsShape["deleteUser"] = Effect.fn("Identity.deleteUser")(
+      function* (input) {
+        yield* limiter
+          .check(rateAttempt("DeleteUser", undefined, input.ip))
+          .pipe(Effect.mapError(genericRateLimit));
+        const current = yield* lookupCurrentSession(input.sessionToken);
+        const credential = yield* storage
+          .findCredentialAccountByEmail(current.user.email)
+          .pipe(Effect.mapError(() => invalidCredentials));
+        const verified = yield* hasher.verify({
+          password: input.password,
+          hash: credential.account.passwordHash,
+        });
+        if (!verified) return yield* invalidCredentials;
+        const now = yield* Clock.currentTimeMillis;
+        yield* storage.deleteUser({ userId: current.user.id, now }).pipe(Effect.mapError(() => unauthorized));
+      },
+    );
+
+    return { updateUser, listAccounts, deleteUser };
   }),
 );

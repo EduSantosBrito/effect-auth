@@ -31,6 +31,7 @@ import {
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
+  handleDeleteUser,
   handleRequestPasswordReset,
   handleSignInEmail,
   handleSignOut,
@@ -1476,6 +1477,57 @@ it.effect("http handler functions exercise password reset and change endpoints",
   }).pipe(Effect.provide(trustedLayer));
 });
 
+it.effect("http handler deleteUser clears cookies and deletes auth records", () => {
+  const { emailState, storageState, layer } = makeWorkflowLayer();
+  const request = { headers: { origin: "https://app.example.com" } };
+  const trustedLayer = Layer.mergeAll(layer, TrustedOrigins([new URL("https://app.example.com")]));
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "http-handler-delete@example.com",
+      password: "correct horse battery staple",
+      name: "Delete User",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const signedIn = yield* auth.signIn({
+      email: "http-handler-delete@example.com",
+      password: "correct horse battery staple",
+    });
+
+    const deleteCookies: Array<string> = [];
+    yield* HttpEffect.toHandled(
+      Effect.gen(function* () {
+        const result = yield* handleDeleteUser({
+          request,
+          payload: {
+            sessionToken: Redacted.value(signedIn.sessionToken),
+            password: "correct horse battery staple",
+          },
+        });
+        return HttpServerResponse.jsonUnsafe(result);
+      }),
+      (_request, response) =>
+        Effect.sync(() => {
+          deleteCookies.push(...Cookies.toSetCookieHeaders(response.cookies));
+        }),
+    ).pipe(
+      Effect.provideService(
+        HttpServerRequest.HttpServerRequest,
+        HttpServerRequest.fromClientRequest(HttpClientRequest.post("https://auth.example.com")),
+      ),
+    );
+
+    assert.strictEqual(storageState.users.has(signedIn.user.id), false);
+    assert.strictEqual(storageState.accountsByEmail.has("http-handler-delete@example.com"), false);
+    assert.strictEqual(deleteCookies.length, 1);
+    assert.equal(deleteCookies[0]?.includes("effect_auth_session="), true);
+    assert.equal(deleteCookies[0]?.includes("Max-Age=0"), true);
+  }).pipe(Effect.provide(trustedLayer));
+});
+
 it.effect("trusted origin policy rejects untrusted state-changing requests", () =>
   Effect.gen(function* () {
     yield* checkTrustedOrigin(new URL("https://app.example.com"));
@@ -1660,6 +1712,7 @@ it.effect("auth api endpoint inventory matches the ICD paths", () =>
       ["POST", "/auth/password-reset/request"],
       ["POST", "/auth/password-reset/complete"],
       ["POST", "/auth/password/change"],
+      ["POST", "/auth/delete-user"],
       ["GET", "/auth/sessions"],
       ["POST", "/auth/update-user"],
       ["GET", "/auth/accounts"],

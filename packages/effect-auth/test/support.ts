@@ -45,6 +45,7 @@ import {
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
+  handleDeleteUser,
   handleRequestPasswordReset,
   handleSignInEmail,
   handleSignOut,
@@ -254,6 +255,17 @@ const AuthTestLive = Layer.effect(
           const sessionToken = yield* parseTestSessionToken(input.sessionToken);
           return yield* identity.listAccounts({ sessionToken });
         }),
+      deleteUser: (input: Parameters<AuthShape["deleteUser"]>[0]) =>
+        Effect.gen(function* () {
+          const sessionToken = yield* parseTestSessionToken(input.sessionToken);
+          const password = yield* boundary.parsePassword(input.password);
+          const ip = input.ip === undefined ? undefined : yield* boundary.parseClientIp(input.ip);
+          return yield* identity.deleteUser({
+            sessionToken,
+            password,
+            ...(ip === undefined ? {} : { ip }),
+          });
+        }),
     };
   }).pipe(Effect.annotateLogs("service", "AuthTest")),
 );
@@ -356,6 +368,7 @@ export {
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
+  handleDeleteUser,
   handleRequestPasswordReset,
   handleSignInEmail,
   handleSignOut,
