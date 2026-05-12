@@ -160,8 +160,8 @@ import {
 import {
   DrizzlePg,
   layer as drizzlePgLayer,
-  make as makeDrizzlePgStorage,
   schema as drizzlePgSchema,
+  type AuthDrizzlePgSchema,
   type LayerOptions as DrizzlePgLayerOptions,
   type SchemaOptions as DrizzlePgSchemaOptions,
 } from "effect-auth/storage/drizzle-pg";
@@ -331,8 +331,8 @@ type PublicApiContract = {
   readonly drizzlePg:
     | typeof DrizzlePg
     | typeof drizzlePgLayer
-    | typeof makeDrizzlePgStorage
     | typeof drizzlePgSchema
+    | AuthDrizzlePgSchema
     | DrizzlePgLayerOptions
     | DrizzlePgSchemaOptions;
   readonly token:

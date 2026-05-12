@@ -4,10 +4,10 @@ import { AuthEmail, AuthEmailFailure } from "effect-auth/email";
 import {
   AuthStorage,
   AuthStorageFailure,
+  type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
   type AuthUserId,
-  type AuthAccount,
   type StoredSession,
 } from "effect-auth/storage";
 import type { TokenHash } from "effect-auth/token";
@@ -23,7 +23,7 @@ interface TokenRecord {
 
 export interface ExampleStorageState {
   readonly users: Map<AuthUserId, AuthUser>;
-  readonly accountsByEmail: Map<string, AuthAccount>;
+  readonly accountsByEmail: Map<string, CredentialAuthAccount>;
   readonly tokensByHash: Map<string, TokenRecord>;
   readonly sessionsByHash: Map<string, StoredSession>;
 }
@@ -165,7 +165,8 @@ const deleteUser = (
   { userId }: Parameters<AuthStorageShape["deleteUser"]>[0],
 ) =>
   Effect.suspend(() => {
-    if (!state.users.has(userId)) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    if (!state.users.has(userId))
+      return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
     state.users.delete(userId);
     for (const [email, account] of state.accountsByEmail) {
       if (account.userId === userId) state.accountsByEmail.delete(email);
@@ -193,7 +194,7 @@ const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
         createdAt: now,
         updatedAt: now,
       };
-      const account: AuthAccount = {
+      const account: CredentialAuthAccount = {
         id: id("acc"),
         providerId: "credential",
         accountId: user.id,

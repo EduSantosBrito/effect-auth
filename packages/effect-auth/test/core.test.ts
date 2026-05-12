@@ -1,6 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import { getTableName } from "drizzle-orm";
-import { DrizzlePg } from "../src/storage/drizzle-pg";
+import { DrizzlePg } from "../src/storage/drizzle-pg/index";
 import {
   AuthBoundary,
   AuthBoundaryLive,

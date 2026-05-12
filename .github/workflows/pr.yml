@@ -15,6 +15,20 @@ jobs:
   check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: effect_auth_test
+          POSTGRES_USER: effect_auth
+          POSTGRES_PASSWORD: effect_auth
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U effect_auth -d effect_auth_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
         with:
@@ -33,3 +47,5 @@ jobs:
 
       - name: Test
         run: bun run test
+        env:
+          EFFECT_AUTH_POSTGRES_URL: postgres://effect_auth:effect_auth@localhost:5432/effect_auth_test

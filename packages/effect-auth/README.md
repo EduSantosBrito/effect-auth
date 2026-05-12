@@ -118,15 +118,21 @@ yield* auth.deleteUser({ sessionToken, password: "current password" });
 
 ```typescript
 import { PgClient } from "@effect/sql-pg";
+import { Layer, Redacted } from "effect";
+import { AuthLive } from "effect-auth";
 import { DrizzlePg } from "effect-auth/storage/drizzle-pg";
 
-export const authSchema = DrizzlePg.schema();
-
-const PostgresAuthStorage = DrizzlePg.layer();
+export const auth = DrizzlePg.schema({ prefix: "auth_" });
 
 const PgLive = PgClient.layer({
-  url: process.env.DATABASE_URL,
+  url: Redacted.make(process.env.DATABASE_URL ?? ""),
 });
+
+const PostgresAuthStorage = DrizzlePg.layer({ schema: auth });
+
+export const AppLive = Layer.mergeAll(AuthLive.production, PostgresAuthStorage).pipe(
+  Layer.provide(PgLive),
+);
 ```
 
 `DrizzlePg.schema({ prefix: "auth_" })` returns plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, and `Verifications`. The same schema should be used for migrations and runtime. `DrizzlePg.layer(...)` provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.

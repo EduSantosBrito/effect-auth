@@ -4,6 +4,7 @@ import {
   AuthStorage,
   AuthStorageFailure,
   type AuthAccount,
+  type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
   type AuthUserId,
@@ -22,7 +23,7 @@ interface TokenRecord {
 
 export interface DevMemoryStorageState {
   readonly users: Map<AuthUserId, AuthUser>;
-  readonly accountsByEmail: Map<string, AuthAccount>;
+  readonly accountsByEmail: Map<string, CredentialAuthAccount>;
   readonly tokensByHash: Map<string, TokenRecord>;
   readonly sessionsByHash: Map<string, StoredSession>;
 }
@@ -209,7 +210,8 @@ const deleteUser = (
   { userId }: Parameters<AuthStorageShape["deleteUser"]>[0],
 ) =>
   Effect.suspend(() => {
-    if (!state.users.has(userId)) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    if (!state.users.has(userId))
+      return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
     state.users.delete(userId);
     for (const [email, account] of state.accountsByEmail) {
       if (account.userId === userId) state.accountsByEmail.delete(email);
@@ -237,7 +239,7 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
         createdAt: now,
         updatedAt: now,
       };
-      const account: AuthAccount = {
+      const account: CredentialAuthAccount = {
         id: id("acc"),
         providerId: "credential",
         accountId: user.id,
