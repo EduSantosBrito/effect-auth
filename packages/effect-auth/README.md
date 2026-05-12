@@ -107,9 +107,12 @@ const updated = yield* auth.updateUser({
 });
 
 const accounts = yield* auth.listAccounts({ sessionToken });
+
+yield* auth.deleteUser({ sessionToken, password: "current password" });
 ```
 
 `updateUser` accepts `name` and `image` only; email changes are intentionally out of scope. `listAccounts` returns linked Accounts for the current User without password hashes or provider tokens. Email/password sign-up creates the first Credential Account automatically, and password hashes live on Credential Accounts rather than the User.
+`deleteUser` requires the current password for the current Credential Account, is rate-limited, deletes the User and dependent auth records, and returns no deleted user payload.
 
 ## HTTP Usage
 
@@ -175,10 +178,12 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `POST` | `/api/auth/password-reset/request`  |
 | `POST` | `/api/auth/password-reset/complete` |
 | `POST` | `/api/auth/password/change`         |
+| `POST` | `/api/auth/delete-user`             |
 
 `GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid. Listed-session revocation is Session Id scoped; see `docs/adr/0004-session-id-scoped-revocation.md` for the design rationale.
 
 `POST /update-user` requires a valid Session Token and trusted origin, updates `name` and/or `image`, and returns `{ user }`. `GET /accounts` requires a valid Session Token and returns `{ accounts }`; account responses never include password hashes, access tokens, refresh tokens, ID tokens, or other provider secrets.
+`POST /delete-user` requires a valid Session Token, trusted origin, and a `password` body field. Cookie-authenticated deletion clears the Session Cookie and returns `{ ok: true }`.
 
 Identity Core changes the `AuthStorage` contract before 1.0: storage adapters should create Users and Credential Accounts atomically via `createUserWithCredentialAccount`, store password hashes only on Credential Accounts, update User-level `emailVerified`, and expose secret-free account projections through `listUserAccounts`. No legacy credential storage shim is provided.
 

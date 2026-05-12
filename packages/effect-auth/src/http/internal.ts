@@ -25,9 +25,11 @@ import {
 import type { AuthUser, PublicAuthAccount, StoredSession } from "../storage/index.js";
 import {
   EmailPasswordWorkflows,
+  IdentityWorkflows,
   PasswordRecoveryWorkflows,
   SessionWorkflows,
   type ChangePasswordInput,
+  type DeleteUserInput,
   type ListedSession,
   type RequestPasswordResetInput,
   type ResetPasswordInput,
@@ -597,6 +599,16 @@ const MountedChangePasswordPayload = Schema.Struct({
   newPassword: Schema.Unknown,
 });
 
+const DeleteUserPayload = Schema.Struct({
+  sessionToken: Schema.String,
+  password: Schema.Unknown,
+  ip: OptionalString,
+});
+
+const MountedDeleteUserPayload = Schema.Struct({
+  password: Schema.Unknown,
+});
+
 const RevokeListedSessionPayload = Schema.Struct({
   sessionId: Schema.String,
 });
@@ -660,6 +672,11 @@ const AuthApiGroup = HttpApiGroup.make("auth").add(
     success: Schema.Unknown,
     error: Schema.Unknown,
   }),
+  HttpApiEndpoint.post("deleteUser", "/auth/delete-user", {
+    payload: DeleteUserPayload,
+    success: Schema.Unknown,
+    error: Schema.Unknown,
+  }),
   HttpApiEndpoint.get("listSessions", "/auth/sessions", {
     query: SessionTokenPayload,
     success: Schema.Unknown,
@@ -707,6 +724,7 @@ export const AuthApiEndpoints: ReadonlyArray<readonly [string, string]> = [
   ["POST", "/auth/password-reset/request"],
   ["POST", "/auth/password-reset/complete"],
   ["POST", "/auth/password/change"],
+  ["POST", "/auth/delete-user"],
   ["GET", "/auth/sessions"],
   ["POST", "/auth/update-user"],
   ["GET", "/auth/accounts"],
@@ -719,6 +737,7 @@ export const AuthHttpAdapter = Effect.gen(function* () {
   const emailPassword = yield* EmailPasswordWorkflows;
   const sessions = yield* SessionWorkflows;
   const recovery = yield* PasswordRecoveryWorkflows;
+  const identity = yield* IdentityWorkflows;
   return {
     signUpEmail: emailPassword.signUp,
     verifyEmail: emailPassword.verifyEmail,
@@ -755,6 +774,12 @@ export const AuthHttpAdapter = Effect.gen(function* () {
         yield* SessionCookie.appendFromConfig(result.currentSessionToken);
         return result;
       }),
+    deleteUser: (input: DeleteUserInput) =>
+      Effect.gen(function* () {
+        yield* identity.deleteUser(input);
+        yield* SessionCookie.appendClearFromConfig;
+        return null;
+      }),
     updateUser: (input: UpdateUserInput) =>
       Effect.gen(function* () {
         const auth = yield* Auth;
@@ -774,6 +799,7 @@ const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
 const decodeMountedSignInEmailPayload = Schema.decodeUnknownEffect(MountedSignInEmailPayload);
 const decodeMountedChangePasswordPayload = Schema.decodeUnknownEffect(MountedChangePasswordPayload);
+const decodeMountedDeleteUserPayload = Schema.decodeUnknownEffect(MountedDeleteUserPayload);
 
 const parseOptionalClientIp = (value: string | undefined): Effect.Effect<ClientIp | undefined> =>
   value === undefined
@@ -883,6 +909,19 @@ const changePasswordInput = Effect.fn("changePasswordInput")(function* (
     newPassword,
     ...(ip === undefined ? {} : { ip }),
   } satisfies ChangePasswordInput;
+});
+
+const deleteUserInput = Effect.fn("deleteUserInput")(function* (
+  payload: typeof DeleteUserPayload.Type,
+  sessionToken: SessionTokenValue,
+) {
+  const password = yield* normalizePassword(payload.password);
+  const ip = yield* parseOptionalClientIp(payload.ip);
+  return {
+    sessionToken,
+    password,
+    ...(ip === undefined ? {} : { ip }),
+  } satisfies DeleteUserInput;
 });
 
 const updateUserInput = Effect.fn("updateUserInput")(function* (
@@ -1272,6 +1311,27 @@ const handleMountedChangePassword = (request: HttpServerRequest.HttpServerReques
     }),
   );
 
+const handleMountedDeleteUser = (request: HttpServerRequest.HttpServerRequest) =>
+  mountedErrorBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const config = yield* AuthHttpConfig;
+      const payload = yield* request.json.pipe(Effect.flatMap(decodeMountedDeleteUserPayload));
+      const extracted = yield* extractMountedSessionToken();
+      const auth = yield* Auth;
+      const ip = yield* trustedRequestIp(request);
+      yield* auth.deleteUser({
+        sessionToken: extracted.token,
+        password: payload.password,
+        ...(ip === undefined ? {} : { ip }),
+      });
+      if (extracted.source === "Cookie") {
+        yield* appendCookieInstruction(clearSessionCookieFromConfig(config));
+      }
+      return mountedJson({ ok: true } satisfies AuthHttpOkResponse);
+    }),
+  );
+
 export interface AuthHttpRequireAuthOptions {
   readonly extractor?: AuthHttpTokenExtractor;
 }
@@ -1623,6 +1683,20 @@ export const handleChangePassword = Effect.fn("handleChangePassword")(function* 
   return yield* adapter.changePassword(input);
 });
 
+export const handleDeleteUser = Effect.fn("handleDeleteUser")(function* ({
+  payload,
+  request,
+}: {
+  readonly payload: typeof DeleteUserPayload.Type;
+  readonly request: OriginRequest;
+}) {
+  yield* checkTrustedRequestOrigin(request);
+  const adapter = yield* AuthHttpAdapter;
+  const sessionToken = yield* decodeSessionToken(payload.sessionToken);
+  const input = yield* deleteUserInput(payload, sessionToken);
+  return yield* adapter.deleteUser(input);
+});
+
 export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handlers) =>
   handlers
     .handle("signUpEmail", handleSignUpEmail)
@@ -1634,6 +1708,7 @@ export const AuthHttpHandlersLive = HttpApiBuilder.group(AuthApi, "auth", (handl
     .handle("requestPasswordReset", handleRequestPasswordReset)
     .handle("completePasswordReset", handleCompletePasswordReset)
     .handle("changePassword", handleChangePassword)
+    .handle("deleteUser", handleDeleteUser)
     .handle("listSessions", handleListSessions)
     .handle("updateUser", handleUpdateUser)
     .handle("listAccounts", handleListAccounts)
@@ -1707,6 +1782,9 @@ export const AuthHttp = {
         ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/password/change"), (request) =>
           handleMountedChangePassword(request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/delete-user"), (request) =>
+          handleMountedDeleteUser(request),
         ),
       ),
 };

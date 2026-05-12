@@ -12,6 +12,7 @@ import {
   type AuthShape,
   type AuthVerifyEmailInput,
   type ChangePasswordInput,
+  type DeleteUserInput,
   type EffectAuthClient,
   type EffectAuthClientOptions,
   type ListedSession,
@@ -29,6 +30,7 @@ import {
   type SignUpInput,
   type UpdateUserInput,
   type UpdateUserResult,
+  type WorkflowDeleteUserInput,
   type WorkflowUpdateUserInput,
   type VerificationTokenConfigInput,
   type VerificationTokenConfigShape,
@@ -138,6 +140,7 @@ import {
   type CreateSession,
   type CreateUserWithCredentialAccount,
   type CredentialAccountLookup,
+  type DeleteUserStorageInput,
   type ListUserSessions,
   type PublicAuthAccount,
   type RevokeAllUserSessions,
@@ -183,6 +186,7 @@ type PublicApiContract = {
     | AuthShape
     | AuthVerifyEmailInput
     | ChangePasswordInput
+    | DeleteUserInput
     | EffectAuthClient
     | EffectAuthClientOptions
     | ListedSession
@@ -200,6 +204,7 @@ type PublicApiContract = {
     | SignUpInput
     | UpdateUserInput
     | UpdateUserResult
+    | WorkflowDeleteUserInput
     | WorkflowUpdateUserInput
     | VerificationTokenConfigInput
     | VerificationTokenConfigShape;
@@ -299,6 +304,7 @@ type PublicApiContract = {
     | CreateSession
     | CreateUserWithCredentialAccount
     | CredentialAccountLookup
+    | DeleteUserStorageInput
     | ListUserSessions
     | PublicAuthAccount
     | RevokeAllUserSessions

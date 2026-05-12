@@ -160,6 +160,25 @@ const revokeAllUserSessions = (
     }
   });
 
+const deleteUser = (
+  state: ExampleStorageState,
+  { userId }: Parameters<AuthStorageShape["deleteUser"]>[0],
+) =>
+  Effect.suspend(() => {
+    if (!state.users.has(userId)) return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+    state.users.delete(userId);
+    for (const [email, account] of state.accountsByEmail) {
+      if (account.userId === userId) state.accountsByEmail.delete(email);
+    }
+    for (const [key, token] of state.tokensByHash) {
+      if (token.userId === userId) state.tokensByHash.delete(key);
+    }
+    for (const [key, session] of state.sessionsByHash) {
+      if (session.userId === userId) state.sessionsByHash.delete(key);
+    }
+    return Effect.void;
+  });
+
 const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
   createUserWithCredentialAccount: ({ email, name, image, passwordHash, now }) =>
     Effect.suspend(() => {
@@ -296,6 +315,7 @@ const makeExampleStorage = (state: ExampleStorageState): AuthStorageShape => ({
         }),
       ),
     ),
+  deleteUser: (input) => deleteUser(state, input),
 });
 
 const callbackWithToken = ({
