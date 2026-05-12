@@ -1,6 +1,6 @@
 {
   "name": "effect-auth",
-  "version": "0.2.2",
+  "version": "0.3.0",
   "description": "Server-side authentication for Effect applications.",
   "keywords": [
     "auth",

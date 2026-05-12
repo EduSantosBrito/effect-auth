@@ -4,7 +4,7 @@ All notable user-facing changes should be documented here.
 
 This project follows npm package versions for `effect-auth`. While the package is `0.x`, minor releases may include breaking changes.
 
-## Unreleased
+## 0.3.0
 
 - Add Drizzle Postgres Auth Storage as an optional production storage adapter.
 - Add authenticated self-service user deletion through Auth and HTTP, including password proof, rate limiting, cookie clearing, and storage-backed deletion.
