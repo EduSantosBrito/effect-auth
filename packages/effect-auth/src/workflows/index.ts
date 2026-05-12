@@ -845,8 +845,7 @@ export const IdentityWorkflowsLive = Layer.effect(IdentityWorkflows)(
           hash: credential.account.passwordHash,
         });
         if (!verified) return yield* invalidCredentials;
-        const now = yield* Clock.currentTimeMillis;
-        yield* storage.deleteUser({ userId: current.user.id, now }).pipe(Effect.mapError(() => unauthorized));
+        yield* storage.deleteUser({ userId: current.user.id }).pipe(Effect.mapError(() => unauthorized));
       },
     );
 
