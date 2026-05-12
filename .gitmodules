@@ -10,3 +10,6 @@
 [submodule "t3code"]
 	path = .repos/t3code
 	url = https://github.com/pingdotgg/t3code
+[submodule ".repos/drizzle-orm"]
+	path = .repos/drizzle-orm
+	url = git@github.com:drizzle-team/drizzle-orm.git
