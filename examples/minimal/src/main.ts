@@ -6,8 +6,7 @@ import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
 const emailState = makeMockAuthEmailState();
 
 const AppLive = AuthLive.dev.pipe(
-  Layer.provideMerge(DevMemoryAuthStorage()),
-  Layer.provideMerge(MockAuthEmail(emailState)),
+  Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail(emailState))),
 );
 
 const email = "demo@example.com";

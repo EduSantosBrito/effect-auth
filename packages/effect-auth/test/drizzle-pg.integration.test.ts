@@ -19,7 +19,7 @@ const postgresUrl = Config.option(Config.string("EFFECT_AUTH_POSTGRES_URL")).par
 
 const live = (url: string) => {
   const PgLive = PgClient.layer({ url: Redacted.make(url) });
-  return Layer.merge(PgLive, DrizzlePg.layer({ schema: auth }).pipe(Layer.provide(PgLive)));
+  return DrizzlePg.layer({ schema: auth }).pipe(Layer.provideMerge(PgLive));
 };
 
 const setupSchema = Effect.fn("setupSchema")(function* () {

@@ -511,30 +511,21 @@ const AuthDefaultsLive = Layer.mergeAll(
 
 const AuthDevDefaultsLive = Layer.mergeAll(AuthDefaultsLive, PermissiveDevRateLimiter);
 
-const InternalWorkflowsLive = Layer.mergeAll(
+const WorkflowServicesLive = Layer.mergeAll(
   EmailPasswordWorkflowsLive,
   SessionWorkflowsLive,
   PasswordRecoveryWorkflowsLive,
   IdentityWorkflowsLive,
-).pipe(Layer.provide(AuthDefaultsLive));
+);
 
-const InternalDevWorkflowsLive = Layer.mergeAll(
-  EmailPasswordWorkflowsLive,
-  SessionWorkflowsLive,
-  PasswordRecoveryWorkflowsLive,
-  IdentityWorkflowsLive,
-).pipe(Layer.provide(AuthDevDefaultsLive));
+const AuthProductionServicesLive = WorkflowServicesLive.pipe(Layer.provideMerge(AuthDefaultsLive));
+
+const AuthDevServicesLive = WorkflowServicesLive.pipe(Layer.provideMerge(AuthDevDefaultsLive));
 
 export const AuthLive = {
-  production: AuthLiveLayer.pipe(
-    Layer.provide(Layer.mergeAll(InternalWorkflowsLive, AuthDefaultsLive)),
-  ),
-  dev: AuthLiveLayer.pipe(
-    Layer.provide(Layer.mergeAll(InternalDevWorkflowsLive, AuthDevDefaultsLive)),
-  ),
-  default: AuthLiveLayer.pipe(
-    Layer.provide(Layer.mergeAll(InternalDevWorkflowsLive, AuthDevDefaultsLive)),
-  ),
+  production: AuthLiveLayer.pipe(Layer.provide(AuthProductionServicesLive)),
+  dev: AuthLiveLayer.pipe(Layer.provide(AuthDevServicesLive)),
+  default: AuthLiveLayer.pipe(Layer.provide(AuthDevServicesLive)),
 } satisfies {
   readonly production: Layer.Layer<Auth, never, AuthStorage | AuthEmail | RateLimiter>;
   readonly dev: Layer.Layer<Auth, never, AuthStorage | AuthEmail>;

@@ -8,7 +8,7 @@ const databaseUrl = process.env.DATABASE_URL ?? defaultDatabaseUrl;
 const emailState = makeMockAuthEmailState();
 
 const AppLive = AuthLive.dev.pipe(
-  Layer.provideMerge(Layer.mergeAll(makePostgresLive(databaseUrl), MockAuthEmail(emailState))),
+  Layer.provide(Layer.mergeAll(makePostgresLive(databaseUrl), MockAuthEmail(emailState))),
 );
 
 const email = `postgres-demo-${Date.now()}@example.com`;
