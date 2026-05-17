@@ -121,21 +121,53 @@ import { PgClient } from "@effect/sql-pg";
 import { Layer, Redacted } from "effect";
 import { AuthLive } from "effect-auth";
 import { DrizzlePg } from "effect-auth/storage/drizzle-pg";
-
-export const auth = DrizzlePg.schema({ prefix: "auth_" });
+import { authSchema } from "./auth/schema.js";
 
 const PgLive = PgClient.layer({
   url: Redacted.make(process.env.DATABASE_URL ?? ""),
 });
 
-const PostgresAuthStorage = DrizzlePg.layer({ schema: auth });
+const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema });
 
 export const AppLive = Layer.mergeAll(AuthLive.production, PostgresAuthStorage).pipe(
   Layer.provide(PgLive),
 );
 ```
 
-`DrizzlePg.schema({ prefix: "auth_" })` returns plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, and `Verifications`. The same schema should be used for migrations and runtime. `DrizzlePg.layer(...)` provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.
+`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, and `Verifications`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.
+
+Generate the Drizzle schema TypeScript file once, use its `authSchema` for runtime, and let Drizzle Kit own SQL migrations:
+
+```bash
+npx effect-auth generate
+npx drizzle-kit generate
+npx drizzle-kit migrate
+```
+
+The generated schema file exports top-level table values so Drizzle Kit can discover them, plus `authSchema` for runtime wiring:
+
+```typescript
+import { pgTable, text } from "drizzle-orm/pg-core";
+
+export const Users = pgTable("auth_users", {
+  id: text("id").primaryKey(),
+  // ...
+});
+
+export const Accounts = pgTable("auth_accounts", {
+  // ...
+});
+
+export const Sessions = pgTable("auth_sessions", {
+  // ...
+});
+
+export const Verifications = pgTable("auth_verifications", {
+  // ...
+});
+
+export const authSchema = { Users, Accounts, Sessions, Verifications };
+```
 
 ## HTTP Usage
 
@@ -212,7 +244,7 @@ Identity Core changes the `AuthStorage` contract before 1.0: storage adapters sh
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication. OAuth, passkeys, multi-factor authentication, organization auth, and database-specific storage packages are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication. OAuth, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 
@@ -221,11 +253,20 @@ Use `AuthStorage` and `AuthEmail` to connect your own database and email provide
 ```bash
 bun run example:minimal
 bun run --cwd examples/minimal demo
+
+docker compose -f examples/postgres-storage/docker-compose.yml up -d --wait
+bun run build
+bun run --cwd examples/postgres-storage auth:schema
+bun run --cwd examples/postgres-storage db:generate
+bun run --cwd examples/postgres-storage db:migrate
+bun run example:postgres
 ```
 
 The minimal example runs a deterministic sign-up, email verification, sign-in, and current-session flow. It owns local in-memory storage and uses `effect-email/test` for inspectable no-network email sends, including email details in the structured logs, so no `.env` file is needed.
 
-See [`examples/minimal/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/minimal/README.md) for the integration shape: provide storage, bridge `effect-email` to `AuthEmail`, compose `AuthLive.dev`, then call the auth workflows.
+The Postgres storage example uses generated Drizzle schema TypeScript, Drizzle Kit migrations, `DrizzlePg.layer`, and `@effect/sql-pg` end-to-end. It runs sign-up, verification, two sign-ins, session listing, password change, current-session lookup, and user deletion without runtime schema mutation.
+
+See [`examples/minimal/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/minimal/README.md) and [`examples/postgres-storage/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/postgres-storage/README.md) for the integration shapes.
 
 ## Development
 

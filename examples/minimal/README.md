@@ -27,7 +27,7 @@ Run the same deterministic auth flow directly:
 bun run --cwd examples/minimal demo
 ```
 
-No `.env` file is needed.
+No `.env` file is needed. For the same flow backed by the Drizzle Postgres storage adapter, see `../postgres-storage`.
 
 ## Important Files
 

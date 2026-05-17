@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import { getTableName } from "drizzle-orm";
+import { generateDrizzlePgSchemaFile } from "../src/cli/generate";
 import { DrizzlePg } from "../src/storage/drizzle-pg/index";
 import {
   AuthBoundary,
@@ -51,6 +52,20 @@ it.effect("DrizzlePg schema returns plural plain Drizzle tables with prefix nami
     assert.strictEqual(getTableName(defaultSchema.Sessions), "auth_sessions");
     assert.strictEqual(getTableName(defaultSchema.Verifications), "auth_verifications");
     assert.strictEqual(getTableName(customSchema.Users), "app_auth_users");
+  }),
+);
+
+it.effect("generates Drizzle schema file with top-level table exports", () =>
+  Effect.sync(() => {
+    const generated = generateDrizzlePgSchemaFile({ prefix: "app_auth_" });
+
+    assert.equal(generated.includes('"app_auth_users"'), true);
+    assert.equal(generated.includes('uniqueIndex("app_auth_users_email_unique")'), true);
+    assert.equal(generated.includes("export const Users = pgTable"), true);
+    assert.equal(generated.includes("export const Accounts = pgTable"), true);
+    assert.equal(generated.includes("export const Sessions = pgTable"), true);
+    assert.equal(generated.includes("export const Verifications = pgTable"), true);
+    assert.equal(generated.includes("export const authSchema ="), true);
   }),
 );
 
