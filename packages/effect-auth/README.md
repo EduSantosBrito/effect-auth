@@ -52,8 +52,7 @@ import { MockAuthEmail } from "effect-auth/email/mock";
 import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
 
 const AuthTestLayer = AuthLive.dev.pipe(
-  Layer.provideMerge(DevMemoryAuthStorage()),
-  Layer.provideMerge(MockAuthEmail()),
+  Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail())),
 );
 
 const program = Effect.gen(function* () {
@@ -125,17 +124,24 @@ yield* auth.deleteUser({ sessionToken, password: "current password" });
 import { PgClient } from "@effect/sql-pg";
 import { Layer, Redacted } from "effect";
 import { AuthLive } from "effect-auth";
+import type { AuthEmail } from "effect-auth/email";
+import type { RateLimiter } from "effect-auth/rate-limit";
 import { DrizzlePg } from "effect-auth/storage/drizzle-pg";
 import { authSchema } from "./auth/schema.js";
+
+declare const ResendAuthEmail: Layer.Layer<AuthEmail>;
+declare const RedisRateLimiter: Layer.Layer<RateLimiter>;
 
 const PgLive = PgClient.layer({
   url: Redacted.make(process.env.DATABASE_URL ?? ""),
 });
 
-const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema });
-
-export const AppLive = Layer.mergeAll(AuthLive.production, PostgresAuthStorage).pipe(
+const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema }).pipe(
   Layer.provide(PgLive),
+);
+
+export const AppLive = AuthLive.production.pipe(
+  Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
 );
 ```
 
@@ -178,28 +184,27 @@ export const authSchema = { Users, Accounts, Sessions, Verifications };
 
 ```typescript
 import { Effect, Layer, Option } from "effect";
-import { AuthLive, VerificationTokenConfigLive } from "effect-auth";
+import { AuthLive } from "effect-auth";
 import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession } from "effect-auth/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-const appLayer = Layer.mergeAll(
-  AuthLive.production,
+const AuthServicesLive = AuthLive.production.pipe(
+  Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
+);
+
+const AuthHttpLive = Layer.mergeAll(
+  AuthServicesLive,
   AuthHttpConfig.layer({
     trustedOrigins: [new URL("https://app.example.com")],
     sessionCookieName: "__Host_effect_auth_session",
     secureCookies: true,
   }),
-  VerificationTokenConfigLive({
-    emailVerificationTtl: "24 hours",
-    passwordResetTtl: "15 minutes",
-  }),
-).pipe(
-  Layer.provide(PostgresAuthStorage),
-  Layer.provide(ResendAuthEmail),
-  Layer.provide(RedisRateLimiter),
 );
 
-const app = HttpRouter.layer.pipe(AuthHttp.mount({ basePath: "/api/auth" }));
+const app = HttpRouter.layer.pipe(
+  AuthHttp.mount({ basePath: "/api/auth" }),
+  Layer.provideMerge(AuthHttpLive),
+);
 
 const protectedProgram = Effect.gen(function* () {
   const authSession = yield* AuthSession;
@@ -215,7 +220,7 @@ const navbarProgram = Effect.gen(function* () {
 }).pipe(AuthHttp.optionalAuth);
 ```
 
-Mounted browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Programmatic `Auth.signIn` returns a redacted Session Token for server-owned bearer/API flows.
+Mounted browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Programmatic `Auth.signIn` returns a redacted Session Token for server-owned bearer/API flows. The mounted router uses `Layer.provideMerge` intentionally so request-time `Auth` and `AuthHttpConfig` services remain available to the web handler.
 
 ## HTTP Endpoints
 

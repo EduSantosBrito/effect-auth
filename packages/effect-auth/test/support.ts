@@ -302,7 +302,7 @@ const makeWorkflowLayer = (
     Layer.provideMerge(workflowServicesLayer),
     Layer.provideMerge(coreLayer),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
   return { storageState, emailState, layer };
 };
 

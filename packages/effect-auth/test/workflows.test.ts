@@ -180,9 +180,7 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
   const authLayer = AuthLive.default.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
-    ),
+    Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
   );
   return Effect.gen(function* () {
     const auth = yield* Auth;
@@ -289,9 +287,7 @@ it.effect("AuthLive rejects malformed verification tokens before workflow storag
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
   const authLayer = AuthLive.default.pipe(
-    Layer.provideMerge(
-      Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState)),
-    ),
+    Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
   );
   return Effect.gen(function* () {
     const auth = yield* Auth;
@@ -362,7 +358,7 @@ it.effect("auth email port preserves typed delivery failures", () => {
       ),
     ),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
 
   return Effect.gen(function* () {
     const emailPassword = yield* Auth;
@@ -444,7 +440,7 @@ it.effect("workflow rate-limit failures become equivalent public RateLimited err
       ),
     ),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
 
   return Effect.gen(function* () {
     const emailPassword = yield* Auth;
@@ -519,7 +515,7 @@ it.effect("sign-in uses equivalent public errors and dummy hash work for missing
       ),
     ),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
 
   return Effect.gen(function* () {
     const emailPassword = yield* Auth;
@@ -984,7 +980,7 @@ it.effect("password change checks rate limits before session lookup", () => {
       ),
     ),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
 
   return Effect.gen(function* () {
     const recovery = yield* Auth;
@@ -1086,7 +1082,7 @@ it.effect("deleteUser checks rate limits before session lookup", () => {
       ),
     ),
   );
-  const layer = Layer.mergeAll(AuthTestLive.pipe(Layer.provide(workflowsLayer)), workflowsLayer);
+  const layer = AuthTestLive.pipe(Layer.provideMerge(workflowsLayer));
 
   return Effect.gen(function* () {
     const auth = yield* Auth;
