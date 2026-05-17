@@ -20,6 +20,9 @@
     "url": "git+https://github.com/EduSantosBrito/effect-auth.git",
     "directory": "packages/effect-auth"
   },
+  "bin": {
+    "effect-auth": "./dist/cli.js"
+  },
   "files": [
     "CHANGELOG.md",
     "README.md",
