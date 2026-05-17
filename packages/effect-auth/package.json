@@ -54,6 +54,10 @@
       "types": "./dist/storage/index.d.ts",
       "import": "./dist/storage/index.js"
     },
+    "./storage/dev-memory": {
+      "types": "./dist/storage/dev-memory.d.ts",
+      "import": "./dist/storage/dev-memory.js"
+    },
     "./storage/drizzle-pg": {
       "types": "./dist/storage/drizzle-pg/index.d.ts",
       "import": "./dist/storage/drizzle-pg/index.js"
@@ -61,6 +65,10 @@
     "./email": {
       "types": "./dist/email/index.d.ts",
       "import": "./dist/email/index.js"
+    },
+    "./email/mock": {
+      "types": "./dist/email/mock.d.ts",
+      "import": "./dist/email/mock.js"
     },
     "./rate-limit": {
       "types": "./dist/rate-limit/index.d.ts",
