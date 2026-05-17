@@ -48,8 +48,13 @@ bun add effect-auth effect
 ```typescript
 import { Effect, Layer } from "effect";
 import { Auth, AuthLive } from "effect-auth";
+import { MockAuthEmail } from "effect-auth/email/mock";
+import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
 
-const AuthTestLayer = AuthLive.dev.pipe(Layer.provide(MyAuthStorage), Layer.provide(MyAuthEmail));
+const AuthTestLayer = AuthLive.dev.pipe(
+  Layer.provideMerge(DevMemoryAuthStorage()),
+  Layer.provideMerge(MockAuthEmail()),
+);
 
 const program = Effect.gen(function* () {
   const auth = yield* Auth;
@@ -65,7 +70,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(AuthTestLayer));
 ```
 
-`AuthLive.dev` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, workflow composition, and a permissive development Rate Limiter. `AuthLive.default` is currently an alias for `AuthLive.dev`. Applications provide Auth Storage and Auth Email as Effect layers; production apps should use `AuthLive.production` and provide a real Rate Limiter.
+`AuthLive.dev` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, workflow composition, and a permissive development Rate Limiter. `DevMemoryAuthStorage` and `MockAuthEmail` are no-network helpers for examples and tests. Production apps should provide real Auth Storage, Auth Email, and Rate Limiter layers with `AuthLive.production`.
 
 Token TTLs and Session Policy are configured at the workflow seam:
 
@@ -254,6 +259,8 @@ Use `AuthStorage` and `AuthEmail` to connect your own database and email provide
 bun run example:minimal
 bun run --cwd examples/minimal demo
 
+docker compose -f examples/postgres-storage/docker-compose.yml down -v
+
 docker compose -f examples/postgres-storage/docker-compose.yml up -d --wait
 bun run build
 bun run --cwd examples/postgres-storage auth:schema
@@ -262,9 +269,9 @@ bun run --cwd examples/postgres-storage db:migrate
 bun run example:postgres
 ```
 
-The minimal example runs a deterministic sign-up, email verification, sign-in, and current-session flow. It owns local in-memory storage and uses `effect-email/test` for inspectable no-network email sends, including email details in the structured logs, so no `.env` file is needed.
+The minimal example runs sign-up, email verification, sign-in, and current-session lookup with `DevMemoryAuthStorage` and `MockAuthEmail`, so no `.env` file is needed.
 
-The Postgres storage example uses generated Drizzle schema TypeScript, Drizzle Kit migrations, `DrizzlePg.layer`, and `@effect/sql-pg` end-to-end. It runs sign-up, verification, two sign-ins, session listing, password change, current-session lookup, and user deletion without runtime schema mutation.
+The Postgres storage example runs the same small auth flow with generated Drizzle schema TypeScript, Drizzle Kit migrations, `DrizzlePg.layer`, and `@effect/sql-pg`. It does not create or mutate tables at runtime.
 
 See [`examples/minimal/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/minimal/README.md) and [`examples/postgres-storage/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/postgres-storage/README.md) for the integration shapes.
 

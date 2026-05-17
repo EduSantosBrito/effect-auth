@@ -64,6 +64,12 @@ import {
   type SentAuthEmail,
 } from "effect-auth/email";
 import {
+  MockAuthEmail,
+  makeMockAuthEmail,
+  makeMockAuthEmailState,
+  type MockAuthEmailState,
+} from "effect-auth/email/mock";
+import {
   AuthApi,
   AuthApiEndpoints,
   AuthHttp,
@@ -158,6 +164,12 @@ import {
   type VerificationTokenPurpose,
 } from "effect-auth/storage";
 import {
+  DevMemoryAuthStorage,
+  makeDevMemoryStorage,
+  makeDevMemoryStorageState,
+  type DevMemoryStorageState,
+} from "effect-auth/storage/dev-memory";
+import {
   DrizzlePg,
   layer as drizzlePgLayer,
   schema as drizzlePgSchema,
@@ -238,6 +250,11 @@ type PublicApiContract = {
     | ClientIpValue
     | NormalizedEmail;
   readonly email: typeof AuthEmail | typeof AuthEmailFailure | AuthEmailShape | SentAuthEmail;
+  readonly mockEmail:
+    | typeof MockAuthEmail
+    | typeof makeMockAuthEmail
+    | typeof makeMockAuthEmailState
+    | MockAuthEmailState;
   readonly http:
     | typeof AuthApi
     | typeof AuthApiEndpoints
@@ -328,6 +345,11 @@ type PublicApiContract = {
     | UpdateUserStorageInput
     | VerificationTokenLookup
     | VerificationTokenPurpose;
+  readonly devMemoryStorage:
+    | typeof DevMemoryAuthStorage
+    | typeof makeDevMemoryStorage
+    | typeof makeDevMemoryStorageState
+    | DevMemoryStorageState;
   readonly drizzlePg:
     | typeof DrizzlePg
     | typeof drizzlePgLayer
