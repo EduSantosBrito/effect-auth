@@ -8,7 +8,7 @@ import {
   generateDrizzlePgSchemaFile,
 } from "./cli/generate.js";
 
-const packageVersion = "0.3.0";
+const packageVersion = "0.4.0";
 
 class CliFailure extends Schema.TaggedErrorClass<CliFailure>()("CliFailure", {
   reason: Schema.String,
