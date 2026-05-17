@@ -5,6 +5,5 @@ import { authSchema } from "./schema.js";
 
 export const makePostgresLive = (databaseUrl: string) => {
   const PgLive = PgClient.layer({ url: Redacted.make(databaseUrl) });
-  const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema }).pipe(Layer.provide(PgLive));
-  return Layer.merge(PgLive, PostgresAuthStorage);
+  return DrizzlePg.layer({ schema: authSchema }).pipe(Layer.provide(PgLive));
 };
