@@ -271,7 +271,7 @@ bun run example:postgres
 
 The minimal example runs sign-up, email verification, sign-in, and current-session lookup with `DevMemoryAuthStorage` and `MockAuthEmail`, so no `.env` file is needed.
 
-The Postgres storage example runs the same small auth flow with generated Drizzle schema TypeScript, Drizzle Kit migrations, `DrizzlePg.layer`, and `@effect/sql-pg`. It does not create or mutate tables at runtime.
+The Postgres storage example runs the same small auth flow with generated Drizzle schema TypeScript, committed Drizzle Kit migrations, `DrizzlePg.layer`, and `@effect/sql-pg`. It does not create or mutate tables at runtime.
 
 See [`examples/minimal/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/minimal/README.md) and [`examples/postgres-storage/README.md`](https://github.com/EduSantosBrito/effect-auth/blob/main/examples/postgres-storage/README.md) for the integration shapes.
 
