@@ -837,11 +837,7 @@ const rotationFromContextOrResult = (
   return Predicate.isTagged(resultRotation, "Rotated") ? resultRotation : context.rotation;
 };
 
-const bearerTokenValue = (authorization: string | undefined): string | undefined => {
-  if (authorization === undefined) return undefined;
-  const prefix = "Bearer ";
-  return authorization.startsWith(prefix) ? authorization.slice(prefix.length).trim() : undefined;
-};
+const bearerCredentialPrefix = "bearer ";
 
 type ParsedCredential = Data.TaggedEnum<{
   Missing: {};
@@ -864,6 +860,17 @@ const parseCredential = (value: string | undefined): Effect.Effect<ParsedCredent
           onSuccess: foundCredential,
         }),
       );
+
+const parseBearerCredential = (
+  authorization: string | undefined,
+): Effect.Effect<ParsedCredential> => {
+  const value = authorization?.trimStart();
+  if (value === undefined || value === "") return Effect.succeed(missingCredential());
+  if (value.slice(0, bearerCredentialPrefix.length).toLowerCase() !== bearerCredentialPrefix) {
+    return Effect.succeed(invalidCredential());
+  }
+  return parseCredential(value.slice(bearerCredentialPrefix.length).trim());
+};
 
 const toPublicResolution = (credential: AuthenticatedCredential): AuthHttpCredentialResolution =>
   AuthHttpCredentialResolution.Authenticated({
@@ -912,9 +919,9 @@ const makeCredentialResolverLayer = (contract: AuthHttpContractConfig) =>
 
         const tryParsed = function* (
           source: AuthHttpCredentialSource,
-          raw: string | undefined,
+          parse: Effect.Effect<ParsedCredential>,
         ): Generator<Effect.Effect<ParsedCredential>, ParsedCredential> {
-          const parsed = yield* parseCredential(raw);
+          const parsed = yield* parse;
           if (Predicate.isTagged(parsed, "Missing")) return parsed;
           attempted.push(source);
           return parsed;
@@ -923,7 +930,7 @@ const makeCredentialResolverLayer = (contract: AuthHttpContractConfig) =>
         if (contract.cookieAndBearer) {
           const bearer = yield* tryParsed(
             "Bearer",
-            bearerTokenValue(request.headers.authorization),
+            parseBearerCredential(request.headers.authorization),
           );
           if (Predicate.isTagged(bearer, "Found")) {
             const bearerSession = yield* Effect.option(
@@ -935,7 +942,10 @@ const makeCredentialResolverLayer = (contract: AuthHttpContractConfig) =>
           }
         }
 
-        const cookie = yield* tryParsed("Cookie", request.cookies[contract.sessionCookieName]);
+        const cookie = yield* tryParsed(
+          "Cookie",
+          parseCredential(request.cookies[contract.sessionCookieName]),
+        );
         if (Predicate.isTagged(cookie, "Found")) {
           const cookieSession = yield* Effect.option(
             resolveRaw({ source: "Cookie", value: Redacted.value(cookie.token) }),
@@ -1311,8 +1321,11 @@ const optionalHandlers = <I extends HttpApiMiddleware.AnyId>(api: ReturnType<typ
             yield* renderer.render(maintenanceForRotation(resolved.source, resolved.rotation));
             return new AuthHttpSessionResponse({ user: resolved.user, session: resolved.session });
           }
-          if (Predicate.isTagged(resolved, "Invalid") && resolved.attempted.includes("Cookie")) {
-            yield* renderer.render(AuthHttpCredentialMaintenance.ClearCookie());
+          if (Predicate.isTagged(resolved, "Invalid")) {
+            if (resolved.attempted.includes("Cookie")) {
+              yield* renderer.render(AuthHttpCredentialMaintenance.ClearCookie());
+            }
+            return yield* unauthorizedError();
           }
           return null;
         }),
@@ -1548,7 +1561,8 @@ const oauthCallbackPayloadFromSearch = (request: HttpServerRequest.HttpServerReq
     state: search.get("state") ?? undefined,
     code: search.get("code") ?? undefined,
     error: search.get("error") ?? undefined,
-    errorDescription: search.get("error_description") ?? search.get("errorDescription") ?? undefined,
+    errorDescription:
+      search.get("error_description") ?? search.get("errorDescription") ?? undefined,
   });
 };
 
@@ -1704,7 +1718,9 @@ const requireAuthEffect = Effect.fn("AuthHttp.requireAuthEffect")(function* <A, 
   self: Effect.Effect<A, E, R>,
 ) {
   const resolver = yield* AuthHttpCredentialResolver;
+  const renderer = yield* AuthHttpCredentialRenderer;
   const credential = yield* resolver.resolveRequiredContext;
+  yield* renderer.render(maintenanceForRotation(credential.source, credential.rotation));
   return yield* self.pipe(
     Effect.provideService(AuthHttpSessionContext, {
       user: credential.user,
@@ -1718,10 +1734,20 @@ const optionalAuthEffect = Effect.fn("AuthHttp.optionalAuthEffect")(function* <A
   self: Effect.Effect<A, E, R>,
 ) {
   const resolver = yield* AuthHttpCredentialResolver;
+  const renderer = yield* AuthHttpCredentialRenderer;
   const resolved = yield* resolver.resolveOptionalContext;
+  if (Predicate.isTagged(resolved, "Invalid")) {
+    if (resolved.attempted.includes("Cookie")) {
+      yield* renderer.render(AuthHttpCredentialMaintenance.ClearCookie());
+    }
+    return yield* unauthorizedError();
+  }
   const session = Predicate.isTagged(resolved, "Authenticated")
     ? Option.some({ user: resolved.user, session: resolved.session })
     : Option.none<typeof AuthHttpSessionContext.Service>();
+  if (Predicate.isTagged(resolved, "Authenticated")) {
+    yield* renderer.render(maintenanceForRotation(resolved.source, resolved.rotation));
+  }
   return yield* Effect.provideService(self, AuthHttpOptionalSessionContext, { session });
 });
 

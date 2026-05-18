@@ -192,59 +192,56 @@ it.effect(
   },
 );
 
-it.effect(
-  "AuthHttp.configure protects configured routes with credential and origin policy",
-  () => {
-    const { emailState, layer: authLayer } = makeWorkflowLayer();
-    const configured = AuthHttp.configure({ basePath: "/protected-auth" });
-    return Effect.gen(function* () {
-      const auth = yield* Auth;
-      yield* auth.signUp({
+it.effect("AuthHttp.configure protects configured routes with credential and origin policy", () => {
+  const { emailState, layer: authLayer } = makeWorkflowLayer();
+  const configured = AuthHttp.configure({ basePath: "/protected-auth" });
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    yield* auth.signUp({
+      email: "configured-protected@example.com",
+      password: "correct horse battery staple",
+      name: "Configured Protected",
+      verificationCallbackUrl: new URL("https://app.example.com/verify"),
+    });
+    const verification = emailState.sent[0];
+    if (!verification) return yield* missingFixture("missing protected verification email");
+    yield* auth.verifyEmail({ token: verification.token });
+    const appLayer = configured.routes.pipe(
+      Layer.provideMerge(
+        configured
+          .layer(runtimeInput)
+          .pipe(Layer.provideMerge(authLayer), Layer.provideMerge(NoopOAuthLayer)),
+      ),
+      Layer.provideMerge(HttpServer.layerServices),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+    const call = (path: string, init?: RequestInit) =>
+      Effect.promise(() =>
+        web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()),
+      );
+
+    const signedIn = yield* call(
+      "/protected-auth/sign-in/email",
+      configuredJson({
         email: "configured-protected@example.com",
         password: "correct horse battery staple",
-        name: "Configured Protected",
-        verificationCallbackUrl: new URL("https://app.example.com/verify"),
-      });
-      const verification = emailState.sent[0];
-      if (!verification) return yield* missingFixture("missing protected verification email");
-      yield* auth.verifyEmail({ token: verification.token });
-      const appLayer = configured.routes.pipe(
-        Layer.provideMerge(
-          configured
-            .layer(runtimeInput)
-            .pipe(Layer.provideMerge(authLayer), Layer.provideMerge(NoopOAuthLayer)),
-        ),
-        Layer.provideMerge(HttpServer.layerServices),
-      );
-      const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
-      const call = (path: string, init?: RequestInit) =>
-        Effect.promise(() =>
-          web.handler(new Request(`https://auth.example.com${path}`, init), Context.empty()),
-        );
+      }),
+    );
+    const cookie = signedIn.headers.get("set-cookie");
+    if (!cookie) return yield* missingFixture("missing protected sign-in cookie");
+    const missing = yield* call("/protected-auth/sessions", { method: "GET" });
+    const listed = yield* call("/protected-auth/sessions", { method: "GET", headers: { cookie } });
+    const untrustedSignOut = yield* call("/protected-auth/sign-out", {
+      method: "POST",
+      headers: { cookie, origin: "https://evil.example.com" },
+    });
+    yield* Effect.promise(() => web.dispose());
 
-      const signedIn = yield* call(
-        "/protected-auth/sign-in/email",
-        configuredJson({
-          email: "configured-protected@example.com",
-          password: "correct horse battery staple",
-        }),
-      );
-      const cookie = signedIn.headers.get("set-cookie");
-      if (!cookie) return yield* missingFixture("missing protected sign-in cookie");
-      const missing = yield* call("/protected-auth/sessions", { method: "GET" });
-      const listed = yield* call("/protected-auth/sessions", { method: "GET", headers: { cookie } });
-      const untrustedSignOut = yield* call("/protected-auth/sign-out", {
-        method: "POST",
-        headers: { cookie, origin: "https://evil.example.com" },
-      });
-      yield* Effect.promise(() => web.dispose());
-
-      assert.strictEqual(missing.status, 401);
-      assert.strictEqual(listed.status, 200);
-      assert.strictEqual(untrustedSignOut.status, 403);
-    }).pipe(Effect.provide(authLayer));
-  },
-);
+    assert.strictEqual(missing.status, 401);
+    assert.strictEqual(listed.status, 200);
+    assert.strictEqual(untrustedSignOut.status, 403);
+  }).pipe(Effect.provide(authLayer));
+});
 
 it.effect(
   "AuthHttp.configure keeps bearer credentials opt-in and refreshes bearer tokens by header",
@@ -334,6 +331,47 @@ it.effect(
         return yield* missingFixture(
           `missing rotated bearer header status=${bearerSessions.status} expose=${bearerSessions.headers.get("access-control-expose-headers")} body=${bearerBody}`,
         );
+      const lowercaseBearerSession = yield* Effect.promise(() =>
+        bearerWeb.handler(
+          new Request("https://auth.example.com/cookie-and-bearer/session", {
+            method: "GET",
+            headers: { authorization: `bearer ${rotatedToken}` },
+          }),
+          Context.empty(),
+        ),
+      );
+      const invalidBearerOnly = yield* Effect.promise(() =>
+        bearerWeb.handler(
+          new Request("https://auth.example.com/cookie-and-bearer/session", {
+            method: "GET",
+            headers: { authorization: "Bearer not-a-session-token" },
+          }),
+          Context.empty(),
+        ),
+      );
+      const freshSignIn = yield* Effect.promise(() =>
+        bearerWeb.handler(
+          new Request(
+            "https://auth.example.com/cookie-and-bearer/sign-in/email",
+            configuredJson({
+              email: "configured-bearer@example.com",
+              password: "correct horse battery staple",
+            }),
+          ),
+          Context.empty(),
+        ),
+      );
+      const freshCookie = freshSignIn.headers.get("set-cookie");
+      if (!freshCookie) return yield* missingFixture("missing fresh bearer fallback cookie");
+      const invalidBearerWithCookie = yield* Effect.promise(() =>
+        bearerWeb.handler(
+          new Request("https://auth.example.com/cookie-and-bearer/session", {
+            method: "GET",
+            headers: { authorization: "Bearer not-a-session-token", cookie: freshCookie },
+          }),
+          Context.empty(),
+        ),
+      );
       const signedOut = yield* Effect.promise(() =>
         bearerWeb.handler(
           new Request("https://auth.example.com/cookie-and-bearer/sign-out", {
@@ -352,6 +390,9 @@ it.effect(
         bearerSessions.headers.get("access-control-expose-headers")?.includes("set-auth-token"),
         true,
       );
+      assert.strictEqual(lowercaseBearerSession.status, 200);
+      assert.strictEqual(invalidBearerOnly.status, 401);
+      assert.strictEqual(invalidBearerWithCookie.status, 200);
       assert.strictEqual(signedOut.status, 200);
     }).pipe(Effect.provide(authLayer));
   },
@@ -450,7 +491,11 @@ it.effect("AuthHttp.configure serves OAuth start and callback redirect routes", 
       password: "correct horse battery staple",
     });
     const starts: Array<{ readonly redirectUri: string; readonly providerId: unknown }> = [];
-    const callbacks: Array<{ readonly method: string; readonly state: unknown; readonly code: unknown }> = [];
+    const callbacks: Array<{
+      readonly method: string;
+      readonly state: unknown;
+      readonly code: unknown;
+    }> = [];
     const signInFlow = decodeSignInFlowSync("SignIn");
     const OAuthTestLayer = Layer.succeed(OAuth)({
       startSignIn: (input) =>
@@ -539,7 +584,10 @@ it.effect("AuthHttp.configure serves OAuth start and callback redirect routes", 
     ]);
     assert.strictEqual(callback.status, 302);
     assert.strictEqual(callback.headers.get("location"), "/dashboard");
-    assert.equal(callback.headers.get("set-cookie")?.includes(`${configured.sessionCookieName}=`), true);
+    assert.equal(
+      callback.headers.get("set-cookie")?.includes(`${configured.sessionCookieName}=`),
+      true,
+    );
     assert.deepStrictEqual(callbacks, [{ method: "GET", state: "state-1", code: "code-1" }]);
     assert.strictEqual(failedPostCallback.status, 302);
     assert.strictEqual(failedPostCallback.headers.get("location"), "/auth/error");
