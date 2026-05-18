@@ -48,6 +48,10 @@ export type AuthAccount = CredentialAuthAccount | OAuthProviderAccount;
 
 export interface PublicAuthAccount extends AuthAccountBase {}
 
+export interface PublicOAuthProviderAccount extends PublicAuthAccount {
+  readonly providerId: OAuthProviderId;
+}
+
 export interface CredentialAccountLookup {
   readonly user: AuthUser;
   readonly account: CredentialAuthAccount;

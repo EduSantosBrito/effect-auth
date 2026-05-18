@@ -17,7 +17,24 @@ export {
   type VerifyEmailInput as AuthVerifyEmailInput,
 } from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
-export * from "./oauth/index.js";
+export {
+  AuthFeatureKeyMaterialService,
+  OAuth,
+  OAuthProviderId,
+  OAuthProviders,
+  ProviderTokenProtection,
+  type OAuthAuthorizationStartResult,
+  type OAuthCallbackInput,
+  type OAuthCallbackSuccess,
+  type OAuthProviderConfigInput,
+  type OAuthProviderInput,
+  type OAuthProviderProfile,
+  type OAuthStartLinkInput,
+  type OAuthStartSignInInput,
+  type OAuthTokenSet,
+  type ProtectedProviderTokenSet,
+  type ResolvedOAuthProvider,
+} from "./oauth/index.js";
 export {
   VerificationTokenConfig,
   VerificationTokenConfigLive,

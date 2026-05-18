@@ -3,6 +3,11 @@ import {
   Auth,
   AuthLive,
   AuthLiveConfig,
+  AuthFeatureKeyMaterialService as RootAuthFeatureKeyMaterialService,
+  OAuth as RootOAuth,
+  OAuthProviderId as RootOAuthProviderId,
+  OAuthProviders as RootOAuthProviders,
+  ProviderTokenProtection as RootProviderTokenProtection,
   SessionPolicy,
   SessionPolicyLive,
   VerificationTokenConfig,
@@ -11,6 +16,17 @@ import {
   packageName,
   type AuthLiveConfigInput,
   type AuthLiveConfigShape,
+  type OAuthAuthorizationStartResult as RootOAuthAuthorizationStartResult,
+  type OAuthCallbackInput as RootOAuthCallbackInput,
+  type OAuthCallbackSuccess as RootOAuthCallbackSuccess,
+  type OAuthProviderConfigInput as RootOAuthProviderConfigInput,
+  type OAuthProviderInput as RootOAuthProviderInput,
+  type OAuthProviderProfile as RootOAuthProviderProfile,
+  type OAuthStartLinkInput as RootOAuthStartLinkInput,
+  type OAuthStartSignInInput as RootOAuthStartSignInInput,
+  type OAuthTokenSet as RootOAuthTokenSet,
+  type ProtectedProviderTokenSet as RootProtectedProviderTokenSet,
+  type ResolvedOAuthProvider as RootResolvedOAuthProvider,
   type AuthRevokeUserSessionInput,
   type AuthSessionTokenInput,
   type AuthShape,
@@ -234,6 +250,7 @@ import {
   type OAuthAccountAtomicSuccess,
   type OAuthProviderAccount,
   type PublicAuthAccount,
+  type PublicOAuthProviderAccount,
   type RevokeAllUserSessions,
   type RevokeOtherSessions,
   type RevokeSession,
@@ -291,6 +308,11 @@ type PublicApiContract = {
     | typeof Auth
     | typeof AuthLive
     | typeof AuthLiveConfig
+    | typeof RootAuthFeatureKeyMaterialService
+    | typeof RootOAuth
+    | typeof RootOAuthProviderId
+    | typeof RootOAuthProviders
+    | typeof RootProviderTokenProtection
     | typeof SessionPolicy
     | typeof SessionPolicyLive
     | typeof VerificationTokenConfig
@@ -299,6 +321,17 @@ type PublicApiContract = {
     | typeof packageName
     | AuthLiveConfigInput
     | AuthLiveConfigShape
+    | RootOAuthAuthorizationStartResult
+    | RootOAuthCallbackInput
+    | RootOAuthCallbackSuccess
+    | RootOAuthProviderConfigInput
+    | RootOAuthProviderInput
+    | RootOAuthProviderProfile
+    | RootOAuthStartLinkInput
+    | RootOAuthStartSignInInput
+    | RootOAuthTokenSet
+    | RootProtectedProviderTokenSet
+    | RootResolvedOAuthProvider
     | AuthRevokeUserSessionInput
     | AuthSessionTokenInput
     | AuthShape
@@ -511,6 +544,7 @@ type PublicApiContract = {
     | OAuthAccountAtomicSuccess
     | OAuthProviderAccount
     | PublicAuthAccount
+    | PublicOAuthProviderAccount
     | RevokeAllUserSessions
     | RevokeOtherSessions
     | RevokeSession

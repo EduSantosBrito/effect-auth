@@ -81,15 +81,23 @@ const program = Effect.gen(function* () {
 Token TTLs, Session Policy, and encrypted OAuth feature keys are configured through nested Auth Live Config:
 
 ```typescript
-import { Redacted } from "effect";
+import { Config, Effect, Layer } from "effect";
 
-const AuthServicesLive = AuthLive({
-  session: { ttl: "7 days", updateAge: "1 day" },
-  verification: { emailVerificationTtl: "24 hours", passwordResetTtl: "15 minutes" },
-  encryptionKey: Redacted.make(process.env.AUTH_ENCRYPTION_KEY ?? ""),
-  oauthState: { ttl: "10 minutes" },
-}).pipe(
-  Layer.provide(Layer.mergeAll(AppAuthStorage, AppAuthEmail, AppRateLimiter)),
+const AuthSettings = Config.all({
+  encryptionKey: Config.redacted("AUTH_ENCRYPTION_KEY"),
+});
+
+const AuthServicesLive = Layer.unwrap(
+  AuthSettings.asEffect().pipe(
+    Effect.map(({ encryptionKey }) =>
+      AuthLive({
+        session: { ttl: "7 days", updateAge: "1 day" },
+        verification: { emailVerificationTtl: "24 hours", passwordResetTtl: "15 minutes" },
+        encryptionKey,
+        oauthState: { ttl: "10 minutes" },
+      }).pipe(Layer.provide(Layer.mergeAll(AppAuthStorage, AppAuthEmail, AppRateLimiter))),
+    ),
+  ),
 );
 ```
 
@@ -126,47 +134,73 @@ yield* auth.deleteUser({ sessionToken, password: "current password" });
 
 ## OAuth Start and Generic Callback
 
-OAuth APIs live under `effect-auth/oauth`. `OAuthProviders.layer(...)` validates provider IDs, scopes, PKCE mode, token auth method, and managed authorization parameters. `OAuth.layer` creates authorization URLs, stores short-lived OAuth State rows with hashed public handles and encrypted PKCE verifier/OIDC nonce secrets, and completes generic OAuth callbacks by exchanging codes, mapping profiles, protecting provider tokens, atomically creating/linking provider accounts, and issuing normal Effect Auth Sessions.
+Core OAuth APIs are root exports from `effect-auth`; lower-level client helpers are also available from `effect-auth/oauth`, while mounted routes stay in `effect-auth/http`. `OAuthProviders.layer(...)` validates provider IDs, scopes, PKCE mode, token auth method, and managed authorization parameters. `OAuth.layer` creates authorization URLs, stores short-lived OAuth State rows with hashed public handles and encrypted PKCE verifier/OIDC nonce secrets, and completes generic OAuth callbacks by exchanging codes, mapping profiles, protecting provider tokens, atomically creating/linking provider accounts, and issuing normal Effect Auth Sessions.
 
 ```typescript
-import { Effect, Layer, Redacted } from "effect";
-import { AuthLiveConfig } from "effect-auth";
+import { Config, Effect, Layer } from "effect";
 import {
   AuthFeatureKeyMaterialService,
+  AuthLive,
+  AuthLiveConfig,
   OAuth,
-  OAuthProviderClient,
   OAuthProviders,
   ProviderTokenProtection,
-} from "effect-auth/oauth";
+} from "effect-auth";
+import { OAuthProviderClient } from "effect-auth/oauth";
+import type { AuthEmail } from "effect-auth/email";
+import type { RateLimiter } from "effect-auth/rate-limit";
 import type { AuthStorage } from "effect-auth/storage";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 
 declare const AppAuthStorage: Layer.Layer<AuthStorage>;
+declare const AppAuthEmail: Layer.Layer<AuthEmail>;
+declare const AppRateLimiter: Layer.Layer<RateLimiter>;
 declare const AppHttpClient: Layer.Layer<HttpClient>;
 
-const ProvidersLive = OAuthProviders.layer({
-  providers: [
-    {
-      id: "github",
-      clientId: process.env.GITHUB_CLIENT_ID ?? "",
-      clientSecret: Redacted.make(process.env.GITHUB_CLIENT_SECRET ?? ""),
-      defaultScopes: ["read:user", "user:email"],
-      endpoints: {
-        authorizationUrl: new URL("https://github.com/login/oauth/authorize"),
-        tokenUrl: new URL("https://github.com/login/oauth/access_token"),
-        userInfoUrl: new URL("https://api.github.com/user"),
-      },
-      mapProfile: ({ userInfo }) =>
-        Effect.succeed({
-          providerAccountId: String(userInfo?.id),
-          email: String(userInfo?.email),
-          emailVerified: false,
-          name: String(userInfo?.name ?? "GitHub User"),
-          image: null,
-        }),
-    },
-  ],
-}).pipe(Layer.provide(AppHttpClient));
+const AuthSettings = Config.all({
+  encryptionKey: Config.redacted("AUTH_ENCRYPTION_KEY"),
+});
+
+const GithubProvider = Config.all({
+  id: Config.succeed("github"),
+  clientId: Config.string("GITHUB_CLIENT_ID"),
+  clientSecret: Config.redacted("GITHUB_CLIENT_SECRET"),
+  defaultScopes: Config.succeed(["read:user", "user:email"]),
+  endpoints: Config.succeed({
+    authorizationUrl: new URL("https://github.com/login/oauth/authorize"),
+    tokenUrl: new URL("https://github.com/login/oauth/access_token"),
+    userInfoUrl: new URL("https://api.github.com/user"),
+  }),
+  mapProfile: Config.succeed(({ userInfo }) =>
+    Effect.succeed({
+      providerAccountId: String(userInfo?.id),
+      email: String(userInfo?.email),
+      emailVerified: false,
+      name: String(userInfo?.name ?? "GitHub User"),
+      image: null,
+    }),
+  ),
+});
+
+const AuthServicesLive = Layer.unwrap(
+  AuthSettings.asEffect().pipe(
+    Effect.map(({ encryptionKey }) =>
+      AuthLive({ encryptionKey }).pipe(
+        Layer.provide(Layer.mergeAll(AppAuthStorage, AppAuthEmail, AppRateLimiter)),
+      ),
+    ),
+  ),
+);
+
+const AuthConfigLive = Layer.unwrap(
+  AuthSettings.asEffect().pipe(
+    Effect.map(({ encryptionKey }) => AuthLiveConfig.layer({ encryptionKey })),
+  ),
+);
+
+const ProvidersLive = OAuthProviders.layer(
+  Config.all({ providers: Config.all([GithubProvider]) }),
+).pipe(Layer.provide(AppHttpClient));
 
 const ProviderTokenProtectionLive = ProviderTokenProtection.layer.pipe(
   Layer.provide(AuthFeatureKeyMaterialService.layer),
@@ -175,15 +209,10 @@ const ProviderTokenProtectionLive = ProviderTokenProtection.layer.pipe(
 const OAuthLive = OAuth.layer.pipe(
   Layer.provideMerge(ProviderTokenProtectionLive),
   Layer.provideMerge(OAuthProviderClient.layer),
-  Layer.provideMerge(
-    Layer.mergeAll(
-      AuthLiveConfig.layer({ encryptionKey: Redacted.make(process.env.AUTH_ENCRYPTION_KEY ?? "") }),
-      AppAuthStorage,
-      ProvidersLive,
-      AppHttpClient,
-    ),
-  ),
+  Layer.provideMerge(Layer.mergeAll(AuthConfigLive, AppAuthStorage, ProvidersLive, AppHttpClient)),
 );
+
+const AppLive = Layer.mergeAll(AuthServicesLive, OAuthLive);
 
 const program = Effect.gen(function* () {
   const oauth = yield* OAuth;
@@ -208,10 +237,12 @@ const program = Effect.gen(function* () {
   }
 
   return started.authorizationUrl;
-}).pipe(Effect.provide(OAuthLive));
+}).pipe(Effect.provide(AppLive));
 ```
 
 `startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. OIDC providers validate signed ID Tokens against configured issuer, client audience, encrypted state nonce, expiry/not-before claims, and JWKS keys before claims can create/link local users. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior.
+
+Compared with Better Auth-style convenience defaults, this first OAuth slice is stricter by default: rate limiting is app-provided, OAuth State is storage-backed and one-time consumed, callback URLs come from server configuration instead of request headers or provider fields, and Provider Tokens are encrypted by Effect Auth-owned services before storage. Effect Auth acts as an OAuth/OIDC client for your application, not as an OAuth/OIDC provider.
 
 Mounted OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
 
