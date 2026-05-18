@@ -111,6 +111,53 @@ import {
   type TrustedOriginPolicyShape,
 } from "effect-auth/http";
 import {
+  AuthEncryptedFeature,
+  AuthEncryptionKeyId,
+  AuthFeatureKeyMaterialFailure,
+  AuthFeatureKeyMaterialService,
+  OAuth,
+  OAuthFlow,
+  OAuthPkceMode,
+  OAuthProviderConfigError,
+  OAuthProviderId,
+  OAuthProviderNotFound,
+  OAuthProviderProfileMappingFailure,
+  OAuthProviders,
+  OAuthStartError,
+  OAuthState,
+  OAuthStateFailure,
+  OAuthStateHandle,
+  OAuthStateHash,
+  OAuthTokenEndpointAuthMethod,
+  normalizeOAuthScopes,
+  type AuthEncryptedFeature as AuthEncryptedFeatureValue,
+  type AuthEncryptionKeyId as AuthEncryptionKeyIdValue,
+  type AuthFeatureKeyMaterial,
+  type ConsumeOAuthState,
+  type OAuthAuthorizationStartResult,
+  type OAuthFlow as OAuthFlowValue,
+  type OAuthPkceMode as OAuthPkceModeValue,
+  type OAuthProfileMappingInput,
+  type OAuthProviderConfigInput,
+  type OAuthProviderConfigLayerInput,
+  type OAuthProviderEndpointsInput,
+  type OAuthProviderId as OAuthProviderIdValue,
+  type OAuthProviderInput,
+  type OAuthProviderProfile,
+  type OAuthStartLinkInput,
+  type OAuthStartSignInInput,
+  type OAuthStateCreateInput,
+  type OAuthStateCreateResult,
+  type OAuthStateHash as OAuthStateHashValue,
+  type OAuthStateHandle as OAuthStateHandleValue,
+  type OAuthStateSecrets,
+  type OAuthTokenEndpointAuthMethod as OAuthTokenEndpointAuthMethodValue,
+  type OAuthTokenSet,
+  type ResolvedOAuthProvider,
+  type StoreOAuthState,
+  type StoredOAuthState,
+} from "effect-auth/oauth";
+import {
   NativeScryptPasswordHasher,
   PasswordHash,
   PasswordHashFailure,
@@ -309,6 +356,52 @@ type PublicApiContract = {
     | AuthSessionShape
     | SessionTokenExtractResultType
     | TrustedOriginPolicyShape;
+  readonly oauth:
+    | typeof AuthEncryptedFeature
+    | typeof AuthEncryptionKeyId
+    | typeof AuthFeatureKeyMaterialFailure
+    | typeof AuthFeatureKeyMaterialService
+    | typeof OAuth
+    | typeof OAuthFlow
+    | typeof OAuthPkceMode
+    | typeof OAuthProviderConfigError
+    | typeof OAuthProviderId
+    | typeof OAuthProviderNotFound
+    | typeof OAuthProviderProfileMappingFailure
+    | typeof OAuthProviders
+    | typeof OAuthStartError
+    | typeof OAuthState
+    | typeof OAuthStateFailure
+    | typeof OAuthStateHandle
+    | typeof OAuthStateHash
+    | typeof OAuthTokenEndpointAuthMethod
+    | typeof normalizeOAuthScopes
+    | AuthEncryptedFeatureValue
+    | AuthEncryptionKeyIdValue
+    | AuthFeatureKeyMaterial
+    | ConsumeOAuthState
+    | OAuthAuthorizationStartResult
+    | OAuthFlowValue
+    | OAuthPkceModeValue
+    | OAuthProfileMappingInput
+    | OAuthProviderConfigInput
+    | OAuthProviderConfigLayerInput
+    | OAuthProviderEndpointsInput
+    | OAuthProviderIdValue
+    | OAuthProviderInput
+    | OAuthProviderProfile
+    | OAuthStartLinkInput
+    | OAuthStartSignInInput
+    | OAuthStateCreateInput
+    | OAuthStateCreateResult
+    | OAuthStateHashValue
+    | OAuthStateHandleValue
+    | OAuthStateSecrets
+    | OAuthTokenEndpointAuthMethodValue
+    | OAuthTokenSet
+    | ResolvedOAuthProvider
+    | StoreOAuthState
+    | StoredOAuthState;
   readonly password:
     | typeof NativeScryptPasswordHasher
     | typeof PasswordHash

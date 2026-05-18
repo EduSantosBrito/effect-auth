@@ -36,6 +36,8 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 - Boundary Parse for external email, password, token, and URL inputs.
 - Secure Default Password Policy and native Scrypt password hashing.
 - Rate Limiter service boundary that applications provide explicitly.
+- OAuth provider registry plus authorization-start APIs for sign-in/link flows.
+- Storage-backed OAuth State with hashed handles and encrypted PKCE/OIDC secrets.
 
 ## Install
 
@@ -74,18 +76,22 @@ const program = Effect.gen(function* () {
 
 `AuthLive(config?)` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, and workflow composition. Auth Storage, Auth Email, and Rate Limiter are always application-provided layers. `DevMemoryAuthStorage`, `MockAuthEmail`, and `BoundedDevRateLimiter` are explicit helpers for examples and tests.
 
-Token TTLs and Session Policy are configured through nested Auth Live Config:
+Token TTLs, Session Policy, and encrypted OAuth feature keys are configured through nested Auth Live Config:
 
 ```typescript
+import { Redacted } from "effect";
+
 const AuthServicesLive = AuthLive({
   session: { ttl: "7 days", updateAge: "1 day" },
   verification: { emailVerificationTtl: "24 hours", passwordResetTtl: "15 minutes" },
+  encryptionKey: Redacted.make(process.env.AUTH_ENCRYPTION_KEY ?? ""),
+  oauthState: { ttl: "10 minutes" },
 }).pipe(
   Layer.provide(Layer.mergeAll(AppAuthStorage, AppAuthEmail, AppRateLimiter)),
 );
 ```
 
-Session Policy controls how long issued/refreshed Sessions remain valid and how old a Session must be before lookup rotates its Session Token. Defaults remain 7 days for `session.ttl` and 1 day for `session.updateAge`.
+Session Policy controls how long issued/refreshed Sessions remain valid and how old a Session must be before lookup rotates its Session Token. Defaults remain 7 days for `session.ttl` and 1 day for `session.updateAge`. OAuth State defaults to 10 minutes. Encrypted OAuth features require a redacted base64url-encoded 32-byte `encryptionKey` or feature-specific override.
 
 Programmatic Session Management verbs are available on `Auth`:
 
@@ -116,6 +122,65 @@ yield* auth.deleteUser({ sessionToken, password: "current password" });
 `updateUser` accepts `name` and `image` only; email changes are intentionally out of scope. `listAccounts` returns linked Accounts for the current User without password hashes or provider tokens. Email/password sign-up creates the first Credential Account automatically, and password hashes live on Credential Accounts rather than the User.
 `deleteUser` requires the current password for the current Credential Account, is rate-limited, deletes the User and dependent auth records, and returns no deleted user payload.
 
+## OAuth Authorization Start
+
+OAuth start APIs live under `effect-auth/oauth`. `OAuthProviders.layer(...)` validates provider IDs, scopes, PKCE mode, token auth method, and managed authorization parameters. `OAuth.layer` creates authorization URLs and stores short-lived OAuth State rows with hashed public handles and encrypted PKCE verifier/OIDC nonce secrets.
+
+```typescript
+import { Effect, Layer, Redacted } from "effect";
+import { AuthLiveConfig } from "effect-auth";
+import { OAuth, OAuthProviders } from "effect-auth/oauth";
+import type { AuthStorage } from "effect-auth/storage";
+import type { HttpClient } from "effect/unstable/http/HttpClient";
+
+declare const AppAuthStorage: Layer.Layer<AuthStorage>;
+declare const AppHttpClient: Layer.Layer<HttpClient>;
+
+const ProvidersLive = OAuthProviders.layer({
+  providers: [
+    {
+      id: "github",
+      clientId: process.env.GITHUB_CLIENT_ID ?? "",
+      clientSecret: Redacted.make(process.env.GITHUB_CLIENT_SECRET ?? ""),
+      defaultScopes: ["read:user", "user:email"],
+      endpoints: {
+        authorizationUrl: new URL("https://github.com/login/oauth/authorize"),
+        tokenUrl: new URL("https://github.com/login/oauth/access_token"),
+      },
+      mapProfile: ({ userInfo }) =>
+        Effect.succeed({
+          providerAccountId: String(userInfo?.id),
+          email: String(userInfo?.email),
+          emailVerified: false,
+          name: String(userInfo?.name ?? "GitHub User"),
+          image: null,
+        }),
+    },
+  ],
+}).pipe(Layer.provide(AppHttpClient));
+
+const OAuthLive = OAuth.layer.pipe(
+  Layer.provideMerge(
+    Layer.mergeAll(
+      AuthLiveConfig.layer({ encryptionKey: Redacted.make(process.env.AUTH_ENCRYPTION_KEY ?? "") }),
+      AppAuthStorage,
+      ProvidersLive,
+    ),
+  ),
+);
+
+const program = Effect.gen(function* () {
+  const oauth = yield* OAuth;
+  return yield* oauth.startSignIn({
+    providerId: "github",
+    redirectUri: new URL("https://app.example.com/api/auth/oauth/github/callback"),
+    scopes: ["repo"],
+  });
+}).pipe(Effect.provide(OAuthLive));
+```
+
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. OAuth callback completion, provider token storage, and mounted OAuth HTTP routes are separate follow-up slices.
+
 ## Drizzle Postgres Storage
 
 ```typescript
@@ -143,7 +208,7 @@ export const AppLive = AuthLive().pipe(
 );
 ```
 
-`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, and `Verifications`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.
+`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, `Verifications`, and `OAuthStates`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, OAuth State consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.
 
 Generate the Drizzle schema TypeScript file once, use its `authSchema` for runtime, and let Drizzle Kit own SQL migrations:
 
@@ -175,7 +240,11 @@ export const Verifications = pgTable("auth_verifications", {
   // ...
 });
 
-export const authSchema = { Users, Accounts, Sessions, Verifications };
+export const OAuthStates = pgTable("auth_oauth_states", {
+  // hashed state handle, provider/flow binding, encrypted PKCE/OIDC secrets, expiry
+});
+
+export const authSchema = { Users, Accounts, Sessions, Verifications, OAuthStates };
 ```
 
 ## HTTP Usage
@@ -252,7 +321,7 @@ Identity Core changes the `AuthStorage` contract before 1.0: storage adapters sh
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication. OAuth, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication plus the first OAuth authorization-start/state slice. OAuth callback completion, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 

@@ -1,5 +1,6 @@
 import { Context, Effect, Schema } from "effect";
 import type { NormalizedEmail } from "../domain/index.js";
+import type { ConsumeOAuthState, StoreOAuthState, StoredOAuthState } from "../oauth/index.js";
 import type { PasswordHash } from "../password/index.js";
 import type { TokenHash } from "../token/index.js";
 
@@ -237,6 +238,12 @@ export class AuthStorage extends Context.Service<
       input: ChangePasswordSession,
     ) => Effect.Effect<StoredSession, AuthStorageFailure>;
     readonly deleteUser: (input: DeleteUserStorageInput) => Effect.Effect<void, AuthStorageFailure>;
+    readonly storeOAuthState: (
+      input: StoreOAuthState,
+    ) => Effect.Effect<StoredOAuthState, AuthStorageFailure>;
+    readonly consumeOAuthState: (
+      input: ConsumeOAuthState,
+    ) => Effect.Effect<StoredOAuthState, AuthStorageFailure>;
   }
 >()("effect-auth/AuthStorage") {}
 export type AuthStorageShape = typeof AuthStorage.Service;

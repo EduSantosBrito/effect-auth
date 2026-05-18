@@ -1,4 +1,5 @@
 import { Clock, Effect, Layer, Match, Redacted } from "effect";
+import type { OAuthStateHash, StoredOAuthState } from "../oauth/index.js";
 import type { TokenHash } from "../token/index.js";
 import {
   AuthStorage,
@@ -26,6 +27,7 @@ export interface DevMemoryStorageState {
   readonly accountsByEmail: Map<string, CredentialAuthAccount>;
   readonly tokensByHash: Map<string, TokenRecord>;
   readonly sessionsByHash: Map<string, StoredSession>;
+  readonly oauthStatesByHash: Map<string, StoredOAuthState>;
 }
 
 export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
@@ -33,11 +35,13 @@ export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
   accountsByEmail: new Map(),
   tokensByHash: new Map(),
   sessionsByHash: new Map(),
+  oauthStatesByHash: new Map(),
 });
 
 let nextId = 0;
 const id = (prefix: string) => `${prefix}_${++nextId}`;
 const tokenKey = (hash: TokenHash) => Redacted.value(hash);
+const oauthStateKey = (hash: OAuthStateHash) => Redacted.value(hash);
 
 const isStoredSessionRecord = (session: StoredSession | undefined): session is StoredSession =>
   session !== undefined &&
@@ -222,6 +226,9 @@ const deleteUser = (
     for (const [key, session] of state.sessionsByHash) {
       if (session.userId === userId) state.sessionsByHash.delete(key);
     }
+    for (const [key, oauthState] of state.oauthStatesByHash) {
+      if (oauthState.linkUserId === userId) state.oauthStatesByHash.delete(key);
+    }
     return Effect.void;
   });
 
@@ -377,6 +384,48 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       ),
     ),
   deleteUser: (input) => deleteUser(state, input),
+  storeOAuthState: (input) =>
+    Effect.suspend(() => {
+      const key = oauthStateKey(input.stateHash);
+      if (state.oauthStatesByHash.has(key)) {
+        return Effect.fail(new AuthStorageFailure({ reason: "Conflict" }));
+      }
+      const stored: StoredOAuthState = {
+        id: id("ost"),
+        stateHash: input.stateHash,
+        providerId: input.providerId,
+        flow: input.flow,
+        redirectUri: input.redirectUri,
+        scopes: input.scopes,
+        allowSignUp: input.allowSignUp,
+        ...(input.linkUserId === undefined ? {} : { linkUserId: input.linkUserId }),
+        ...(input.encryptedCodeVerifier === undefined
+          ? {}
+          : { encryptedCodeVerifier: input.encryptedCodeVerifier }),
+        ...(input.encryptedNonce === undefined ? {} : { encryptedNonce: input.encryptedNonce }),
+        createdAt: input.now,
+        expiresAt: input.expiresAt,
+      };
+      state.oauthStatesByHash.set(key, stored);
+      return Effect.succeed(stored);
+    }),
+  consumeOAuthState: ({ stateHash, providerId, flow, now }) =>
+    Effect.suspend(() => {
+      const key = oauthStateKey(stateHash);
+      const stored = state.oauthStatesByHash.get(key);
+      if (stored === undefined || stored.providerId !== providerId || stored.flow !== flow) {
+        return Effect.fail(new AuthStorageFailure({ reason: "NotFound" }));
+      }
+      if (stored.consumedAt !== undefined) {
+        return Effect.fail(new AuthStorageFailure({ reason: "TokenConsumed" }));
+      }
+      if (stored.expiresAt <= now) {
+        return Effect.fail(new AuthStorageFailure({ reason: "TokenExpired" }));
+      }
+      const consumed = { ...stored, consumedAt: now };
+      state.oauthStatesByHash.set(key, consumed);
+      return Effect.succeed(consumed);
+    }),
 });
 
 export const DevMemoryAuthStorage = (state?: DevMemoryStorageState) =>

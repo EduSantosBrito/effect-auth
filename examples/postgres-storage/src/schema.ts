@@ -31,10 +31,7 @@ export const Accounts = pgTable(
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },
   (table) => [
-    uniqueIndex("auth_accounts_provider_account_unique").on(
-      table.providerId,
-      table.accountId,
-    ),
+    uniqueIndex("auth_accounts_provider_account_unique").on(table.providerId, table.accountId),
     index("auth_accounts_user_id_idx").on(table.userId),
   ],
 );
@@ -74,10 +71,32 @@ export const Verifications = pgTable(
   },
   (table) => [
     uniqueIndex("auth_verifications_identifier_unique").on(table.identifier),
-    index("auth_verifications_value_purpose_idx").on(
-      table.value,
-      table.purpose,
-    ),
+    index("auth_verifications_value_purpose_idx").on(table.value, table.purpose),
+  ],
+);
+
+export const OAuthStates = pgTable(
+  "auth_oauth_states",
+  {
+    id: text("id").primaryKey(),
+    stateHash: text("state_hash").notNull(),
+    providerId: text("provider_id").notNull(),
+    flow: text("flow").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    scopes: text("scopes").array().notNull(),
+    allowSignUp: boolean("allow_sign_up").notNull(),
+    linkUserId: text("link_user_id").references(() => Users.id, { onDelete: "cascade" }),
+    encryptedCodeVerifier: text("encrypted_code_verifier"),
+    encryptedNonce: text("encrypted_nonce"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex("auth_oauth_states_state_hash_unique").on(table.stateHash),
+    index("auth_oauth_states_provider_flow_idx").on(table.providerId, table.flow),
+    index("auth_oauth_states_expires_at_idx").on(table.expiresAt),
+    index("auth_oauth_states_link_user_id_idx").on(table.linkUserId),
   ],
 );
 
@@ -86,4 +105,5 @@ export const authSchema = {
   Accounts,
   Sessions,
   Verifications,
+  OAuthStates,
 };

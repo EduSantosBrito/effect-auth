@@ -46,11 +46,13 @@ it.effect("DrizzlePg schema returns plural plain Drizzle tables with prefix nami
       "Accounts",
       "Sessions",
       "Verifications",
+      "OAuthStates",
     ]);
     assert.strictEqual(getTableName(defaultSchema.Users), "auth_users");
     assert.strictEqual(getTableName(defaultSchema.Accounts), "auth_accounts");
     assert.strictEqual(getTableName(defaultSchema.Sessions), "auth_sessions");
     assert.strictEqual(getTableName(defaultSchema.Verifications), "auth_verifications");
+    assert.strictEqual(getTableName(defaultSchema.OAuthStates), "auth_oauth_states");
     assert.strictEqual(getTableName(customSchema.Users), "app_auth_users");
   }),
 );
@@ -65,6 +67,7 @@ it.effect("generates Drizzle schema file with top-level table exports", () =>
     assert.equal(generated.includes("export const Accounts = pgTable"), true);
     assert.equal(generated.includes("export const Sessions = pgTable"), true);
     assert.equal(generated.includes("export const Verifications = pgTable"), true);
+    assert.equal(generated.includes("export const OAuthStates = pgTable"), true);
     assert.equal(generated.includes("export const authSchema ="), true);
   }),
 );

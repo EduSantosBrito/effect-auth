@@ -25,6 +25,7 @@ const live = (url: string) => {
 const setupSchema = Effect.fn("setupSchema")(function* () {
   const sql = yield* SqlClient.SqlClient;
   yield* sql.unsafe(`
+    DROP TABLE IF EXISTS auth_oauth_states;
     DROP TABLE IF EXISTS auth_verifications;
     DROP TABLE IF EXISTS auth_sessions;
     DROP TABLE IF EXISTS auth_accounts;
@@ -73,6 +74,24 @@ const setupSchema = Effect.fn("setupSchema")(function* () {
       updated_at timestamptz NOT NULL
     );
     CREATE INDEX auth_verifications_value_purpose_idx ON auth_verifications(value, purpose);
+    CREATE TABLE auth_oauth_states (
+      id text PRIMARY KEY,
+      state_hash text NOT NULL UNIQUE,
+      provider_id text NOT NULL,
+      flow text NOT NULL,
+      redirect_uri text NOT NULL,
+      scopes text[] NOT NULL,
+      allow_sign_up boolean NOT NULL,
+      link_user_id text REFERENCES auth_users(id) ON DELETE CASCADE,
+      encrypted_code_verifier text,
+      encrypted_nonce text,
+      created_at timestamptz NOT NULL,
+      expires_at timestamptz NOT NULL,
+      consumed_at timestamptz
+    );
+    CREATE INDEX auth_oauth_states_provider_flow_idx ON auth_oauth_states(provider_id, flow);
+    CREATE INDEX auth_oauth_states_expires_at_idx ON auth_oauth_states(expires_at);
+    CREATE INDEX auth_oauth_states_link_user_id_idx ON auth_oauth_states(link_user_id);
   `);
 });
 

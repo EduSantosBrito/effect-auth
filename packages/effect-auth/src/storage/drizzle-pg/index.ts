@@ -4,6 +4,7 @@ import type { SqlError } from "effect/unstable/sql/SqlError";
 import { getTableName } from "drizzle-orm";
 import { boolean, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { NormalizedEmail } from "../../domain/index.js";
+import type { OAuthProviderId, OAuthStateHash, StoredOAuthState } from "../../oauth/index.js";
 import type { PasswordHash } from "../../password/index.js";
 import type { TokenHash } from "../../token/index.js";
 import {
@@ -38,6 +39,7 @@ const prefixedTableNames = (options: SchemaOptions = {}) => {
     Accounts: `${safePrefix}accounts`,
     Sessions: `${safePrefix}sessions`,
     Verifications: `${safePrefix}verifications`,
+    OAuthStates: `${safePrefix}oauth_states`,
   };
 };
 
@@ -46,6 +48,7 @@ const tableNames = (schema: AuthDrizzlePgSchema) => ({
   Accounts: getTableName(schema.Accounts),
   Sessions: getTableName(schema.Sessions),
   Verifications: getTableName(schema.Verifications),
+  OAuthStates: getTableName(schema.OAuthStates),
 });
 
 export const schema = (options: SchemaOptions = {}) => {
@@ -122,7 +125,31 @@ export const schema = (options: SchemaOptions = {}) => {
       index(`${tables.Verifications}_value_purpose_idx`).on(table.value, table.purpose),
     ],
   );
-  return { Users, Accounts, Sessions, Verifications };
+  const OAuthStates = pgTable(
+    tables.OAuthStates,
+    {
+      id: text("id").primaryKey(),
+      stateHash: text("state_hash").notNull(),
+      providerId: text("provider_id").notNull(),
+      flow: text("flow").notNull(),
+      redirectUri: text("redirect_uri").notNull(),
+      scopes: text("scopes").array().notNull(),
+      allowSignUp: boolean("allow_sign_up").notNull(),
+      linkUserId: text("link_user_id").references(() => Users.id, { onDelete: "cascade" }),
+      encryptedCodeVerifier: text("encrypted_code_verifier"),
+      encryptedNonce: text("encrypted_nonce"),
+      createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+      expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+      consumedAt: timestamp("consumed_at", { withTimezone: true }),
+    },
+    (table) => [
+      uniqueIndex(`${tables.OAuthStates}_state_hash_unique`).on(table.stateHash),
+      index(`${tables.OAuthStates}_provider_flow_idx`).on(table.providerId, table.flow),
+      index(`${tables.OAuthStates}_expires_at_idx`).on(table.expiresAt),
+      index(`${tables.OAuthStates}_link_user_id_idx`).on(table.linkUserId),
+    ],
+  );
+  return { Users, Accounts, Sessions, Verifications, OAuthStates };
 };
 
 type UserRow = {
@@ -158,6 +185,22 @@ type SessionRow = {
   readonly userAgent: string | null;
 };
 
+type OAuthStateRow = {
+  readonly id: string;
+  readonly stateHash: string;
+  readonly providerId: OAuthProviderId;
+  readonly flow: "SignIn" | "Link";
+  readonly redirectUri: string;
+  readonly scopes: ReadonlyArray<string>;
+  readonly allowSignUp: boolean;
+  readonly linkUserId: string | null;
+  readonly encryptedCodeVerifier: string | null;
+  readonly encryptedNonce: string | null;
+  readonly createdAt: number;
+  readonly expiresAt: number;
+  readonly consumedAt: number | null;
+};
+
 type CredentialJoinRow = {
   readonly userId: string;
   readonly userEmail: string;
@@ -187,6 +230,7 @@ type SessionJoinRow = SessionRow & {
 };
 
 const tokenKey = (hash: TokenHash) => Redacted.value(hash);
+const oauthStateKey = (hash: OAuthStateHash) => Redacted.value(hash);
 const passwordHash = (hash: PasswordHash) => Redacted.value(hash);
 const millis = (column: string) => `(extract(epoch from ${column}) * 1000)::double precision`;
 const notFound = new AuthStorageFailure({ reason: "NotFound" });
@@ -223,6 +267,31 @@ const verificationTokenFailure = Effect.fn("DrizzlePg.verificationTokenFailure")
      WHERE identifier = $1 AND purpose = $2
      LIMIT 1`,
       [tokenKey(tokenHash), purpose],
+    )
+    .pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
+  if (row.consumedAt !== null) return yield* new AuthStorageFailure({ reason: "TokenConsumed" });
+  if (row.expiresAt <= now) return yield* new AuthStorageFailure({ reason: "TokenExpired" });
+  return yield* notFound;
+});
+
+const oauthStateFailure = Effect.fn("DrizzlePg.oauthStateFailure")(function* (
+  sql: SqlClient.SqlClient,
+  tables: ReturnType<typeof prefixedTableNames>,
+  stateHash: OAuthStateHash,
+  providerId: OAuthProviderId,
+  flow: "SignIn" | "Link",
+  now: number,
+) {
+  const row = yield* sql
+    .unsafe<{
+      readonly consumedAt: number | null;
+      readonly expiresAt: number;
+    }>(
+      `SELECT ${millis("consumed_at")} AS "consumedAt", ${millis("expires_at")} AS "expiresAt"
+     FROM ${tables.OAuthStates}
+     WHERE state_hash = $1 AND provider_id = $2 AND flow = $3
+     LIMIT 1`,
+      [oauthStateKey(stateHash), providerId, flow],
     )
     .pipe(Effect.flatMap(one), Effect.mapError(storageFailure));
   if (row.consumedAt !== null) return yield* new AuthStorageFailure({ reason: "TokenConsumed" });
@@ -320,6 +389,24 @@ const toSession = (row: SessionRow): StoredSession => ({
   ...(row.userAgent === null ? {} : { userAgent: row.userAgent }),
 });
 
+const toOAuthState = (row: OAuthStateRow): StoredOAuthState => ({
+  id: row.id,
+  stateHash: Redacted.make(row.stateHash),
+  providerId: row.providerId,
+  flow: row.flow,
+  redirectUri: new URL(row.redirectUri),
+  scopes: row.scopes,
+  allowSignUp: row.allowSignUp,
+  ...(row.linkUserId === null ? {} : { linkUserId: row.linkUserId }),
+  ...(row.encryptedCodeVerifier === null
+    ? {}
+    : { encryptedCodeVerifier: row.encryptedCodeVerifier }),
+  ...(row.encryptedNonce === null ? {} : { encryptedNonce: row.encryptedNonce }),
+  createdAt: row.createdAt,
+  expiresAt: row.expiresAt,
+  ...(row.consumedAt === null ? {} : { consumedAt: row.consumedAt }),
+});
+
 const userSelect = (alias: string) => `
   ${alias}.id AS "id",
   ${alias}.email AS "email",
@@ -351,6 +438,22 @@ const sessionSelect = (alias: string) => `
   ${millis(`${alias}.revoked_at`)} AS "revokedAt",
   ${alias}.ip_address AS "ipAddress",
   ${alias}.user_agent AS "userAgent"
+`;
+
+const oauthStateSelect = (alias: string) => `
+  ${alias}.id AS "id",
+  ${alias}.state_hash AS "stateHash",
+  ${alias}.provider_id AS "providerId",
+  ${alias}.flow AS "flow",
+  ${alias}.redirect_uri AS "redirectUri",
+  ${alias}.scopes AS "scopes",
+  ${alias}.allow_sign_up AS "allowSignUp",
+  ${alias}.link_user_id AS "linkUserId",
+  ${alias}.encrypted_code_verifier AS "encryptedCodeVerifier",
+  ${alias}.encrypted_nonce AS "encryptedNonce",
+  ${millis(`${alias}.created_at`)} AS "createdAt",
+  ${millis(`${alias}.expires_at`)} AS "expiresAt",
+  ${millis(`${alias}.consumed_at`)} AS "consumedAt"
 `;
 
 const credentialJoinSelect = `
@@ -753,6 +856,62 @@ const make: <S extends AuthDrizzlePgSchema>(
                   ),
                   Effect.flatMap(one),
                   Effect.asVoid,
+                ),
+            )
+            .pipe(Effect.mapError(storageFailure)),
+        storeOAuthState: (input) =>
+          makeId("ost").pipe(
+            Effect.flatMap((id) =>
+              sql.unsafe<OAuthStateRow>(
+                `INSERT INTO ${tables.OAuthStates}
+                 (id, state_hash, provider_id, flow, redirect_uri, scopes, allow_sign_up, link_user_id, encrypted_code_verifier, encrypted_nonce, created_at, expires_at, consumed_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, to_timestamp($11 / 1000.0), to_timestamp($12 / 1000.0), NULL)
+               RETURNING ${oauthStateSelect(tables.OAuthStates)}`,
+                [
+                  id,
+                  oauthStateKey(input.stateHash),
+                  input.providerId,
+                  input.flow,
+                  input.redirectUri.href,
+                  input.scopes,
+                  input.allowSignUp,
+                  input.linkUserId ?? null,
+                  input.encryptedCodeVerifier ?? null,
+                  input.encryptedNonce ?? null,
+                  input.now,
+                  input.expiresAt,
+                ],
+              ),
+            ),
+            Effect.flatMap(one),
+            Effect.map(toOAuthState),
+            Effect.mapError(storageFailure),
+          ),
+        consumeOAuthState: (input) =>
+          sql
+            .withTransaction(
+              sql
+                .unsafe<OAuthStateRow>(
+                  `UPDATE ${tables.OAuthStates}
+             SET consumed_at = to_timestamp($4 / 1000.0)
+             WHERE state_hash = $1 AND provider_id = $2 AND flow = $3 AND consumed_at IS NULL AND expires_at > to_timestamp($4 / 1000.0)
+             RETURNING ${oauthStateSelect(tables.OAuthStates)}`,
+                  [oauthStateKey(input.stateHash), input.providerId, input.flow, input.now],
+                )
+                .pipe(
+                  Effect.flatMap((rows) =>
+                    rows[0] === undefined
+                      ? oauthStateFailure(
+                          sql,
+                          tables,
+                          input.stateHash,
+                          input.providerId,
+                          input.flow,
+                          input.now,
+                        )
+                      : Effect.succeed(rows[0]),
+                  ),
+                  Effect.map(toOAuthState),
                 ),
             )
             .pipe(Effect.mapError(storageFailure)),
