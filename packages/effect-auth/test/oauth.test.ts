@@ -237,6 +237,23 @@ const latestProviderAccount = Effect.fn("oauth.test.latestProviderAccount")(func
 
 const s256 = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("base64url");
 
+const createCredentialUser = Effect.fn("oauth.test.createCredentialUser")(function* (input: {
+  readonly email: string;
+  readonly name: string;
+}) {
+  const storage = yield* AuthStorage;
+  const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+  const email = yield* decodeEmail(input.email);
+  const passwordHash = yield* decodePasswordHash("hash:oauth-link");
+  return yield* storage.createUserWithCredentialAccount({
+    email,
+    name: input.name,
+    image: null,
+    passwordHash,
+    now,
+  });
+});
+
 const createCredentialSession = Effect.fn("oauth.test.createCredentialSession")(function* (input: {
   readonly email: string;
   readonly name: string;
@@ -244,15 +261,7 @@ const createCredentialSession = Effect.fn("oauth.test.createCredentialSession")(
   const storage = yield* AuthStorage;
   const token = yield* AuthToken;
   const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
-  const email = yield* decodeEmail(input.email);
-  const passwordHash = yield* decodePasswordHash("hash:oauth-link");
-  const user = yield* storage.createUserWithCredentialAccount({
-    email,
-    name: input.name,
-    image: null,
-    passwordHash,
-    now,
-  });
+  const user = yield* createCredentialUser(input);
   const sessionToken = yield* token.makeSessionToken();
   const session = yield* storage.createSession({
     userId: user.id,
@@ -833,6 +842,138 @@ it.effect("signs in returning OAuth provider accounts and preserves omitted toke
     ),
   );
 });
+
+it.effect(
+  "automatically links same-email OAuth sign-in only when provider email is trusted",
+  () => {
+    const verifiedState = makeDevMemoryStorageState();
+    const trustedState = makeDevMemoryStorageState();
+    const untrustedState = makeDevMemoryStorageState();
+    const unverifiedUserInfo = { ...defaultUserInfo, email_verified: false };
+    const trustedProvider: OAuthProviderInput = {
+      ...callbackProvider,
+      id: "trusted",
+      trustedEmail: true,
+    };
+    const untrustedProvider: OAuthProviderInput = {
+      ...callbackProvider,
+      id: "untrusted",
+      trustedEmail: false,
+    };
+
+    return Effect.gen(function* () {
+      const verified = yield* Effect.gen(function* () {
+        const oauth = yield* OAuth;
+        const storage = yield* AuthStorage;
+        const user = yield* createCredentialUser({
+          email: "oauth@example.com",
+          name: "Existing User",
+        });
+        const started = yield* oauth.startSignIn({
+          providerId: "github",
+          redirectUri: new URL("https://app.example.com/auth/callback/github"),
+        });
+        const result = yield* oauth.completeCallback({
+          providerId: "github",
+          state: started.state,
+          code: "verified-code",
+          callbackMethod: "GET",
+        });
+        if (result.flow !== "SignIn") {
+          return yield* new MissingOAuthTestFixture({
+            message: "expected verified same-email sign-in result",
+          });
+        }
+        assert.strictEqual(result.isNewUser, false);
+        assert.strictEqual(result.user.id, user.id);
+        assert.strictEqual(result.session.userId, user.id);
+        assert.strictEqual(verifiedState.users.size, 1);
+        assert.strictEqual(verifiedState.providerAccountsByKey.size, 1);
+        const accounts = yield* storage.listUserAccounts({ userId: user.id });
+        assert.strictEqual(accounts.length, 2);
+        return result;
+      }).pipe(
+        Effect.provide(
+          makeOAuthLayer(verifiedState, {
+            providers: [callbackProvider],
+            httpClientLive: FakeOAuthHttpClientLive,
+          }),
+        ),
+      );
+      assert.strictEqual(verified.isNewUser, false);
+
+      const trusted = yield* Effect.gen(function* () {
+        const oauth = yield* OAuth;
+        const user = yield* createCredentialUser({
+          email: "oauth@example.com",
+          name: "Trusted User",
+        });
+        const started = yield* oauth.startSignIn({
+          providerId: "trusted",
+          redirectUri: new URL("https://app.example.com/auth/callback/trusted"),
+        });
+        const result = yield* oauth.completeCallback({
+          providerId: "trusted",
+          state: started.state,
+          code: "trusted-code",
+          callbackMethod: "GET",
+        });
+        if (result.flow !== "SignIn") {
+          return yield* new MissingOAuthTestFixture({
+            message: "expected trusted same-email sign-in result",
+          });
+        }
+        assert.strictEqual(result.isNewUser, false);
+        assert.strictEqual(result.user.id, user.id);
+        assert.strictEqual(trustedState.users.size, 1);
+        assert.strictEqual(trustedState.providerAccountsByKey.size, 1);
+        return result;
+      }).pipe(
+        Effect.provide(
+          makeOAuthLayer(trustedState, {
+            providers: [trustedProvider],
+            httpClientLive: makeFakeOAuthHttpClientLive({ userInfo: unverifiedUserInfo }),
+          }),
+        ),
+      );
+      assert.strictEqual(trusted.isNewUser, false);
+
+      const untrusted = yield* Effect.gen(function* () {
+        const oauth = yield* OAuth;
+        yield* createCredentialUser({
+          email: "oauth@example.com",
+          name: "Untrusted User",
+        });
+        const started = yield* oauth.startSignIn({
+          providerId: "untrusted",
+          redirectUri: new URL("https://app.example.com/auth/callback/untrusted"),
+        });
+        return yield* Effect.flip(
+          oauth.completeCallback({
+            providerId: "untrusted",
+            state: started.state,
+            code: "untrusted-code",
+            callbackMethod: "GET",
+          }),
+        );
+      }).pipe(
+        Effect.provide(
+          makeOAuthLayer(untrustedState, {
+            providers: [untrustedProvider],
+            httpClientLive: makeFakeOAuthHttpClientLive({ userInfo: unverifiedUserInfo }),
+          }),
+        ),
+      );
+      assert.deepStrictEqual(
+        untrusted,
+        new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }),
+      );
+      assert.strictEqual(untrustedState.users.size, 1);
+      assert.strictEqual(untrustedState.providerAccountsByKey.size, 0);
+      assert.strictEqual(untrustedState.sessionsByHash.size, 0);
+    });
+  },
+);
 
 it.effect("completes manual OAuth link callbacks without issuing new sessions", () => {
   const storageState = makeDevMemoryStorageState();
