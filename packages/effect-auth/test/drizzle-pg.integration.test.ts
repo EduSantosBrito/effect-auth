@@ -410,7 +410,7 @@ const storageInvariants = Effect.gen(function* () {
       allowImplicitSignUp: true,
       allowAutomaticSameEmailLinking: false,
       now,
-      sessionTokenHash: tokenA,
+      sessionTokenHash: tokenB,
       sessionExpiresAt: activeUntil,
     }),
   );
