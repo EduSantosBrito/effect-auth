@@ -28,8 +28,9 @@ import {
 } from "../src/domain/index";
 import { AuthEmail, AuthEmailFailure } from "../src/email/index";
 import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
+import { AuthHttp as ConfiguredAuthHttp } from "../src/http/index";
 import {
-  AuthHttp,
+  AuthHttp as LegacyAuthHttp,
   AuthApiEndpoints,
   AuthHttpConfig,
   AuthHttpErrorMapper,
@@ -38,8 +39,6 @@ import {
   CurrentAuthSession,
   OAuthHttp,
   TrustedOrigins,
-} from "../src/http/index";
-import {
   AuthHttpAdapter,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
@@ -103,6 +102,11 @@ const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
 const jsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+
+const AuthHttp = {
+  ...LegacyAuthHttp,
+  configure: ConfiguredAuthHttp.configure,
+};
 
 const parseTestVerificationToken = (input: unknown) =>
   decodeVerificationToken(Redacted.isRedacted(input) ? Redacted.value(input) : input).pipe(
