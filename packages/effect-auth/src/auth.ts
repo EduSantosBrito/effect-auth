@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Predicate, Redacted, Schema } from "effect";
+import { Context, Duration, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -13,11 +13,7 @@ import {
   type PasswordHashFailure,
   type PasswordPolicyFailure,
 } from "./password/index.js";
-import {
-  PermissiveDevRateLimiter,
-  RateLimiter,
-  type RateLimitExceeded,
-} from "./rate-limit/index.js";
+import { RateLimiter, type RateLimitExceeded } from "./rate-limit/index.js";
 import { AuthStorage, type AuthStorageFailure } from "./storage/index.js";
 import {
   AuthTokenLive,
@@ -35,7 +31,7 @@ import {
   SessionPolicy,
   SessionWorkflows,
   SessionWorkflowsLive,
-  VerificationTokenConfigLive,
+  VerificationTokenConfig,
   type ChangePasswordInput as ChangePasswordCommand,
   type ChangePasswordResult,
   type CurrentSessionInput as CurrentSessionCommand,
@@ -57,6 +53,140 @@ import {
   type VerifyEmailInput as VerifyEmailCommand,
   type VerifyEmailResult,
 } from "./workflows/index.js";
+
+export interface AuthLiveConfigInput {
+  readonly session?: {
+    readonly ttl?: Duration.Input;
+    readonly updateAge?: Duration.Input;
+  };
+  readonly verification?: {
+    readonly emailVerificationTtl?: Duration.Input;
+    readonly passwordResetTtl?: Duration.Input;
+  };
+  readonly encryptionKey?: Redacted.Redacted<string>;
+  readonly encryptionKeyId?: string;
+  readonly providerTokens?: {
+    readonly encryptionKey?: Redacted.Redacted<string>;
+    readonly encryptionKeyId?: string;
+  };
+  readonly oauthState?: {
+    readonly ttl?: Duration.Input;
+    readonly encryptionKey?: Redacted.Redacted<string>;
+    readonly encryptionKeyId?: string;
+  };
+}
+
+export interface AuthLiveConfigShape {
+  readonly session: {
+    readonly ttlMillis: number;
+    readonly updateAgeMillis: number;
+  };
+  readonly verification: {
+    readonly emailVerificationTtlMillis: number;
+    readonly passwordResetTtlMillis: number;
+  };
+  readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+  readonly encryptionKeyId: string;
+  readonly providerTokens: {
+    readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+    readonly encryptionKeyId: string;
+  };
+  readonly oauthState: {
+    readonly ttlMillis: number;
+    readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+    readonly encryptionKeyId: string;
+  };
+}
+
+const optionalRedacted = <A>(
+  value: Redacted.Redacted<A> | undefined,
+): Option.Option<Redacted.Redacted<A>> =>
+  value === undefined ? Option.none() : Option.some(value);
+
+const positiveFiniteDurationMillis = (
+  input: Duration.Input,
+  field: string,
+): Effect.Effect<number, BoundaryParseError> => {
+  const millis = Duration.toMillis(input);
+  return Number.isFinite(millis) && millis > 0
+    ? Effect.succeed(millis)
+    : Effect.fail(new BoundaryParseError({ field, reason: "Expected positive finite duration" }));
+};
+
+const parseAuthLiveConfig = Effect.fn("AuthLiveConfig.parse")(function* (
+  input: AuthLiveConfigInput = {},
+) {
+  const sessionTtlMillis = yield* positiveFiniteDurationMillis(
+    input.session?.ttl ?? Duration.days(7),
+    "session.ttl",
+  );
+  const sessionUpdateAgeMillis = yield* positiveFiniteDurationMillis(
+    input.session?.updateAge ?? Duration.days(1),
+    "session.updateAge",
+  );
+  const emailVerificationTtlMillis = yield* positiveFiniteDurationMillis(
+    input.verification?.emailVerificationTtl ?? Duration.days(1),
+    "verification.emailVerificationTtl",
+  );
+  const passwordResetTtlMillis = yield* positiveFiniteDurationMillis(
+    input.verification?.passwordResetTtl ?? Duration.minutes(15),
+    "verification.passwordResetTtl",
+  );
+  const oauthStateTtlMillis = yield* positiveFiniteDurationMillis(
+    input.oauthState?.ttl ?? Duration.minutes(10),
+    "oauthState.ttl",
+  );
+  const encryptionKeyId = input.encryptionKeyId ?? "default";
+  return {
+    session: {
+      ttlMillis: sessionTtlMillis,
+      updateAgeMillis: sessionUpdateAgeMillis,
+    },
+    verification: {
+      emailVerificationTtlMillis,
+      passwordResetTtlMillis,
+    },
+    encryptionKey: optionalRedacted(input.encryptionKey),
+    encryptionKeyId,
+    providerTokens: {
+      encryptionKey: optionalRedacted(input.providerTokens?.encryptionKey),
+      encryptionKeyId: input.providerTokens?.encryptionKeyId ?? encryptionKeyId,
+    },
+    oauthState: {
+      ttlMillis: oauthStateTtlMillis,
+      encryptionKey: optionalRedacted(input.oauthState?.encryptionKey),
+      encryptionKeyId: input.oauthState?.encryptionKeyId ?? encryptionKeyId,
+    },
+  } satisfies AuthLiveConfigShape;
+});
+
+export class AuthLiveConfig extends Context.Service<
+  AuthLiveConfig,
+  {
+    readonly session: {
+      readonly ttlMillis: number;
+      readonly updateAgeMillis: number;
+    };
+    readonly verification: {
+      readonly emailVerificationTtlMillis: number;
+      readonly passwordResetTtlMillis: number;
+    };
+    readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+    readonly encryptionKeyId: string;
+    readonly providerTokens: {
+      readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+      readonly encryptionKeyId: string;
+    };
+    readonly oauthState: {
+      readonly ttlMillis: number;
+      readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
+      readonly encryptionKeyId: string;
+    };
+  }
+>()("effect-auth/AuthLiveConfig") {
+  static readonly layer = (input?: AuthLiveConfigInput) =>
+    Layer.effect(AuthLiveConfig)(parseAuthLiveConfig(input));
+}
 
 export interface SignUpInput {
   readonly email: unknown;
@@ -497,19 +627,32 @@ const AuthLiveLayer = Layer.effect(Auth)(
   }),
 );
 
-const AuthDefaultsLive = Layer.mergeAll(
+const AuthStaticDefaultsLive = Layer.mergeAll(
   AuthBoundaryLive,
   SecureDefaultPasswordPolicy,
   NativeScryptPasswordHasher,
   AuthTokenLive,
-  VerificationTokenConfigLive(),
-  Layer.succeed(SessionPolicy)({
-    sessionTtlMillis: 7 * 24 * 60 * 60 * 1000,
-    sessionUpdateAgeMillis: 24 * 60 * 60 * 1000,
+);
+
+const SessionPolicyFromAuthLiveConfig = Layer.effect(SessionPolicy)(
+  Effect.gen(function* () {
+    const config = yield* AuthLiveConfig;
+    return {
+      sessionTtlMillis: config.session.ttlMillis,
+      sessionUpdateAgeMillis: config.session.updateAgeMillis,
+    };
   }),
 );
 
-const AuthDevDefaultsLive = Layer.mergeAll(AuthDefaultsLive, PermissiveDevRateLimiter);
+const VerificationTokenConfigFromAuthLiveConfig = Layer.effect(VerificationTokenConfig)(
+  Effect.gen(function* () {
+    const config = yield* AuthLiveConfig;
+    return {
+      emailVerificationTtlMillis: config.verification.emailVerificationTtlMillis,
+      passwordResetTtlMillis: config.verification.passwordResetTtlMillis,
+    };
+  }),
+);
 
 const WorkflowServicesLive = Layer.mergeAll(
   EmailPasswordWorkflowsLive,
@@ -518,16 +661,19 @@ const WorkflowServicesLive = Layer.mergeAll(
   IdentityWorkflowsLive,
 );
 
-const AuthProductionServicesLive = WorkflowServicesLive.pipe(Layer.provideMerge(AuthDefaultsLive));
+const AuthDefaultsFromConfigLive = Layer.mergeAll(
+  AuthStaticDefaultsLive,
+  SessionPolicyFromAuthLiveConfig,
+  VerificationTokenConfigFromAuthLiveConfig,
+);
 
-const AuthDevServicesLive = WorkflowServicesLive.pipe(Layer.provideMerge(AuthDevDefaultsLive));
+const AuthServicesFromConfigLive = WorkflowServicesLive.pipe(
+  Layer.provideMerge(AuthDefaultsFromConfigLive),
+);
 
-export const AuthLive = {
-  production: AuthLiveLayer.pipe(Layer.provide(AuthProductionServicesLive)),
-  dev: AuthLiveLayer.pipe(Layer.provide(AuthDevServicesLive)),
-  default: AuthLiveLayer.pipe(Layer.provide(AuthDevServicesLive)),
-} satisfies {
-  readonly production: Layer.Layer<Auth, never, AuthStorage | AuthEmail | RateLimiter>;
-  readonly dev: Layer.Layer<Auth, never, AuthStorage | AuthEmail>;
-  readonly default: Layer.Layer<Auth, never, AuthStorage | AuthEmail>;
-};
+const AuthLayerFromConfigLive = AuthLiveLayer.pipe(Layer.provide(AuthServicesFromConfigLive));
+
+export const AuthLive = (
+  config?: AuthLiveConfigInput,
+): Layer.Layer<Auth | AuthLiveConfig, BoundaryParseError, AuthStorage | AuthEmail | RateLimiter> =>
+  AuthLayerFromConfigLive.pipe(Layer.provideMerge(AuthLiveConfig.layer(config)));

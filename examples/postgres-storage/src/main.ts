@@ -1,14 +1,21 @@
 import { Console, Effect, Layer, Redacted } from "effect";
 import { Auth, AuthLive } from "effect-auth";
 import { MockAuthEmail, makeMockAuthEmailState } from "effect-auth/email/mock";
+import { BoundedDevRateLimiter } from "effect-auth/rate-limit";
 import { makePostgresLive } from "./database.js";
 
 const defaultDatabaseUrl = "postgres://effect_auth:effect_auth@localhost:5432/effect_auth_example";
 const databaseUrl = process.env.DATABASE_URL ?? defaultDatabaseUrl;
 const emailState = makeMockAuthEmailState();
 
-const AppLive = AuthLive.dev.pipe(
-  Layer.provide(Layer.mergeAll(makePostgresLive(databaseUrl), MockAuthEmail(emailState))),
+const AppLive = AuthLive().pipe(
+  Layer.provide(
+    Layer.mergeAll(
+      makePostgresLive(databaseUrl),
+      MockAuthEmail(emailState),
+      BoundedDevRateLimiter(),
+    ),
+  ),
 );
 
 const email = `postgres-demo-${Date.now()}@example.com`;

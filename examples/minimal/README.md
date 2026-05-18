@@ -20,7 +20,7 @@ No `.env` file is needed.
 
 ## What to read
 
-- `src/main.ts` composes `AuthLive.dev`, `DevMemoryAuthStorage`, and `MockAuthEmail`.
+- `src/main.ts` composes `AuthLive()`, `DevMemoryAuthStorage`, `MockAuthEmail`, and an explicit `BoundedDevRateLimiter`.
 - `src/main.ts` then calls `Auth.signUp`, reads the mock verification email token, verifies the email, signs in, and loads the current session.
 
 For the same flow backed by Drizzle Postgres and Drizzle Kit migrations, see `../postgres-storage`.

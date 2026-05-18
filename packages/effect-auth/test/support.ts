@@ -12,7 +12,7 @@ import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
-import { Auth, AuthLive, type AuthShape } from "../src/auth";
+import { Auth, AuthLive, AuthLiveConfig, type AuthShape } from "../src/auth";
 import {
   AuthBoundary,
   AuthBoundaryLive,
@@ -320,6 +320,7 @@ export {
   AuthHttpErrorMapper,
   AuthHttpToken,
   AuthLive,
+  AuthLiveConfig,
   AuthTestLive,
   AuthSession,
   AuthStorageFailure,
@@ -349,6 +350,7 @@ export {
   PasswordPolicyFailure,
   PasswordRecoveryWorkflows,
   PasswordRecoveryWorkflowsLive,
+  PermissiveDevRateLimiter,
   Predicate,
   RateLimitExceeded,
   RateLimiter,

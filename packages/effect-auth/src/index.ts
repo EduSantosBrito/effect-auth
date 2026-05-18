@@ -1,6 +1,9 @@
 export {
   Auth,
   AuthLive,
+  AuthLiveConfig,
+  type AuthLiveConfigInput,
+  type AuthLiveConfigShape,
   type AuthShape,
   type RevokeUserSessionInput as AuthRevokeUserSessionInput,
   type SessionTokenInput as AuthSessionTokenInput,
