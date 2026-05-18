@@ -90,46 +90,54 @@ import {
   type MockAuthEmailState,
 } from "effect-auth/email/mock";
 import {
-  AuthApi,
-  AuthApiEndpoints,
   AuthHttp,
-  AuthHttpConfig,
-  AuthHttpError,
-  AuthHttpErrorMapper,
-  AuthHttpHandlersLive,
-  AuthHttpToken,
-  AuthSession,
-  CurrentAuthSession,
-  OAuthHttp,
-  SessionCookie,
-  SessionTokenExtractResult,
-  StateChangingRequest,
-  TrustedOriginPolicy,
-  TrustedOrigins,
-  optionalAuth,
-  requireAuth,
-  type AuthHttpConfigInput,
-  type AuthHttpConfigShape,
-  type AuthHttpErrorMapperShape,
-  type AuthHttpErrorResponse,
-  type AuthHttpListAccountsResponse,
-  type AuthHttpListSessionsResponse,
-  type AuthHttpMountOptions,
-  type AuthHttpOAuthRedirectConfigInput,
-  type AuthHttpOAuthRedirectConfigShape,
-  type AuthHttpOkResponse,
-  type AuthHttpOptionalAuthOptions,
-  type AuthHttpRequireAuthOptions,
-  type AuthHttpSession,
-  type AuthHttpSessionResponse,
-  type AuthHttpSignInResponse,
-  type AuthHttpTokenExtractor,
-  type AuthHttpUserResponse,
-  type AuthSessionShape,
-  type OAuthAuthorizationUrlResponse,
-  type OAuthHttpMountOptions,
-  type SessionTokenExtractResult as SessionTokenExtractResultType,
-  type TrustedOriginPolicyShape,
+  AuthHttpAccount,
+  AuthHttpBadRequest,
+  AuthHttpBadRequestSchema,
+  AuthHttpChangePasswordPayload,
+  AuthHttpCompletePasswordResetPayload,
+  AuthHttpConfigError,
+  AuthHttpCredentialMaintenance,
+  AuthHttpCredentialRenderer,
+  AuthHttpCredentialResolver,
+  AuthHttpCredentialResolution,
+  AuthHttpCurrentSessionResponse,
+  AuthHttpDeleteUserPayload,
+  AuthHttpErrors,
+  AuthHttpForbidden,
+  AuthHttpForbiddenSchema,
+  AuthHttpListAccountsResponse,
+  AuthHttpListedSession,
+  AuthHttpListSessionsResponse,
+  AuthHttpOAuthAuthorizationUrlResponse,
+  AuthHttpOAuthStartLinkPayload,
+  AuthHttpOAuthStartSignInPayload,
+  AuthHttpOkResponse,
+  AuthHttpOptionalSessionContext,
+  AuthHttpRateLimited,
+  AuthHttpRateLimitedSchema,
+  AuthHttpRequestPasswordResetPayload,
+  AuthHttpResendVerificationPayload,
+  AuthHttpRevokeSessionPayload,
+  AuthHttpSelectedCredential,
+  AuthHttpSession,
+  AuthHttpSessionContext,
+  AuthHttpSessionResponse,
+  AuthHttpSignInEmailPayload,
+  AuthHttpSignUpEmailPayload,
+  AuthHttpTokenRotation,
+  AuthHttpUnauthorized,
+  AuthHttpUnauthorizedSchema,
+  AuthHttpUpdateUserPayload,
+  AuthHttpUrlPolicy,
+  AuthHttpUser,
+  AuthHttpUserResponse,
+  AuthHttpVerifyEmailPayload,
+  type AuthHttpConfigureInput,
+  type AuthHttpCredentialSource,
+  type AuthHttpRuntimeInput,
+  type ConfiguredAuthHttp,
+  type ConfiguredAuthHttpApi,
 } from "effect-auth/http";
 import {
   AuthEncryptedFeature,
@@ -399,46 +407,54 @@ type PublicApiContract = {
     | typeof makeMockAuthEmailState
     | MockAuthEmailState;
   readonly http:
-    | typeof AuthApi
-    | typeof AuthApiEndpoints
     | typeof AuthHttp
-    | typeof AuthHttpConfig
-    | typeof AuthHttpError
-    | typeof AuthHttpErrorMapper
-    | typeof AuthHttpHandlersLive
-    | typeof AuthHttpToken
-    | typeof AuthSession
-    | typeof CurrentAuthSession
-    | typeof OAuthHttp
-    | typeof SessionCookie
-    | typeof SessionTokenExtractResult
-    | typeof StateChangingRequest
-    | typeof TrustedOriginPolicy
-    | typeof TrustedOrigins
-    | typeof optionalAuth
-    | typeof requireAuth
-    | AuthHttpConfigInput
-    | AuthHttpConfigShape
-    | AuthHttpErrorMapperShape
-    | AuthHttpErrorResponse
-    | AuthHttpListAccountsResponse
-    | AuthHttpListSessionsResponse
-    | AuthHttpMountOptions
-    | AuthHttpOAuthRedirectConfigInput
-    | AuthHttpOAuthRedirectConfigShape
-    | AuthHttpOkResponse
-    | AuthHttpOptionalAuthOptions
-    | AuthHttpRequireAuthOptions
-    | AuthHttpSession
-    | AuthHttpSessionResponse
-    | AuthHttpSignInResponse
-    | AuthHttpTokenExtractor
-    | AuthHttpUserResponse
-    | AuthSessionShape
-    | OAuthAuthorizationUrlResponse
-    | OAuthHttpMountOptions
-    | SessionTokenExtractResultType
-    | TrustedOriginPolicyShape;
+    | typeof AuthHttpAccount
+    | typeof AuthHttpBadRequest
+    | typeof AuthHttpBadRequestSchema
+    | typeof AuthHttpChangePasswordPayload
+    | typeof AuthHttpCompletePasswordResetPayload
+    | typeof AuthHttpConfigError
+    | typeof AuthHttpCredentialMaintenance
+    | typeof AuthHttpCredentialRenderer
+    | typeof AuthHttpCredentialResolver
+    | typeof AuthHttpCredentialResolution
+    | typeof AuthHttpCurrentSessionResponse
+    | typeof AuthHttpDeleteUserPayload
+    | typeof AuthHttpErrors
+    | typeof AuthHttpForbidden
+    | typeof AuthHttpForbiddenSchema
+    | typeof AuthHttpListAccountsResponse
+    | typeof AuthHttpListedSession
+    | typeof AuthHttpListSessionsResponse
+    | typeof AuthHttpOAuthAuthorizationUrlResponse
+    | typeof AuthHttpOAuthStartLinkPayload
+    | typeof AuthHttpOAuthStartSignInPayload
+    | typeof AuthHttpOkResponse
+    | typeof AuthHttpOptionalSessionContext
+    | typeof AuthHttpRateLimited
+    | typeof AuthHttpRateLimitedSchema
+    | typeof AuthHttpRequestPasswordResetPayload
+    | typeof AuthHttpResendVerificationPayload
+    | typeof AuthHttpRevokeSessionPayload
+    | typeof AuthHttpSelectedCredential
+    | typeof AuthHttpSession
+    | typeof AuthHttpSessionContext
+    | typeof AuthHttpSessionResponse
+    | typeof AuthHttpSignInEmailPayload
+    | typeof AuthHttpSignUpEmailPayload
+    | typeof AuthHttpTokenRotation
+    | typeof AuthHttpUnauthorized
+    | typeof AuthHttpUnauthorizedSchema
+    | typeof AuthHttpUpdateUserPayload
+    | typeof AuthHttpUrlPolicy
+    | typeof AuthHttpUser
+    | typeof AuthHttpUserResponse
+    | typeof AuthHttpVerifyEmailPayload
+    | AuthHttpConfigureInput
+    | AuthHttpCredentialSource
+    | AuthHttpRuntimeInput
+    | ConfiguredAuthHttp
+    | ConfiguredAuthHttpApi;
   readonly oauth:
     | typeof AuthEncryptedFeature
     | typeof AuthEncryptionKeyId
