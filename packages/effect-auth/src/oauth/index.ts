@@ -1,10 +1,19 @@
-import { Clock, Config, Context, Effect, Layer, Option, Redacted, Schema } from "effect";
+import { Clock, Config, Context, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
 import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import { AuthLiveConfig } from "../auth.js";
-import { BoundaryParseError, type PublicAuthError } from "../domain/index.js";
-import { AuthStorage, AuthStorageFailure, type AuthUserId } from "../storage/index.js";
+import { BoundaryParseError, normalizeEmail, type PublicAuthError } from "../domain/index.js";
+import {
+  AuthStorage,
+  AuthStorageFailure,
+  type AuthUser,
+  type AuthUserId,
+  type OAuthAccountStorageFailure,
+  type OAuthProviderAccount,
+  type StoredSession,
+} from "../storage/index.js";
 import { AuthTokenLive, SessionToken, type TokenGenerationFailure } from "../token/index.js";
 import { AuthToken } from "../token/index.js";
 
@@ -114,6 +123,161 @@ export class AuthFeatureKeyMaterialService extends Context.Service<
             return { feature, keyId, keyBytes };
           },
         ),
+      };
+    }),
+  );
+}
+
+export const ProviderTokenKind = Schema.Literals(["AccessToken", "RefreshToken", "IdToken"]);
+export type ProviderTokenKind = typeof ProviderTokenKind.Type;
+
+export const ProtectedProviderToken = Schema.String.pipe(Schema.brand("ProtectedProviderToken"));
+export type ProtectedProviderToken = typeof ProtectedProviderToken.Type;
+
+export interface ProtectedProviderTokenSet {
+  readonly accessToken?: ProtectedProviderToken;
+  readonly refreshToken?: ProtectedProviderToken;
+  readonly idToken?: ProtectedProviderToken;
+  readonly tokenType?: string;
+  readonly scope?: string;
+  readonly accessTokenExpiresAt?: number;
+  readonly refreshTokenExpiresAt?: number;
+}
+
+export interface ProviderTokenAad {
+  readonly providerId: OAuthProviderId;
+  readonly providerAccountId: string;
+  readonly kind: ProviderTokenKind;
+}
+
+export interface ProtectProviderTokenInput extends ProviderTokenAad {
+  readonly plaintext: Redacted.Redacted<string>;
+}
+
+export interface UnprotectProviderTokenInput extends ProviderTokenAad {
+  readonly protectedToken: ProtectedProviderToken;
+}
+
+export class ProviderTokenProtectionFailure extends Schema.TaggedErrorClass<ProviderTokenProtectionFailure>()(
+  "ProviderTokenProtectionFailure",
+  {
+    reason: Schema.Literals([
+      "EncryptFailed",
+      "DecryptFailed",
+      "InvalidEnvelope",
+      "UnsupportedVersion",
+      "UnknownKeyId",
+      "ContextMismatch",
+    ]),
+  },
+) {}
+
+const protectedProviderTokenEnvelopeVersion = "ea_pt_v1";
+const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
+
+const aadPart = (label: string, value: string) => `${label}:${value.length}:${value}`;
+
+const providerTokenAad = (input: ProviderTokenAad) =>
+  Buffer.from(
+    [
+      aadPart("provider", String(input.providerId)),
+      aadPart("account", input.providerAccountId),
+      aadPart("kind", input.kind),
+    ].join("|"),
+    "utf8",
+  );
+
+export class ProviderTokenProtection extends Context.Service<
+  ProviderTokenProtection,
+  {
+    readonly protect: (
+      input: ProtectProviderTokenInput,
+    ) => Effect.Effect<ProtectedProviderToken, ProviderTokenProtectionFailure>;
+    readonly unprotect: (
+      input: UnprotectProviderTokenInput,
+    ) => Effect.Effect<Redacted.Redacted<string>, ProviderTokenProtectionFailure>;
+  }
+>()("effect-auth/oauth/ProviderTokenProtection") {
+  static readonly layer = Layer.effect(ProviderTokenProtection)(
+    Effect.gen(function* () {
+      const keyMaterial = yield* AuthFeatureKeyMaterialService;
+      const material = yield* keyMaterial.requireForFeature("ProviderTokens");
+      return {
+        protect: Effect.fn("ProviderTokenProtection.protect")(function* (input) {
+          const envelope = yield* Effect.try({
+            try: () => {
+              const nonce = randomBytes(12);
+              const cipher = createCipheriv(
+                "aes-256-gcm",
+                Redacted.value(material.keyBytes),
+                nonce,
+              );
+              cipher.setAAD(providerTokenAad(input));
+              const ciphertext = Buffer.concat([
+                cipher.update(Redacted.value(input.plaintext), "utf8"),
+                cipher.final(),
+              ]);
+              const tag = cipher.getAuthTag();
+              return [
+                protectedProviderTokenEnvelopeVersion,
+                String(material.keyId),
+                nonce.toString("base64url"),
+                ciphertext.toString("base64url"),
+                tag.toString("base64url"),
+              ].join(".");
+            },
+            catch: () => new ProviderTokenProtectionFailure({ reason: "EncryptFailed" }),
+          });
+          return yield* decodeProtectedProviderToken(envelope).pipe(
+            Effect.mapError(() => new ProviderTokenProtectionFailure({ reason: "EncryptFailed" })),
+          );
+        }),
+        unprotect: Effect.fn("ProviderTokenProtection.unprotect")(function* (input) {
+          const parts = input.protectedToken.split(".");
+          if (parts.length !== 5) {
+            return yield* new ProviderTokenProtectionFailure({ reason: "InvalidEnvelope" });
+          }
+          const version = parts[0];
+          const keyId = parts[1];
+          const nonce = parts[2];
+          const ciphertext = parts[3];
+          const tag = parts[4];
+          if (
+            version === undefined ||
+            keyId === undefined ||
+            nonce === undefined ||
+            ciphertext === undefined ||
+            tag === undefined
+          ) {
+            return yield* new ProviderTokenProtectionFailure({ reason: "InvalidEnvelope" });
+          }
+          if (version !== protectedProviderTokenEnvelopeVersion) {
+            return yield* new ProviderTokenProtectionFailure({ reason: "UnsupportedVersion" });
+          }
+          if (keyId !== String(material.keyId)) {
+            return yield* new ProviderTokenProtectionFailure({ reason: "UnknownKeyId" });
+          }
+          if (nonce === "" || ciphertext === "" || tag === "") {
+            return yield* new ProviderTokenProtectionFailure({ reason: "InvalidEnvelope" });
+          }
+          return yield* Effect.try({
+            try: () => {
+              const decipher = createDecipheriv(
+                "aes-256-gcm",
+                Redacted.value(material.keyBytes),
+                Buffer.from(nonce, "base64url"),
+              );
+              decipher.setAAD(providerTokenAad(input));
+              decipher.setAuthTag(Buffer.from(tag, "base64url"));
+              const plaintext = Buffer.concat([
+                decipher.update(Buffer.from(ciphertext, "base64url")),
+                decipher.final(),
+              ]).toString("utf8");
+              return Redacted.make(plaintext);
+            },
+            catch: () => new ProviderTokenProtectionFailure({ reason: "ContextMismatch" }),
+          });
+        }),
       };
     }),
   );
@@ -244,6 +408,210 @@ export class OAuthProviderNotFound extends Schema.TaggedErrorClass<OAuthProvider
     providerId: Schema.String,
   },
 ) {}
+
+export interface OAuthAuthorizationCodeExchangeInput {
+  readonly provider: ResolvedOAuthProvider;
+  readonly code: Redacted.Redacted<string>;
+  readonly redirectUri: URL;
+  readonly codeVerifier?: Redacted.Redacted<string>;
+}
+
+export interface OAuthProviderIdentityResult {
+  readonly providerId: OAuthProviderId;
+  readonly providerAccountId: string;
+  readonly email: string;
+  readonly emailVerified: boolean;
+  readonly name: string;
+  readonly image: string | null;
+  readonly tokenSet: OAuthTokenSet;
+}
+
+export class OAuthProviderClientError extends Schema.TaggedErrorClass<OAuthProviderClientError>()(
+  "OAuthProviderClientError",
+  {
+    reason: Schema.Literals([
+      "TokenRequestFailed",
+      "TokenResponseInvalid",
+      "MissingAccessToken",
+      "MissingIdentityToken",
+      "UserInfoRequestFailed",
+      "UserInfoResponseInvalid",
+      "ProfileMappingFailed",
+      "MissingProviderEmail",
+      "UnsupportedTokenEndpointAuthMethod",
+    ]),
+  },
+) {}
+
+const OAuthTokenEndpointResponse = Schema.Struct({
+  access_token: Schema.optional(Schema.String),
+  refresh_token: Schema.optional(Schema.String),
+  id_token: Schema.optional(Schema.String),
+  token_type: Schema.optional(Schema.String),
+  scope: Schema.optional(Schema.String),
+  expires_in: Schema.optional(Schema.Number),
+  refresh_expires_in: Schema.optional(Schema.Number),
+  refresh_token_expires_in: Schema.optional(Schema.Number),
+});
+const OAuthUserInfoResponse = Schema.Record(Schema.String, Schema.Unknown);
+
+const tokenExpiry = (
+  now: number,
+  seconds: number | undefined,
+): Effect.Effect<number | undefined, OAuthProviderClientError> => {
+  if (seconds === undefined) return Effect.sync((): number | undefined => undefined);
+  return Number.isFinite(seconds) && seconds >= 0
+    ? Effect.succeed(now + seconds * 1000)
+    : Effect.fail(new OAuthProviderClientError({ reason: "TokenResponseInvalid" }));
+};
+
+const tokenRequest = (input: OAuthAuthorizationCodeExchangeInput) => {
+  const baseParams: Record<string, string> = {
+    grant_type: "authorization_code",
+    code: Redacted.value(input.code),
+    redirect_uri: input.redirectUri.href,
+    ...(input.codeVerifier === undefined
+      ? {}
+      : { code_verifier: Redacted.value(input.codeVerifier) }),
+  };
+  if (input.provider.tokenEndpointAuthMethod === "client_secret_basic") {
+    return HttpClientRequest.post(input.provider.tokenUrl).pipe(
+      HttpClientRequest.bodyUrlParams(baseParams),
+      HttpClientRequest.basicAuth(input.provider.clientId, input.provider.clientSecret),
+      HttpClientRequest.accept("application/json"),
+    );
+  }
+  if (input.provider.tokenEndpointAuthMethod === "client_secret_post") {
+    return HttpClientRequest.post(input.provider.tokenUrl).pipe(
+      HttpClientRequest.bodyUrlParams({
+        ...baseParams,
+        client_id: input.provider.clientId,
+        client_secret: Redacted.value(input.provider.clientSecret),
+      }),
+      HttpClientRequest.accept("application/json"),
+    );
+  }
+  return undefined;
+};
+
+export class OAuthProviderClient extends Context.Service<
+  OAuthProviderClient,
+  {
+    readonly exchangeCode: (
+      input: OAuthAuthorizationCodeExchangeInput,
+    ) => Effect.Effect<OAuthTokenSet, OAuthProviderClientError>;
+    readonly resolveIdentity: (
+      input: OAuthProfileMappingInput,
+    ) => Effect.Effect<OAuthProviderIdentityResult, OAuthProviderClientError>;
+  }
+>()("effect-auth/oauth/OAuthProviderClient") {
+  static readonly layer = Layer.effect(OAuthProviderClient)(
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      return {
+        exchangeCode: Effect.fn("OAuthProviderClient.exchangeCode")(function* (input) {
+          const request = tokenRequest(input);
+          if (request === undefined) {
+            return yield* new OAuthProviderClientError({
+              reason: "UnsupportedTokenEndpointAuthMethod",
+            });
+          }
+          const response = yield* client.execute(request).pipe(
+            Effect.flatMap(HttpClientResponse.filterStatusOk),
+            Effect.mapError(() => new OAuthProviderClientError({ reason: "TokenRequestFailed" })),
+          );
+          const decoded = yield* HttpClientResponse.schemaJson(
+            Schema.Struct({ body: OAuthTokenEndpointResponse }),
+          )(response).pipe(
+            Effect.mapError(() => new OAuthProviderClientError({ reason: "TokenResponseInvalid" })),
+          );
+          const accessToken = decoded.body.access_token;
+          if (accessToken === undefined || accessToken === "") {
+            return yield* new OAuthProviderClientError({ reason: "MissingAccessToken" });
+          }
+          const now = yield* Clock.currentTimeMillis;
+          const accessTokenExpiresAt = yield* tokenExpiry(now, decoded.body.expires_in);
+          const refreshTokenExpiresAt = yield* tokenExpiry(
+            now,
+            decoded.body.refresh_expires_in ?? decoded.body.refresh_token_expires_in,
+          );
+          return {
+            accessToken: Redacted.make(accessToken),
+            ...(decoded.body.refresh_token === undefined
+              ? {}
+              : { refreshToken: Redacted.make(decoded.body.refresh_token) }),
+            ...(decoded.body.id_token === undefined
+              ? {}
+              : { idToken: Redacted.make(decoded.body.id_token) }),
+            ...(decoded.body.token_type === undefined
+              ? {}
+              : { tokenType: decoded.body.token_type }),
+            ...(decoded.body.scope === undefined ? {} : { scope: decoded.body.scope }),
+            ...(accessTokenExpiresAt === undefined ? {} : { accessTokenExpiresAt }),
+            ...(refreshTokenExpiresAt === undefined ? {} : { refreshTokenExpiresAt }),
+          };
+        }),
+        resolveIdentity: Effect.fn("OAuthProviderClient.resolveIdentity")(function* (input) {
+          let userInfo = input.userInfo;
+          if (userInfo === undefined && input.provider.userInfoUrl !== undefined) {
+            const accessToken = input.tokenSet.accessToken;
+            if (accessToken === undefined) {
+              return yield* new OAuthProviderClientError({ reason: "MissingAccessToken" });
+            }
+            const request = HttpClientRequest.get(input.provider.userInfoUrl).pipe(
+              HttpClientRequest.bearerToken(accessToken),
+              HttpClientRequest.accept("application/json"),
+            );
+            const response = yield* client.execute(request).pipe(
+              Effect.flatMap(HttpClientResponse.filterStatusOk),
+              Effect.mapError(
+                () => new OAuthProviderClientError({ reason: "UserInfoRequestFailed" }),
+              ),
+            );
+            const decoded = yield* HttpClientResponse.schemaJson(
+              Schema.Struct({ body: OAuthUserInfoResponse }),
+            )(response).pipe(
+              Effect.mapError(
+                () => new OAuthProviderClientError({ reason: "UserInfoResponseInvalid" }),
+              ),
+            );
+            userInfo = decoded.body;
+          }
+          if (input.provider.mapProfile === undefined) {
+            return yield* new OAuthProviderClientError({ reason: "ProfileMappingFailed" });
+          }
+          const profileInput = {
+            provider: input.provider,
+            tokenSet: input.tokenSet,
+            ...(input.validatedOidcIdentity === undefined
+              ? {}
+              : { validatedOidcIdentity: input.validatedOidcIdentity }),
+            ...(userInfo === undefined ? {} : { userInfo }),
+          } satisfies OAuthProfileMappingInput;
+          const profile = yield* input.provider
+            .mapProfile(profileInput)
+            .pipe(
+              Effect.mapError(
+                () => new OAuthProviderClientError({ reason: "ProfileMappingFailed" }),
+              ),
+            );
+          if (profile.email.trim() === "") {
+            return yield* new OAuthProviderClientError({ reason: "MissingProviderEmail" });
+          }
+          return {
+            providerId: input.provider.id,
+            providerAccountId: profile.providerAccountId,
+            email: profile.email,
+            emailVerified: profile.emailVerified,
+            name: profile.name,
+            image: profile.image,
+            tokenSet: input.tokenSet,
+          };
+        }),
+      };
+    }),
+  );
+}
 
 const decodeOAuthProviderId = Schema.decodeUnknownEffect(OAuthProviderId);
 const reservedAuthorizationParams = new Set([
@@ -766,7 +1134,7 @@ export class OAuthState extends Context.Service<
 const OAuthStateDefaultLayer = OAuthState.layer.pipe(
   Layer.provide(AuthFeatureKeyMaterialService.layer),
 );
-const OAuthStartDependenciesLayer = Layer.mergeAll(AuthTokenLive, OAuthStateDefaultLayer);
+const OAuthDependenciesLayer = Layer.mergeAll(AuthTokenLive, OAuthStateDefaultLayer);
 
 export interface OAuthStartSignInInput {
   readonly providerId: unknown;
@@ -803,6 +1171,55 @@ export class OAuthStartError extends Schema.TaggedErrorClass<OAuthStartError>()(
   ]),
 }) {}
 
+export interface OAuthCallbackInput {
+  readonly providerId: unknown;
+  readonly state: unknown;
+  readonly code?: unknown;
+  readonly error?: unknown;
+  readonly errorDescription?: unknown;
+  readonly callbackMethod: "GET" | "POST";
+  readonly ip?: unknown;
+  readonly userAgent?: string;
+}
+
+export interface OAuthSignInCallbackSuccess {
+  readonly flow: "SignIn";
+  readonly user: AuthUser;
+  readonly account: OAuthProviderAccount;
+  readonly session: StoredSession;
+  readonly sessionToken: SessionToken;
+  readonly isNewUser: boolean;
+}
+
+export interface OAuthLinkCallbackSuccess {
+  readonly flow: "Link";
+  readonly user: AuthUser;
+  readonly account: OAuthProviderAccount;
+  readonly isNewUser: false;
+}
+
+export type OAuthCallbackSuccess = OAuthSignInCallbackSuccess | OAuthLinkCallbackSuccess;
+
+export class OAuthCallbackError extends Schema.TaggedErrorClass<OAuthCallbackError>()(
+  "OAuthCallbackError",
+  {
+    reason: Schema.Literals([
+      "ProviderReturnedError",
+      "MissingAuthorizationCode",
+      "InvalidState",
+      "ExpiredState",
+      "ConsumedState",
+      "ProviderMismatch",
+      "TokenExchangeFailed",
+      "IdentityValidationFailed",
+      "ProviderEmailRequired",
+      "ProviderTokenProtectionFailed",
+      "StorageFailed",
+      "SessionCreationFailed",
+    ]),
+  },
+) {}
+
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 
 const parseStartProvider = Effect.fn("OAuth.parseStartProvider")(function* (
@@ -830,6 +1247,99 @@ const validateRedirectUri = (redirectUri: URL): Effect.Effect<URL, OAuthStartErr
   redirectUri instanceof URL
     ? Effect.succeed(redirectUri)
     : Effect.fail(new OAuthStartError({ reason: "InvalidRedirectUri" }));
+
+const parseCallbackProvider = Effect.fn("OAuth.parseCallbackProvider")(function* (
+  providers: typeof OAuthProviders.Service,
+  input: unknown,
+) {
+  const providerId = yield* decodeOAuthProviderId(input).pipe(
+    Effect.mapError(() => new OAuthCallbackError({ reason: "ProviderMismatch" })),
+  );
+  return yield* providers
+    .get(providerId)
+    .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "ProviderMismatch" })));
+});
+
+const parseCallbackStateHandle = (
+  input: unknown,
+): Effect.Effect<OAuthStateHandle, OAuthCallbackError> =>
+  decodeOAuthStateHandle(Redacted.isRedacted(input) ? Redacted.value(input) : input).pipe(
+    Effect.mapError(() => new OAuthCallbackError({ reason: "InvalidState" })),
+  );
+
+const parseCallbackCode = (
+  input: unknown,
+): Effect.Effect<Redacted.Redacted<string>, OAuthCallbackError> => {
+  if (input === undefined) {
+    return Effect.fail(new OAuthCallbackError({ reason: "MissingAuthorizationCode" }));
+  }
+  const value = Redacted.isRedacted(input) ? Redacted.value(input) : input;
+  return typeof value === "string" && value.length > 0
+    ? Effect.succeed(Redacted.make(value))
+    : Effect.fail(new OAuthCallbackError({ reason: "MissingAuthorizationCode" }));
+};
+
+const mapOAuthStateConsumeFailure = (error: OAuthStateFailure | AuthStorageFailure) => {
+  if (Predicate.isTagged(error, "AuthStorageFailure")) {
+    if (error.reason === "TokenExpired") return new OAuthCallbackError({ reason: "ExpiredState" });
+    if (error.reason === "TokenConsumed")
+      return new OAuthCallbackError({ reason: "ConsumedState" });
+    if (error.reason === "NotFound") return new OAuthCallbackError({ reason: "InvalidState" });
+  }
+  return error;
+};
+
+const protectProviderTokenSet: (
+  protection: typeof ProviderTokenProtection.Service,
+  input: {
+    readonly providerId: OAuthProviderId;
+    readonly providerAccountId: string;
+    readonly tokenSet: OAuthTokenSet;
+  },
+) => Effect.Effect<ProtectedProviderTokenSet, ProviderTokenProtectionFailure> = Effect.fn(
+  "OAuth.protectProviderTokenSet",
+)(function* (protection, input) {
+  const accessToken =
+    input.tokenSet.accessToken === undefined
+      ? undefined
+      : yield* protection.protect({
+          providerId: input.providerId,
+          providerAccountId: input.providerAccountId,
+          kind: "AccessToken",
+          plaintext: input.tokenSet.accessToken,
+        });
+  const refreshToken =
+    input.tokenSet.refreshToken === undefined
+      ? undefined
+      : yield* protection.protect({
+          providerId: input.providerId,
+          providerAccountId: input.providerAccountId,
+          kind: "RefreshToken",
+          plaintext: input.tokenSet.refreshToken,
+        });
+  const idToken =
+    input.tokenSet.idToken === undefined
+      ? undefined
+      : yield* protection.protect({
+          providerId: input.providerId,
+          providerAccountId: input.providerAccountId,
+          kind: "IdToken",
+          plaintext: input.tokenSet.idToken,
+        });
+  return {
+    ...(accessToken === undefined ? {} : { accessToken }),
+    ...(refreshToken === undefined ? {} : { refreshToken }),
+    ...(idToken === undefined ? {} : { idToken }),
+    ...(input.tokenSet.tokenType === undefined ? {} : { tokenType: input.tokenSet.tokenType }),
+    ...(input.tokenSet.scope === undefined ? {} : { scope: input.tokenSet.scope }),
+    ...(input.tokenSet.accessTokenExpiresAt === undefined
+      ? {}
+      : { accessTokenExpiresAt: input.tokenSet.accessTokenExpiresAt }),
+    ...(input.tokenSet.refreshTokenExpiresAt === undefined
+      ? {}
+      : { refreshTokenExpiresAt: input.tokenSet.refreshTokenExpiresAt }),
+  };
+});
 
 const makePkceChallenge = (verifier: Redacted.Redacted<string>) =>
   sha256Base64Url(Redacted.value(verifier));
@@ -887,6 +1397,19 @@ export class OAuth extends Context.Service<
       | OAuthStateFailure
       | TokenGenerationFailure
     >;
+    readonly completeCallback: (
+      input: OAuthCallbackInput,
+    ) => Effect.Effect<
+      OAuthCallbackSuccess,
+      | OAuthCallbackError
+      | BoundaryParseError
+      | OAuthStateFailure
+      | AuthStorageFailure
+      | OAuthAccountStorageFailure
+      | OAuthProviderClientError
+      | ProviderTokenProtectionFailure
+      | TokenGenerationFailure
+    >;
   }
 >()("effect-auth/OAuth") {
   static readonly layer = Layer.effect(OAuth)(
@@ -895,6 +1418,9 @@ export class OAuth extends Context.Service<
       const state = yield* OAuthState;
       const token = yield* AuthToken;
       const storage = yield* AuthStorage;
+      const authConfig = yield* AuthLiveConfig;
+      const providerClient = yield* OAuthProviderClient;
+      const tokenProtection = yield* ProviderTokenProtection;
 
       const start = Effect.fn("OAuth.start")(function* (input: {
         readonly providerId: unknown;
@@ -937,6 +1463,58 @@ export class OAuth extends Context.Service<
         };
       });
 
+      const consumeCallbackState = Effect.fn("OAuth.consumeCallbackState")(function* (
+        providerId: OAuthProviderId,
+        handle: OAuthStateHandle,
+      ) {
+        const consumeFlow = (flow: OAuthFlow) => state.consume({ providerId, flow, handle });
+        return yield* consumeFlow("SignIn").pipe(
+          Effect.catchTag("AuthStorageFailure", (error) =>
+            error.reason === "NotFound" ? consumeFlow("Link") : Effect.fail(error),
+          ),
+          Effect.mapError(mapOAuthStateConsumeFailure),
+        );
+      });
+
+      const resolveCallbackIdentity = Effect.fn("OAuth.resolveCallbackIdentity")(function* (
+        provider: ResolvedOAuthProvider,
+        consumedState: StoredOAuthState & { readonly secrets: OAuthStateSecrets },
+        code: Redacted.Redacted<string>,
+      ) {
+        const tokenSet = yield* providerClient
+          .exchangeCode({
+            provider,
+            code,
+            redirectUri: consumedState.redirectUri,
+            ...(consumedState.secrets.codeVerifier === undefined
+              ? {}
+              : { codeVerifier: consumedState.secrets.codeVerifier }),
+          })
+          .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "TokenExchangeFailed" })));
+        const identity = yield* providerClient
+          .resolveIdentity({ provider, tokenSet })
+          .pipe(
+            Effect.mapError((error) =>
+              error.reason === "MissingProviderEmail"
+                ? new OAuthCallbackError({ reason: "ProviderEmailRequired" })
+                : new OAuthCallbackError({ reason: "TokenExchangeFailed" }),
+            ),
+          );
+        const email = yield* normalizeEmail(identity.email).pipe(
+          Effect.mapError(() => new OAuthCallbackError({ reason: "ProviderEmailRequired" })),
+        );
+        const providerTokens = yield* protectProviderTokenSet(tokenProtection, {
+          providerId: identity.providerId,
+          providerAccountId: identity.providerAccountId,
+          tokenSet: identity.tokenSet,
+        }).pipe(
+          Effect.mapError(
+            () => new OAuthCallbackError({ reason: "ProviderTokenProtectionFailed" }),
+          ),
+        );
+        return { identity, email, providerTokens };
+      });
+
       return {
         startSignIn: Effect.fn("OAuth.startSignIn")(function* (input) {
           return yield* start({
@@ -974,7 +1552,83 @@ export class OAuth extends Context.Service<
             linkUserId: current.user.id,
           });
         }),
+        completeCallback: Effect.fn("OAuth.completeCallback")(function* (input) {
+          if (input.error !== undefined) {
+            return yield* new OAuthCallbackError({ reason: "ProviderReturnedError" });
+          }
+          const provider = yield* parseCallbackProvider(providers, input.providerId);
+          const handle = yield* parseCallbackStateHandle(input.state);
+          const code = yield* parseCallbackCode(input.code);
+          const consumedState = yield* consumeCallbackState(provider.id, handle);
+          const { identity, email, providerTokens } = yield* resolveCallbackIdentity(
+            provider,
+            consumedState,
+            code,
+          );
+          const now = yield* Clock.currentTimeMillis;
+          if (consumedState.flow === "Link") {
+            if (consumedState.linkUserId === undefined) {
+              return yield* new OAuthCallbackError({ reason: "InvalidState" });
+            }
+            const result = yield* storage
+              .completeOAuthLink({
+                userId: consumedState.linkUserId,
+                providerId: provider.id,
+                providerAccountId: identity.providerAccountId,
+                providerEmail: email,
+                scopes: consumedState.scopes,
+                providerTokens,
+                allowDifferentEmail: false,
+                now,
+              })
+              .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "StorageFailed" })));
+            const success: OAuthLinkCallbackSuccess = {
+              flow: "Link",
+              user: result.user,
+              account: result.account,
+              isNewUser: false,
+            };
+            return success;
+          }
+          const signIn = yield* storage
+            .completeOAuthSignIn({
+              providerId: provider.id,
+              providerAccountId: identity.providerAccountId,
+              email,
+              emailVerified: identity.emailVerified || provider.trustedEmail,
+              name: identity.name,
+              image: identity.image,
+              scopes: consumedState.scopes,
+              providerTokens,
+              allowImplicitSignUp: consumedState.allowSignUp,
+              allowAutomaticSameEmailLinking: identity.emailVerified || provider.trustedEmail,
+              now,
+            })
+            .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "StorageFailed" })));
+          const pair = yield* token.makeSessionToken();
+          const session = yield* storage
+            .createSession({
+              userId: signIn.user.id,
+              tokenHash: pair.hash,
+              expiresAt: now + authConfig.session.ttlMillis,
+              now,
+              ...(typeof input.ip === "string" ? { ipAddress: input.ip } : {}),
+              ...(input.userAgent === undefined ? {} : { userAgent: input.userAgent }),
+            })
+            .pipe(
+              Effect.mapError(() => new OAuthCallbackError({ reason: "SessionCreationFailed" })),
+            );
+          const success: OAuthSignInCallbackSuccess = {
+            flow: "SignIn",
+            user: signIn.user,
+            account: signIn.account,
+            session,
+            sessionToken: pair.token,
+            isNewUser: signIn.isNewUser,
+          };
+          return success;
+        }),
       };
     }),
-  ).pipe(Layer.provide(OAuthStartDependenciesLayer));
+  ).pipe(Layer.provide(OAuthDependenciesLayer));
 }

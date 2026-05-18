@@ -1,14 +1,21 @@
 import { Clock, Effect, Layer, Match, Redacted } from "effect";
-import type { OAuthStateHash, StoredOAuthState } from "../oauth/index.js";
+import type {
+  OAuthProviderId,
+  OAuthStateHash,
+  ProtectedProviderTokenSet,
+  StoredOAuthState,
+} from "../oauth/index.js";
 import type { TokenHash } from "../token/index.js";
 import {
   AuthStorage,
   AuthStorageFailure,
+  OAuthAccountStorageFailure,
   type AuthAccount,
   type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
   type AuthUserId,
+  type OAuthProviderAccount,
   type PublicAuthAccount,
   type StoredSession,
 } from "./index.js";
@@ -28,6 +35,7 @@ export interface DevMemoryStorageState {
   readonly tokensByHash: Map<string, TokenRecord>;
   readonly sessionsByHash: Map<string, StoredSession>;
   readonly oauthStatesByHash: Map<string, StoredOAuthState>;
+  readonly providerAccountsByKey: Map<string, OAuthProviderAccount>;
 }
 
 export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
@@ -36,12 +44,15 @@ export const makeDevMemoryStorageState = (): DevMemoryStorageState => ({
   tokensByHash: new Map(),
   sessionsByHash: new Map(),
   oauthStatesByHash: new Map(),
+  providerAccountsByKey: new Map(),
 });
 
 let nextId = 0;
 const id = (prefix: string) => `${prefix}_${++nextId}`;
 const tokenKey = (hash: TokenHash) => Redacted.value(hash);
 const oauthStateKey = (hash: OAuthStateHash) => Redacted.value(hash);
+const providerAccountKey = (providerId: OAuthProviderId, accountId: string) =>
+  `${String(providerId)}:${accountId}`;
 
 const isStoredSessionRecord = (session: StoredSession | undefined): session is StoredSession =>
   session !== undefined &&
@@ -109,10 +120,72 @@ const updateCredentialAccountPasswordHash = (
     return Effect.void;
   });
 
-const publicAccount = ({
-  passwordHash: _passwordHash,
-  ...account
-}: AuthAccount): PublicAuthAccount => account;
+const publicAccount = (account: AuthAccount): PublicAuthAccount => ({
+  id: account.id,
+  providerId: account.providerId,
+  accountId: account.accountId,
+  userId: account.userId,
+  scopes: account.scopes,
+  createdAt: account.createdAt,
+  updatedAt: account.updatedAt,
+});
+
+const findUserByEmail = (state: DevMemoryStorageState, email: AuthUser["email"]) =>
+  Array.from(state.users.values()).find((user) => user.email === email);
+
+const mergeProtectedTokens = (
+  previous: ProtectedProviderTokenSet | undefined,
+  next: ProtectedProviderTokenSet,
+): ProtectedProviderTokenSet => {
+  const accessToken = next.accessToken ?? previous?.accessToken;
+  const refreshToken = next.refreshToken ?? previous?.refreshToken;
+  const idToken = next.idToken ?? previous?.idToken;
+  const tokenType = next.tokenType ?? previous?.tokenType;
+  const scope = next.scope ?? previous?.scope;
+  const accessTokenExpiresAt = next.accessTokenExpiresAt ?? previous?.accessTokenExpiresAt;
+  const refreshTokenExpiresAt = next.refreshTokenExpiresAt ?? previous?.refreshTokenExpiresAt;
+  return {
+    ...(accessToken === undefined ? {} : { accessToken }),
+    ...(refreshToken === undefined ? {} : { refreshToken }),
+    ...(idToken === undefined ? {} : { idToken }),
+    ...(tokenType === undefined ? {} : { tokenType }),
+    ...(scope === undefined ? {} : { scope }),
+    ...(accessTokenExpiresAt === undefined ? {} : { accessTokenExpiresAt }),
+    ...(refreshTokenExpiresAt === undefined ? {} : { refreshTokenExpiresAt }),
+  };
+};
+
+const makeOAuthProviderAccount = (input: {
+  readonly providerId: OAuthProviderId;
+  readonly providerAccountId: string;
+  readonly userId: AuthUserId;
+  readonly scopes: ReadonlyArray<string>;
+  readonly providerTokens: ProtectedProviderTokenSet;
+  readonly now: number;
+}): OAuthProviderAccount => ({
+  id: id("acc"),
+  providerId: input.providerId,
+  accountId: input.providerAccountId,
+  userId: input.userId,
+  scopes: input.scopes,
+  providerTokens: input.providerTokens,
+  createdAt: input.now,
+  updatedAt: input.now,
+});
+
+const updateOAuthProviderAccount = (
+  account: OAuthProviderAccount,
+  input: {
+    readonly scopes: ReadonlyArray<string>;
+    readonly providerTokens: ProtectedProviderTokenSet;
+    readonly now: number;
+  },
+): OAuthProviderAccount => ({
+  ...account,
+  scopes: input.scopes,
+  providerTokens: mergeProtectedTokens(account.providerTokens, input.providerTokens),
+  updatedAt: input.now,
+});
 
 const rotateSessionToken = (
   state: DevMemoryStorageState,
@@ -229,6 +302,9 @@ const deleteUser = (
     for (const [key, oauthState] of state.oauthStatesByHash) {
       if (oauthState.linkUserId === userId) state.oauthStatesByHash.delete(key);
     }
+    for (const [key, account] of state.providerAccountsByKey) {
+      if (account.userId === userId) state.providerAccountsByKey.delete(key);
+    }
     return Effect.void;
   });
 
@@ -283,8 +359,12 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
     }),
   listUserAccounts: ({ userId }) =>
     Effect.sync(() =>
-      Array.from(state.accountsByEmail.values())
+      [
+        ...Array.from(state.accountsByEmail.values()),
+        ...Array.from(state.providerAccountsByKey.values()),
+      ]
         .filter((account) => account.userId === userId)
+        .sort((left, right) => left.createdAt - right.createdAt || left.id.localeCompare(right.id))
         .map(publicAccount),
     ),
   storeVerificationToken: (input) =>
@@ -425,6 +505,74 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       const consumed = { ...stored, consumedAt: now };
       state.oauthStatesByHash.set(key, consumed);
       return Effect.succeed(consumed);
+    }),
+  completeOAuthSignIn: (input) =>
+    Effect.suspend((): ReturnType<AuthStorageShape["completeOAuthSignIn"]> => {
+      const key = providerAccountKey(input.providerId, input.providerAccountId);
+      const existingAccount = state.providerAccountsByKey.get(key);
+      if (existingAccount !== undefined) {
+        const user = state.users.get(existingAccount.userId);
+        if (user === undefined) {
+          return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
+        }
+        const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
+        state.providerAccountsByKey.set(key, updatedAccount);
+        return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+      }
+
+      const existingUser = findUserByEmail(state, input.email);
+      if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
+        return Effect.fail(
+          new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }),
+        );
+      }
+      if (existingUser !== undefined) {
+        const account = makeOAuthProviderAccount({ ...input, userId: existingUser.id });
+        state.providerAccountsByKey.set(key, account);
+        return Effect.succeed({ user: existingUser, account, isNewUser: false });
+      }
+      if (!input.allowImplicitSignUp) {
+        return Effect.fail(new OAuthAccountStorageFailure({ reason: "ImplicitSignUpDisabled" }));
+      }
+
+      const user: AuthUser = {
+        id: id("usr"),
+        email: input.email,
+        name: input.name,
+        image: input.image,
+        emailVerified: input.emailVerified,
+        createdAt: input.now,
+        updatedAt: input.now,
+      };
+      const account = makeOAuthProviderAccount({ ...input, userId: user.id });
+      state.users.set(user.id, user);
+      state.providerAccountsByKey.set(key, account);
+      return Effect.succeed({ user, account, isNewUser: true });
+    }),
+  completeOAuthLink: (input) =>
+    Effect.suspend((): ReturnType<AuthStorageShape["completeOAuthLink"]> => {
+      const user = state.users.get(input.userId);
+      if (user === undefined) {
+        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkUserNotFound" }));
+      }
+      if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
+        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
+      }
+      const key = providerAccountKey(input.providerId, input.providerAccountId);
+      const existingAccount = state.providerAccountsByKey.get(key);
+      if (existingAccount !== undefined && existingAccount.userId !== input.userId) {
+        return Effect.fail(
+          new OAuthAccountStorageFailure({ reason: "ProviderAccountLinkedToDifferentUser" }),
+        );
+      }
+      if (existingAccount !== undefined) {
+        const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
+        state.providerAccountsByKey.set(key, updatedAccount);
+        return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+      }
+      const account = makeOAuthProviderAccount({ ...input, userId: input.userId });
+      state.providerAccountsByKey.set(key, account);
+      return Effect.succeed({ user, account, isNewUser: false });
     }),
 });
 

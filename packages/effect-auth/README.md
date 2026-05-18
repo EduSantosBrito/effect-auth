@@ -36,8 +36,9 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 - Boundary Parse for external email, password, token, and URL inputs.
 - Secure Default Password Policy and native Scrypt password hashing.
 - Rate Limiter service boundary that applications provide explicitly.
-- OAuth provider registry plus authorization-start APIs for sign-in/link flows.
+- OAuth provider registry plus authorization-start and generic callback completion APIs.
 - Storage-backed OAuth State with hashed handles and encrypted PKCE/OIDC secrets.
+- Effect Auth-owned provider token encryption with replaceable protection services.
 
 ## Install
 
@@ -122,14 +123,20 @@ yield* auth.deleteUser({ sessionToken, password: "current password" });
 `updateUser` accepts `name` and `image` only; email changes are intentionally out of scope. `listAccounts` returns linked Accounts for the current User without password hashes or provider tokens. Email/password sign-up creates the first Credential Account automatically, and password hashes live on Credential Accounts rather than the User.
 `deleteUser` requires the current password for the current Credential Account, is rate-limited, deletes the User and dependent auth records, and returns no deleted user payload.
 
-## OAuth Authorization Start
+## OAuth Start and Generic Callback
 
-OAuth start APIs live under `effect-auth/oauth`. `OAuthProviders.layer(...)` validates provider IDs, scopes, PKCE mode, token auth method, and managed authorization parameters. `OAuth.layer` creates authorization URLs and stores short-lived OAuth State rows with hashed public handles and encrypted PKCE verifier/OIDC nonce secrets.
+OAuth APIs live under `effect-auth/oauth`. `OAuthProviders.layer(...)` validates provider IDs, scopes, PKCE mode, token auth method, and managed authorization parameters. `OAuth.layer` creates authorization URLs, stores short-lived OAuth State rows with hashed public handles and encrypted PKCE verifier/OIDC nonce secrets, and completes generic OAuth callbacks by exchanging codes, mapping profiles, protecting provider tokens, atomically creating/linking provider accounts, and issuing normal Effect Auth Sessions.
 
 ```typescript
 import { Effect, Layer, Redacted } from "effect";
 import { AuthLiveConfig } from "effect-auth";
-import { OAuth, OAuthProviders } from "effect-auth/oauth";
+import {
+  AuthFeatureKeyMaterialService,
+  OAuth,
+  OAuthProviderClient,
+  OAuthProviders,
+  ProviderTokenProtection,
+} from "effect-auth/oauth";
 import type { AuthStorage } from "effect-auth/storage";
 import type { HttpClient } from "effect/unstable/http/HttpClient";
 
@@ -146,6 +153,7 @@ const ProvidersLive = OAuthProviders.layer({
       endpoints: {
         authorizationUrl: new URL("https://github.com/login/oauth/authorize"),
         tokenUrl: new URL("https://github.com/login/oauth/access_token"),
+        userInfoUrl: new URL("https://api.github.com/user"),
       },
       mapProfile: ({ userInfo }) =>
         Effect.succeed({
@@ -159,27 +167,50 @@ const ProvidersLive = OAuthProviders.layer({
   ],
 }).pipe(Layer.provide(AppHttpClient));
 
+const ProviderTokenProtectionLive = ProviderTokenProtection.layer.pipe(
+  Layer.provide(AuthFeatureKeyMaterialService.layer),
+);
+
 const OAuthLive = OAuth.layer.pipe(
+  Layer.provideMerge(ProviderTokenProtectionLive),
+  Layer.provideMerge(OAuthProviderClient.layer),
   Layer.provideMerge(
     Layer.mergeAll(
       AuthLiveConfig.layer({ encryptionKey: Redacted.make(process.env.AUTH_ENCRYPTION_KEY ?? "") }),
       AppAuthStorage,
       ProvidersLive,
+      AppHttpClient,
     ),
   ),
 );
 
 const program = Effect.gen(function* () {
   const oauth = yield* OAuth;
-  return yield* oauth.startSignIn({
+  const redirectUri = new URL("https://app.example.com/api/auth/oauth/github/callback");
+
+  const started = yield* oauth.startSignIn({
     providerId: "github",
-    redirectUri: new URL("https://app.example.com/api/auth/oauth/github/callback"),
+    redirectUri,
     scopes: ["repo"],
   });
+
+  // After the provider redirects back to `redirectUri`, pass query/form values to the service.
+  const completed = yield* oauth.completeCallback({
+    providerId: "github",
+    state: "state-from-provider-callback",
+    code: "code-from-provider-callback",
+    callbackMethod: "GET",
+  });
+
+  if (completed.flow === "SignIn") {
+    // Your HTTP layer sets the normal Effect Auth session cookie from completed.sessionToken.
+  }
+
+  return started.authorizationUrl;
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. OAuth callback completion, provider token storage, and mounted OAuth HTTP routes are separate follow-up slices.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Mounted OAuth HTTP routes, OIDC ID Token validation, returning-account updates, same-email linking, and Drizzle provider-account persistence are separate follow-up slices.
 
 ## Drizzle Postgres Storage
 
@@ -321,7 +352,7 @@ Identity Core changes the `AuthStorage` contract before 1.0: storage adapters sh
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication plus the first OAuth authorization-start/state slice. OAuth callback completion, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication plus the first generic OAuth start/callback slices. OIDC ID Token validation, mounted OAuth HTTP routes, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 
