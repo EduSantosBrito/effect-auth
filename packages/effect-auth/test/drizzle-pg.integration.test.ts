@@ -2,6 +2,7 @@ import { PgClient } from "@effect/sql-pg";
 import { assert, it } from "@effect/vitest";
 import { Config, ConfigProvider, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
+import { OAuthProviderId, OAuthStateHash, ProtectedProviderToken } from "../src/oauth/index";
 import { DrizzlePg } from "../src/storage/drizzle-pg/index";
 import { AuthStorage } from "../src/storage/index";
 import { NormalizedEmail } from "../src/domain/index";
@@ -12,6 +13,9 @@ const auth = DrizzlePg.schema();
 
 const decodeEmail = Schema.decodeUnknownEffect(NormalizedEmail);
 const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
+const decodeOAuthProviderId = Schema.decodeUnknownEffect(OAuthProviderId);
+const decodeOAuthStateHash = Schema.decodeUnknownEffect(OAuthStateHash);
+const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
 const decodeTokenHash = Schema.decodeUnknownEffect(TokenHash);
 const postgresUrl = Config.option(Config.string("EFFECT_AUTH_POSTGRES_URL")).parse(
   ConfigProvider.fromEnv(),
@@ -46,6 +50,13 @@ const setupSchema = Effect.fn("setupSchema")(function* () {
       user_id text NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
       scopes text[] NOT NULL,
       password_hash text,
+      provider_access_token text,
+      provider_refresh_token text,
+      provider_id_token text,
+      provider_token_type text,
+      provider_token_scope text,
+      provider_access_token_expires_at timestamptz,
+      provider_refresh_token_expires_at timestamptz,
       created_at timestamptz NOT NULL,
       updated_at timestamptz NOT NULL,
       UNIQUE (provider_id, account_id)
@@ -273,7 +284,188 @@ const storageInvariants = Effect.gen(function* () {
   assert.strictEqual(resetRows[0]?.passwordHash, Redacted.value(resetHash));
   assert.strictEqual(yield* countRows("auth_sessions WHERE revoked_at IS NOT NULL"), 4);
 
+  const github = yield* decodeOAuthProviderId("github");
+  const stateHash = yield* decodeOAuthStateHash("oauth-state-hash");
+  const expiredStateHash = yield* decodeOAuthStateHash("expired-oauth-state-hash");
+  const accessToken = yield* decodeProtectedProviderToken("protected-access-token-v1");
+  const nextAccessToken = yield* decodeProtectedProviderToken("protected-access-token-v2");
+  const refreshToken = yield* decodeProtectedProviderToken("protected-refresh-token-v1");
+  const idToken = yield* decodeProtectedProviderToken("protected-id-token-v1");
+  const oauthEmail = yield* decodeEmail("oauth-live@example.com");
+
+  const storedState = yield* storage.storeOAuthState({
+    stateHash,
+    providerId: github,
+    flow: "SignIn",
+    redirectUri: new URL("https://app.example.com/callback/github"),
+    scopes: ["read:user"],
+    allowSignUp: true,
+    encryptedCodeVerifier: "encrypted-code-verifier",
+    encryptedNonce: "encrypted-nonce",
+    expiresAt: activeUntil,
+    now,
+  });
+  assert.strictEqual(storedState.encryptedCodeVerifier, "encrypted-code-verifier");
+  const consumedState = yield* storage.consumeOAuthState({
+    stateHash,
+    providerId: github,
+    flow: "SignIn",
+    now,
+  });
+  assert.strictEqual(consumedState.consumedAt, now);
+  const consumedStateAgain = yield* Effect.flip(
+    storage.consumeOAuthState({ stateHash, providerId: github, flow: "SignIn", now }),
+  );
+  assert.strictEqual(consumedStateAgain.reason, "TokenConsumed");
+  yield* storage.storeOAuthState({
+    stateHash: expiredStateHash,
+    providerId: github,
+    flow: "SignIn",
+    redirectUri: new URL("https://app.example.com/callback/github"),
+    scopes: [],
+    allowSignUp: true,
+    expiresAt: now - 1,
+    now: now - 2,
+  });
+  const expiredState = yield* Effect.flip(
+    storage.consumeOAuthState({
+      stateHash: expiredStateHash,
+      providerId: github,
+      flow: "SignIn",
+      now,
+    }),
+  );
+  assert.strictEqual(expiredState.reason, "TokenExpired");
+
+  const firstOAuth = yield* storage.completeOAuthSignIn({
+    providerId: github,
+    providerAccountId: "github-user-1",
+    email: oauthEmail,
+    emailVerified: true,
+    name: "OAuth Live",
+    image: null,
+    scopes: ["read:user"],
+    providerTokens: {
+      accessToken,
+      refreshToken,
+      idToken,
+      tokenType: "Bearer",
+      scope: "read:user",
+      accessTokenExpiresAt: now + 3_600_000,
+    },
+    allowImplicitSignUp: true,
+    allowAutomaticSameEmailLinking: false,
+    now,
+  });
+  assert.strictEqual(firstOAuth.isNewUser, true);
+  assert.strictEqual(firstOAuth.account.providerTokens.accessToken, accessToken);
+  const tokenRows = yield* sql.unsafe<{
+    readonly providerAccessToken: string | null;
+    readonly providerRefreshToken: string | null;
+  }>(
+    `SELECT provider_access_token AS "providerAccessToken",
+            provider_refresh_token AS "providerRefreshToken"
+       FROM auth_accounts
+       WHERE provider_id = $1 AND account_id = $2`,
+    [github, "github-user-1"],
+  );
+  assert.strictEqual(tokenRows[0]?.providerAccessToken, accessToken);
+  assert.strictEqual(tokenRows[0]?.providerRefreshToken, refreshToken);
+
+  const returningOAuth = yield* storage.completeOAuthSignIn({
+    providerId: github,
+    providerAccountId: "github-user-1",
+    email: oauthEmail,
+    emailVerified: true,
+    name: "OAuth Live",
+    image: null,
+    scopes: ["read:user", "repo"],
+    providerTokens: {
+      accessToken: nextAccessToken,
+      scope: "read:user repo",
+    },
+    allowImplicitSignUp: true,
+    allowAutomaticSameEmailLinking: false,
+    now: now + 1,
+  });
+  assert.strictEqual(returningOAuth.isNewUser, false);
+  assert.strictEqual(returningOAuth.user.id, firstOAuth.user.id);
+  assert.strictEqual(returningOAuth.account.providerTokens.accessToken, nextAccessToken);
+  assert.strictEqual(returningOAuth.account.providerTokens.refreshToken, refreshToken);
+  const publicOAuthAccounts = yield* storage.listUserAccounts({ userId: firstOAuth.user.id });
+  assert.strictEqual(Object.hasOwn(publicOAuthAccounts[0] ?? {}, "providerTokens"), false);
+
+  const sameEmailDenied = yield* Effect.flip(
+    storage.completeOAuthSignIn({
+      providerId: github,
+      providerAccountId: "github-same-email",
+      email,
+      emailVerified: true,
+      name: "Linked User",
+      image: null,
+      scopes: ["read:user"],
+      providerTokens: { accessToken },
+      allowImplicitSignUp: true,
+      allowAutomaticSameEmailLinking: false,
+      now,
+    }),
+  );
+  assert.strictEqual(sameEmailDenied.reason, "AutomaticLinkingNotAllowed");
+  const sameEmailLinked = yield* storage.completeOAuthSignIn({
+    providerId: github,
+    providerAccountId: "github-same-email",
+    email,
+    emailVerified: true,
+    name: "Linked User",
+    image: null,
+    scopes: ["read:user"],
+    providerTokens: { accessToken },
+    allowImplicitSignUp: true,
+    allowAutomaticSameEmailLinking: true,
+    now,
+  });
+  assert.strictEqual(sameEmailLinked.isNewUser, false);
+  assert.strictEqual(sameEmailLinked.user.id, user.id);
+
+  const linkMismatch = yield* Effect.flip(
+    storage.completeOAuthLink({
+      userId: user.id,
+      providerId: github,
+      providerAccountId: "github-link",
+      providerEmail: oauthEmail,
+      scopes: ["read:user"],
+      providerTokens: { accessToken },
+      allowDifferentEmail: false,
+      now,
+    }),
+  );
+  assert.strictEqual(linkMismatch.reason, "LinkEmailMismatch");
+  const linked = yield* storage.completeOAuthLink({
+    userId: user.id,
+    providerId: github,
+    providerAccountId: "github-link",
+    providerEmail: email,
+    scopes: ["read:user"],
+    providerTokens: { accessToken },
+    allowDifferentEmail: false,
+    now,
+  });
+  assert.strictEqual(linked.user.id, user.id);
+  assert.strictEqual(linked.account.providerTokens.accessToken, accessToken);
+  const relinked = yield* storage.completeOAuthLink({
+    userId: user.id,
+    providerId: github,
+    providerAccountId: "github-link",
+    providerEmail: email,
+    scopes: ["read:user", "repo"],
+    providerTokens: { accessToken: nextAccessToken },
+    allowDifferentEmail: false,
+    now: now + 1,
+  });
+  assert.strictEqual(relinked.account.providerTokens.accessToken, nextAccessToken);
+
   yield* storage.deleteUser({ userId: user.id });
+  yield* storage.deleteUser({ userId: firstOAuth.user.id });
   assert.strictEqual(yield* countRows("auth_users"), 0);
   assert.strictEqual(yield* countRows("auth_accounts"), 0);
   assert.strictEqual(yield* countRows("auth_sessions"), 0);

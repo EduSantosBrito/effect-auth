@@ -4,12 +4,19 @@ import type { SqlError } from "effect/unstable/sql/SqlError";
 import { getTableName } from "drizzle-orm";
 import { boolean, index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 import { NormalizedEmail } from "../../domain/index.js";
-import type { OAuthProviderId, OAuthStateHash, StoredOAuthState } from "../../oauth/index.js";
+import {
+  ProtectedProviderToken,
+  type OAuthProviderId,
+  type OAuthStateHash,
+  type ProtectedProviderTokenSet,
+  type StoredOAuthState,
+} from "../../oauth/index.js";
 import type { PasswordHash } from "../../password/index.js";
 import type { TokenHash } from "../../token/index.js";
 import {
   AuthStorage,
   AuthStorageFailure,
+  OAuthAccountStorageFailure,
   type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
@@ -76,6 +83,17 @@ export const schema = (options: SchemaOptions = {}) => {
         .references(() => Users.id, { onDelete: "cascade" }),
       scopes: text("scopes").array().notNull(),
       passwordHash: text("password_hash"),
+      providerAccessToken: text("provider_access_token"),
+      providerRefreshToken: text("provider_refresh_token"),
+      providerIdToken: text("provider_id_token"),
+      providerTokenType: text("provider_token_type"),
+      providerTokenScope: text("provider_token_scope"),
+      providerAccessTokenExpiresAt: timestamp("provider_access_token_expires_at", {
+        withTimezone: true,
+      }),
+      providerRefreshTokenExpiresAt: timestamp("provider_refresh_token_expires_at", {
+        withTimezone: true,
+      }),
       createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
       updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
     },
@@ -168,6 +186,13 @@ type AccountRow = {
   readonly userId: string;
   readonly scopes: ReadonlyArray<string>;
   readonly passwordHash: string | null;
+  readonly providerAccessToken: string | null;
+  readonly providerRefreshToken: string | null;
+  readonly providerIdToken: string | null;
+  readonly providerTokenType: string | null;
+  readonly providerTokenScope: string | null;
+  readonly providerAccessTokenExpiresAt: number | null;
+  readonly providerRefreshTokenExpiresAt: number | null;
   readonly createdAt: number;
   readonly updatedAt: number;
 };
@@ -242,7 +267,11 @@ const sqlFailure = (error: SqlError) =>
 
 const storageFailure = (error: SqlError | AuthStorageFailure): AuthStorageFailure =>
   Predicate.isTagged(error, "AuthStorageFailure") ? error : sqlFailure(error);
+const oauthAccountStorageFailure = (
+  error: SqlError | AuthStorageFailure | OAuthAccountStorageFailure,
+) => (Predicate.isTagged(error, "OAuthAccountStorageFailure") ? error : storageFailure(error));
 const decodeNormalizedEmail = Schema.decodeSync(NormalizedEmail);
+const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
 
 const one = <A>(rows: ReadonlyArray<A>): Effect.Effect<A, AuthStorageFailure> => {
   const row = rows[0];
@@ -339,6 +368,49 @@ const toPublicAccount = (row: AccountRow): PublicAuthAccount => ({
   updatedAt: row.updatedAt,
 });
 
+const optionalProtectedProviderToken = (
+  value: string | null,
+): Effect.Effect<ProtectedProviderToken | undefined, AuthStorageFailure> =>
+  value === null
+    ? Effect.sync((): ProtectedProviderToken | undefined => undefined)
+    : decodeProtectedProviderToken(value).pipe(Effect.mapError(() => backendUnavailable));
+
+const toProviderTokens = Effect.fn("DrizzlePg.toProviderTokens")(function* (row: AccountRow) {
+  const accessToken = yield* optionalProtectedProviderToken(row.providerAccessToken);
+  const refreshToken = yield* optionalProtectedProviderToken(row.providerRefreshToken);
+  const idToken = yield* optionalProtectedProviderToken(row.providerIdToken);
+  return {
+    ...(accessToken === undefined ? {} : { accessToken }),
+    ...(refreshToken === undefined ? {} : { refreshToken }),
+    ...(idToken === undefined ? {} : { idToken }),
+    ...(row.providerTokenType === null ? {} : { tokenType: row.providerTokenType }),
+    ...(row.providerTokenScope === null ? {} : { scope: row.providerTokenScope }),
+    ...(row.providerAccessTokenExpiresAt === null
+      ? {}
+      : { accessTokenExpiresAt: row.providerAccessTokenExpiresAt }),
+    ...(row.providerRefreshTokenExpiresAt === null
+      ? {}
+      : { refreshTokenExpiresAt: row.providerRefreshTokenExpiresAt }),
+  } satisfies ProtectedProviderTokenSet;
+});
+
+const toOAuthProviderAccount = Effect.fn("DrizzlePg.toOAuthProviderAccount")(function* (
+  row: AccountRow,
+) {
+  if (row.providerId === "credential") return yield* backendUnavailable;
+  const providerTokens = yield* toProviderTokens(row);
+  return {
+    id: row.id,
+    providerId: row.providerId,
+    accountId: row.accountId,
+    userId: row.userId,
+    scopes: row.scopes,
+    providerTokens,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+});
+
 const joinedCredentialUser = (row: CredentialJoinRow): AuthUser => ({
   id: row.userId,
   email: decodeNormalizedEmail(row.userEmail),
@@ -417,6 +489,13 @@ const accountSelect = (alias: string) => `
   ${alias}.user_id AS "userId",
   ${alias}.scopes AS "scopes",
   ${alias}.password_hash AS "passwordHash",
+  ${alias}.provider_access_token AS "providerAccessToken",
+  ${alias}.provider_refresh_token AS "providerRefreshToken",
+  ${alias}.provider_id_token AS "providerIdToken",
+  ${alias}.provider_token_type AS "providerTokenType",
+  ${alias}.provider_token_scope AS "providerTokenScope",
+  ${millis(`${alias}.provider_access_token_expires_at`)} AS "providerAccessTokenExpiresAt",
+  ${millis(`${alias}.provider_refresh_token_expires_at`)} AS "providerRefreshTokenExpiresAt",
   ${millis(`${alias}.created_at`)} AS "createdAt",
   ${millis(`${alias}.updated_at`)} AS "updatedAt"
 `;
@@ -560,6 +639,134 @@ const make: <S extends AuthDrizzlePgSchema>(
               ),
           )
           .pipe(Effect.mapError(storageFailure));
+
+      const selectOAuthAccountForUpdate = Effect.fn("DrizzlePg.selectOAuthAccountForUpdate")(
+        function* (providerId: OAuthProviderId, providerAccountId: string) {
+          const rows = yield* sql.unsafe<AccountRow>(
+            `SELECT ${accountSelect("a")}
+             FROM ${tables.Accounts} a
+             WHERE a.provider_id = $1 AND a.account_id = $2
+             LIMIT 1
+             FOR UPDATE`,
+            [providerId, providerAccountId],
+          );
+          return rows[0];
+        },
+      );
+
+      const selectUserByIdForUpdate = Effect.fn("DrizzlePg.selectUserByIdForUpdate")(function* (
+        userId: string,
+      ) {
+        const rows = yield* sql.unsafe<UserRow>(
+          `SELECT ${userSelect("u")}
+           FROM ${tables.Users} u
+           WHERE u.id = $1
+           LIMIT 1
+           FOR UPDATE`,
+          [userId],
+        );
+        return rows[0];
+      });
+
+      const selectUserByEmailForUpdate = Effect.fn("DrizzlePg.selectUserByEmailForUpdate")(
+        function* (email: AuthUser["email"]) {
+          const rows = yield* sql.unsafe<UserRow>(
+            `SELECT ${userSelect("u")}
+             FROM ${tables.Users} u
+             WHERE u.email = $1
+             LIMIT 1
+             FOR UPDATE`,
+            [email],
+          );
+          return rows[0];
+        },
+      );
+
+      const insertOAuthAccount = Effect.fn("DrizzlePg.insertOAuthAccount")(function* (input: {
+        readonly providerId: OAuthProviderId;
+        readonly providerAccountId: string;
+        readonly userId: string;
+        readonly scopes: ReadonlyArray<string>;
+        readonly providerTokens: ProtectedProviderTokenSet;
+        readonly now: number;
+      }) {
+        const id = yield* makeId("acc");
+        const row = yield* sql
+          .unsafe<AccountRow>(
+            `INSERT INTO ${tables.Accounts}
+               (id, provider_id, account_id, user_id, scopes, password_hash,
+                provider_access_token, provider_refresh_token, provider_id_token,
+                provider_token_type, provider_token_scope,
+                provider_access_token_expires_at, provider_refresh_token_expires_at,
+                created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, NULL,
+                     $6, $7, $8, $9, $10,
+                     CASE WHEN $11::boolean THEN to_timestamp($12 / 1000.0) ELSE NULL END,
+                     CASE WHEN $13::boolean THEN to_timestamp($14 / 1000.0) ELSE NULL END,
+                     to_timestamp($15 / 1000.0), to_timestamp($15 / 1000.0))
+             RETURNING ${accountSelect(tables.Accounts)}`,
+            [
+              id,
+              input.providerId,
+              input.providerAccountId,
+              input.userId,
+              input.scopes,
+              input.providerTokens.accessToken ?? null,
+              input.providerTokens.refreshToken ?? null,
+              input.providerTokens.idToken ?? null,
+              input.providerTokens.tokenType ?? null,
+              input.providerTokens.scope ?? null,
+              input.providerTokens.accessTokenExpiresAt !== undefined,
+              input.providerTokens.accessTokenExpiresAt ?? null,
+              input.providerTokens.refreshTokenExpiresAt !== undefined,
+              input.providerTokens.refreshTokenExpiresAt ?? null,
+              input.now,
+            ],
+          )
+          .pipe(Effect.flatMap(one));
+        return yield* toOAuthProviderAccount(row);
+      });
+
+      const updateOAuthAccount = Effect.fn("DrizzlePg.updateOAuthAccount")(function* (input: {
+        readonly providerId: OAuthProviderId;
+        readonly providerAccountId: string;
+        readonly scopes: ReadonlyArray<string>;
+        readonly providerTokens: ProtectedProviderTokenSet;
+        readonly now: number;
+      }) {
+        const row = yield* sql
+          .unsafe<AccountRow>(
+            `UPDATE ${tables.Accounts}
+             SET scopes = $3,
+                 provider_access_token = COALESCE($4, provider_access_token),
+                 provider_refresh_token = COALESCE($5, provider_refresh_token),
+                 provider_id_token = COALESCE($6, provider_id_token),
+                 provider_token_type = COALESCE($7, provider_token_type),
+                 provider_token_scope = COALESCE($8, provider_token_scope),
+                 provider_access_token_expires_at = CASE WHEN $9::boolean THEN to_timestamp($10 / 1000.0) ELSE provider_access_token_expires_at END,
+                 provider_refresh_token_expires_at = CASE WHEN $11::boolean THEN to_timestamp($12 / 1000.0) ELSE provider_refresh_token_expires_at END,
+                 updated_at = to_timestamp($13 / 1000.0)
+             WHERE provider_id = $1 AND account_id = $2
+             RETURNING ${accountSelect(tables.Accounts)}`,
+            [
+              input.providerId,
+              input.providerAccountId,
+              input.scopes,
+              input.providerTokens.accessToken ?? null,
+              input.providerTokens.refreshToken ?? null,
+              input.providerTokens.idToken ?? null,
+              input.providerTokens.tokenType ?? null,
+              input.providerTokens.scope ?? null,
+              input.providerTokens.accessTokenExpiresAt !== undefined,
+              input.providerTokens.accessTokenExpiresAt ?? null,
+              input.providerTokens.refreshTokenExpiresAt !== undefined,
+              input.providerTokens.refreshTokenExpiresAt ?? null,
+              input.now,
+            ],
+          )
+          .pipe(Effect.flatMap(one));
+        return yield* toOAuthProviderAccount(row);
+      });
 
       return {
         createUserWithCredentialAccount: (input) =>
@@ -908,8 +1115,109 @@ const make: <S extends AuthDrizzlePgSchema>(
                 ),
             )
             .pipe(Effect.mapError(storageFailure)),
-        completeOAuthSignIn: () => Effect.fail(backendUnavailable),
-        completeOAuthLink: () => Effect.fail(backendUnavailable),
+        completeOAuthSignIn: (input) =>
+          sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const existingAccount = yield* selectOAuthAccountForUpdate(
+                  input.providerId,
+                  input.providerAccountId,
+                );
+                if (existingAccount !== undefined) {
+                  const userRow = yield* selectUserByIdForUpdate(existingAccount.userId).pipe(
+                    Effect.flatMap((row) =>
+                      row === undefined ? Effect.fail(backendUnavailable) : Effect.succeed(row),
+                    ),
+                  );
+                  const account = yield* updateOAuthAccount(input);
+                  return { user: toUser(userRow), account, isNewUser: false };
+                }
+
+                const existingUser = yield* selectUserByEmailForUpdate(input.email);
+                if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
+                  return yield* new OAuthAccountStorageFailure({
+                    reason: "AutomaticLinkingNotAllowed",
+                  });
+                }
+                if (existingUser !== undefined) {
+                  const account = yield* insertOAuthAccount({
+                    providerId: input.providerId,
+                    providerAccountId: input.providerAccountId,
+                    userId: existingUser.id,
+                    scopes: input.scopes,
+                    providerTokens: input.providerTokens,
+                    now: input.now,
+                  });
+                  return { user: toUser(existingUser), account, isNewUser: false };
+                }
+                if (!input.allowImplicitSignUp) {
+                  return yield* new OAuthAccountStorageFailure({
+                    reason: "ImplicitSignUpDisabled",
+                  });
+                }
+
+                const userId = yield* makeId("usr");
+                const userRow = yield* sql
+                  .unsafe<UserRow>(
+                    `INSERT INTO ${tables.Users}
+                       (id, email, name, image, email_verified, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0), to_timestamp($6 / 1000.0))
+                     RETURNING ${userSelect(tables.Users)}`,
+                    [userId, input.email, input.name, input.image, input.emailVerified, input.now],
+                  )
+                  .pipe(Effect.flatMap(one));
+                const account = yield* insertOAuthAccount({
+                  providerId: input.providerId,
+                  providerAccountId: input.providerAccountId,
+                  userId,
+                  scopes: input.scopes,
+                  providerTokens: input.providerTokens,
+                  now: input.now,
+                });
+                return { user: toUser(userRow), account, isNewUser: true };
+              }),
+            )
+            .pipe(Effect.mapError(oauthAccountStorageFailure)),
+        completeOAuthLink: (input) =>
+          sql
+            .withTransaction(
+              Effect.gen(function* () {
+                const userRow = yield* selectUserByIdForUpdate(input.userId).pipe(
+                  Effect.flatMap((row) =>
+                    row === undefined
+                      ? Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkUserNotFound" }))
+                      : Effect.succeed(row),
+                  ),
+                );
+                const user = toUser(userRow);
+                const existingAccount = yield* selectOAuthAccountForUpdate(
+                  input.providerId,
+                  input.providerAccountId,
+                );
+                if (existingAccount !== undefined && existingAccount.userId !== input.userId) {
+                  return yield* new OAuthAccountStorageFailure({
+                    reason: "ProviderAccountLinkedToDifferentUser",
+                  });
+                }
+                if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
+                  return yield* new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" });
+                }
+                if (existingAccount !== undefined) {
+                  const account = yield* updateOAuthAccount(input);
+                  return { user, account, isNewUser: false };
+                }
+                const account = yield* insertOAuthAccount({
+                  providerId: input.providerId,
+                  providerAccountId: input.providerAccountId,
+                  userId: input.userId,
+                  scopes: input.scopes,
+                  providerTokens: input.providerTokens,
+                  now: input.now,
+                });
+                return { user, account, isNewUser: false };
+              }),
+            )
+            .pipe(Effect.mapError(oauthAccountStorageFailure)),
       };
     }),
 );
