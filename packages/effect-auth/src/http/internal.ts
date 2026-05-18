@@ -5,6 +5,7 @@ import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import { Auth } from "../auth.js";
+import { OAuth } from "../oauth/index.js";
 import {
   invalidCredentials,
   invalidToken,
@@ -88,6 +89,12 @@ export const AuthHttpErrorMapper = Context.Reference<AuthHttpErrorMapperShape>(
   { defaultValue: () => defaultAuthHttpErrorMapper },
 );
 
+export interface AuthHttpOAuthRedirectConfigInput {
+  readonly signInSuccessPath?: string;
+  readonly linkSuccessPath?: string;
+  readonly errorPath?: string;
+}
+
 export interface AuthHttpConfigInput {
   readonly trustedOrigins: ReadonlyArray<URL>;
   readonly sessionCookieName?: string;
@@ -95,10 +102,18 @@ export interface AuthHttpConfigInput {
   readonly secureCookies?: boolean;
   readonly defaultTokenExtractor?: AuthHttpTokenExtractor;
   readonly baseUrl?: URL;
+  readonly oauth?: AuthHttpOAuthRedirectConfigInput;
+}
+
+export interface AuthHttpOAuthRedirectConfigShape {
+  readonly signInSuccessPath: string;
+  readonly linkSuccessPath: string;
+  readonly errorPath: string;
 }
 
 const cookieNamePattern = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u;
 const cookiePathPattern = /^\/[\u0020-\u003a\u003c-\u007e]*$/u;
+const oauthRedirectPathPattern = /^\/(?!\/)[!-~]*$/u;
 
 const parseSessionCookieName = (value: string | undefined): Effect.Effect<string, AuthHttpError> =>
   value === undefined
@@ -113,6 +128,26 @@ const parseSessionCookiePath = (value: string | undefined): Effect.Effect<string
     : cookiePathPattern.test(value)
       ? Effect.succeed(value)
       : Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid session cookie path" }));
+
+const parseOAuthRedirectPath = (
+  value: string | undefined,
+  fallback: string,
+): Effect.Effect<string, AuthHttpError> => {
+  const path = value ?? fallback;
+  return oauthRedirectPathPattern.test(path)
+    ? Effect.succeed(path)
+    : Effect.fail(AuthHttpError.BadRequest({ reason: "Invalid OAuth redirect path" }));
+};
+
+const parseOAuthRedirectConfig = Effect.fn("parseOAuthRedirectConfig")(function* (
+  input: AuthHttpOAuthRedirectConfigInput | undefined,
+) {
+  return {
+    signInSuccessPath: yield* parseOAuthRedirectPath(input?.signInSuccessPath, "/"),
+    linkSuccessPath: yield* parseOAuthRedirectPath(input?.linkSuccessPath, "/settings/accounts"),
+    errorPath: yield* parseOAuthRedirectPath(input?.errorPath, "/auth/error"),
+  } satisfies AuthHttpOAuthRedirectConfigShape;
+});
 
 const deriveSecureCookies = (input: AuthHttpConfigInput, nodeEnv: string): boolean => {
   if (input.secureCookies !== undefined) return input.secureCookies;
@@ -132,12 +167,15 @@ const makeAuthHttpConfig: (
   function* (input, nodeEnv) {
     const sessionCookieName = yield* parseSessionCookieName(input.sessionCookieName);
     const sessionCookiePath = yield* parseSessionCookiePath(input.sessionCookiePath);
+    const oauth = yield* parseOAuthRedirectConfig(input.oauth);
     return {
       trustedOrigins: new Set(input.trustedOrigins.map((origin) => origin.origin)),
       sessionCookieName,
       sessionCookiePath,
       secureCookies: deriveSecureCookies(input, nodeEnv),
       defaultTokenExtractor: Option.fromUndefinedOr(input.defaultTokenExtractor),
+      baseUrl: Option.fromUndefinedOr(input.baseUrl),
+      oauth,
     };
   },
 );
@@ -150,6 +188,8 @@ export class AuthHttpConfig extends Context.Service<
     readonly sessionCookiePath: string;
     readonly secureCookies: boolean;
     readonly defaultTokenExtractor: Option.Option<AuthHttpTokenExtractor>;
+    readonly baseUrl: Option.Option<URL>;
+    readonly oauth: AuthHttpOAuthRedirectConfigShape;
   }
 >()("effect-auth/AuthHttpConfig") {
   static readonly layer = (input: AuthHttpConfigInput) =>
@@ -567,6 +607,16 @@ export interface AuthHttpListAccountsResponse {
 export interface AuthHttpOkResponse {
   readonly ok: true;
 }
+
+export interface OAuthAuthorizationUrlResponse {
+  readonly authorizationUrl: string;
+}
+
+const OAuthStartPayload = Schema.Struct({
+  providerId: Schema.String,
+  scopes: Schema.optionalKey(Schema.Array(Schema.String)),
+  allowSignUp: Schema.optionalKey(Schema.Boolean),
+});
 
 const SessionTokenPayload = Schema.Struct({
   sessionToken: Schema.String,
@@ -1032,6 +1082,81 @@ const extractMountedSessionToken = Effect.fn("extractMountedSessionToken")(funct
     Found: (found) => Effect.succeed(found),
   });
 });
+
+const requireOAuthBaseUrl = (config: AuthHttpConfigShape): Effect.Effect<URL, AuthHttpError> =>
+  Option.match(config.baseUrl, {
+    onNone: () => Effect.fail(AuthHttpError.BadRequest({ reason: "OAuth baseUrl is required" })),
+    onSome: Effect.succeed,
+  });
+
+const mountedOAuthCallbackPath = (basePath: `/${string}`, providerId: string): `/${string}` =>
+  `${basePath}/oauth2/callback/${providerId}`;
+
+const oauthCallbackRedirectUri = Effect.fn("oauthCallbackRedirectUri")(function* (
+  config: AuthHttpConfigShape,
+  basePath: `/${string}`,
+  providerId: string,
+) {
+  const baseUrl = yield* requireOAuthBaseUrl(config);
+  return new URL(mountedOAuthCallbackPath(basePath, providerId), baseUrl);
+});
+
+const toOAuthStartHttpError = (error: unknown): AuthHttpError =>
+  Predicate.isTagged(error, "OAuthStartError") || Predicate.isTagged(error, "OAuthProviderNotFound")
+    ? AuthHttpError.BadRequest({ reason: "Invalid OAuth start request" })
+    : toAuthHttpError(error);
+
+const mountedOAuthStartBoundary = <A, E, R>(self: Effect.Effect<A, E, R>) =>
+  self.pipe(Effect.catch((error) => authHttpErrorResponse(toOAuthStartHttpError(error))));
+
+const handleMountedOAuthSignInStart = (
+  basePath: `/${string}`,
+  request: HttpServerRequest.HttpServerRequest,
+) =>
+  mountedOAuthStartBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(OAuthStartPayload)),
+      );
+      const config = yield* AuthHttpConfig;
+      const oauth = yield* OAuth;
+      const result = yield* oauth.startSignIn({
+        providerId: payload.providerId,
+        redirectUri: yield* oauthCallbackRedirectUri(config, basePath, payload.providerId),
+        ...(payload.scopes === undefined ? {} : { scopes: payload.scopes }),
+        ...(payload.allowSignUp === undefined ? {} : { allowSignUp: payload.allowSignUp }),
+      });
+      return mountedJson({
+        authorizationUrl: result.authorizationUrl.href,
+      } satisfies OAuthAuthorizationUrlResponse);
+    }),
+  );
+
+const handleMountedOAuthLinkStart = (
+  basePath: `/${string}`,
+  request: HttpServerRequest.HttpServerRequest,
+) =>
+  mountedOAuthStartBoundary(
+    Effect.gen(function* () {
+      yield* checkAuthHttpConfigRequestOrigin(request);
+      const payload = yield* request.json.pipe(
+        Effect.flatMap(Schema.decodeUnknownEffect(OAuthStartPayload)),
+      );
+      const config = yield* AuthHttpConfig;
+      const extracted = yield* extractMountedSessionToken();
+      const oauth = yield* OAuth;
+      const result = yield* oauth.startLink({
+        providerId: payload.providerId,
+        redirectUri: yield* oauthCallbackRedirectUri(config, basePath, payload.providerId),
+        sessionToken: extracted.token,
+        ...(payload.scopes === undefined ? {} : { scopes: payload.scopes }),
+      });
+      return mountedJson({
+        authorizationUrl: result.authorizationUrl.href,
+      } satisfies OAuthAuthorizationUrlResponse);
+    }),
+  );
 
 const handleMountedSignUpEmail = (request: HttpServerRequest.HttpServerRequest) =>
   mountedErrorBoundary(
@@ -1721,6 +1846,10 @@ export interface AuthHttpMountOptions {
   readonly basePath: `/${string}`;
 }
 
+export interface OAuthHttpMountOptions {
+  readonly basePath: `/${string}`;
+}
+
 const mountedPath = (basePath: `/${string}`, path: `/${string}`): `/${string}` =>
   `${basePath}${path}`;
 
@@ -1785,6 +1914,21 @@ export const AuthHttp = {
         ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/delete-user"), (request) =>
           handleMountedDeleteUser(request),
+        ),
+      ),
+};
+
+export const OAuthHttp = {
+  mount:
+    (options: OAuthHttpMountOptions) =>
+    <A, E, R>(self: Layer.Layer<A, E, R>) =>
+      Layer.mergeAll(
+        self,
+        HttpRouter.add("POST", mountedPath(options.basePath, "/sign-in/oauth2"), (request) =>
+          handleMountedOAuthSignInStart(options.basePath, request),
+        ),
+        HttpRouter.add("POST", mountedPath(options.basePath, "/oauth2/link"), (request) =>
+          handleMountedOAuthLinkStart(options.basePath, request),
         ),
       ),
 };

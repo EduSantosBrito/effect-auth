@@ -36,6 +36,7 @@ import {
   AuthHttpToken,
   AuthSession,
   CurrentAuthSession,
+  OAuthHttp,
   TrustedOrigins,
 } from "../src/http/index";
 import {
@@ -344,6 +345,7 @@ export {
   Layer,
   MockAuthEmail,
   NativeScryptPasswordHasher,
+  OAuthHttp,
   Option,
   PasswordHasher,
   PasswordPolicy,

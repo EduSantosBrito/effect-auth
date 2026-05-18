@@ -210,7 +210,35 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Mounted OAuth HTTP routes, OIDC ID Token validation, and Drizzle provider-account persistence are separate follow-up slices.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. OIDC ID Token validation, mounted OAuth callback routes, and Drizzle provider-account persistence are separate follow-up slices.
+
+Mounted OAuth start routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
+
+```typescript
+import { Layer } from "effect";
+import { AuthHttpConfig, OAuthHttp } from "effect-auth/http";
+import * as HttpRouter from "effect/unstable/http/HttpRouter";
+
+const OAuthHttpLive = Layer.mergeAll(
+  OAuthLive, // from the OAuth service wiring above
+  AuthHttpConfig.layer({
+    baseUrl: new URL("https://app.example.com"),
+    trustedOrigins: [new URL("https://app.example.com")],
+    oauth: {
+      signInSuccessPath: "/",
+      linkSuccessPath: "/settings/accounts",
+      errorPath: "/auth/error",
+    },
+  }),
+);
+
+const oauthRoutes = HttpRouter.layer.pipe(
+  OAuthHttp.mount({ basePath: "/api/auth" }),
+  Layer.provideMerge(OAuthHttpLive),
+);
+```
+
+`POST /api/auth/sign-in/oauth2` and `POST /api/auth/oauth2/link` return `{ authorizationUrl }` JSON only; they never include Session Tokens or Provider Tokens and never redirect automatically. OAuth HTTP routes require `AuthHttpConfig.baseUrl` so provider callback URLs are derived as `baseUrl + basePath + /oauth2/callback/:providerId`. OAuth redirect result paths are same-origin relative paths; absolute and protocol-relative paths are rejected during `AuthHttpConfig.layer(...)` construction.
 
 ## Drizzle Postgres Storage
 
@@ -283,16 +311,18 @@ export const authSchema = { Users, Accounts, Sessions, Verifications, OAuthState
 ```typescript
 import { Effect, Layer, Option } from "effect";
 import { AuthLive } from "effect-auth";
-import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession } from "effect-auth/http";
+import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession, OAuthHttp } from "effect-auth/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
 const AuthServicesLive = AuthLive().pipe(
   Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
 );
 
-const AuthHttpLive = Layer.mergeAll(
+const AppHttpLive = Layer.mergeAll(
   AuthServicesLive,
+  OAuthLive, // omit this and OAuthHttp.mount if you do not use OAuth routes
   AuthHttpConfig.layer({
+    baseUrl: new URL("https://app.example.com"),
     trustedOrigins: [new URL("https://app.example.com")],
     sessionCookieName: "__Host_effect_auth_session",
     secureCookies: true,
@@ -301,7 +331,8 @@ const AuthHttpLive = Layer.mergeAll(
 
 const app = HttpRouter.layer.pipe(
   AuthHttp.mount({ basePath: "/api/auth" }),
-  Layer.provideMerge(AuthHttpLive),
+  OAuthHttp.mount({ basePath: "/api/auth" }),
+  Layer.provideMerge(AppHttpLive),
 );
 
 const protectedProgram = Effect.gen(function* () {
@@ -348,11 +379,20 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 `POST /update-user` requires a valid Session Token and trusted origin, updates `name` and/or `image`, and returns `{ user }`. `GET /accounts` requires a valid Session Token and returns `{ accounts }`; account responses never include password hashes, access tokens, refresh tokens, ID tokens, or other provider secrets.
 `POST /delete-user` requires a valid Session Token, trusted origin, and a `password` body field. Cookie-authenticated deletion clears the Session Cookie and returns `{ ok: true }`.
 
+Mounted with `OAuthHttp.mount({ basePath: "/api/auth" })`:
+
+| Method | Path                         |
+| ------ | ---------------------------- |
+| `POST` | `/api/auth/sign-in/oauth2`   |
+| `POST` | `/api/auth/oauth2/link`      |
+
+OAuth start route bodies accept `providerId`, optional `scopes`, and optional `allowSignUp` for sign-in starts. Responses are `{ authorizationUrl }` JSON and use the configured `baseUrl` plus mount path for provider callback URL derivation; untrusted request headers are never used for callback URLs.
+
 Identity Core changes the `AuthStorage` contract before 1.0: storage adapters should create Users and Credential Accounts atomically via `createUserWithCredentialAccount`, store password hashes only on Credential Accounts, use the User Id as the credential `accountId`, update User-level `emailVerified`, and expose secret-free account projections through `listUserAccounts`. No legacy credential storage shim is provided.
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication plus the first generic OAuth start/callback slices. OIDC ID Token validation, mounted OAuth HTTP routes, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication plus generic OAuth start/callback workflow slices and mounted OAuth start routes. OIDC ID Token validation, mounted OAuth callback routes, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 
