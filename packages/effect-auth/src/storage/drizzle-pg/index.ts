@@ -17,6 +17,7 @@ import {
   AuthStorage,
   AuthStorageFailure,
   OAuthAccountStorageFailure,
+  OAuthSessionStorageFailure,
   type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
@@ -270,6 +271,12 @@ const storageFailure = (error: SqlError | AuthStorageFailure): AuthStorageFailur
 const oauthAccountStorageFailure = (
   error: SqlError | AuthStorageFailure | OAuthAccountStorageFailure,
 ) => (Predicate.isTagged(error, "OAuthAccountStorageFailure") ? error : storageFailure(error));
+const oauthSignInWithSessionStorageFailure = (
+  error: SqlError | AuthStorageFailure | OAuthAccountStorageFailure | OAuthSessionStorageFailure,
+) =>
+  Predicate.isTagged(error, "OAuthSessionStorageFailure")
+    ? error
+    : oauthAccountStorageFailure(error);
 const decodeNormalizedEmail = Schema.decodeSync(NormalizedEmail);
 const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
 
@@ -588,6 +595,30 @@ const make: <S extends AuthDrizzlePgSchema>(
 
       const findSessionByTokenHash = makeFindSessionByTokenHash(sql, tables);
 
+      const insertSession = Effect.fn("DrizzlePg.insertSession")(function* (
+        input: Parameters<AuthStorageShape["createSession"]>[0],
+      ) {
+        const id = yield* makeId("ses");
+        const row = yield* sql
+          .unsafe<SessionRow>(
+            `INSERT INTO ${tables.Sessions}
+                 (id, user_id, token_hash, created_at, updated_at, expires_at, revoked_at, ip_address, user_agent)
+               VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), to_timestamp($4 / 1000.0), to_timestamp($5 / 1000.0), NULL, $6, $7)
+               RETURNING ${sessionSelect(tables.Sessions)}`,
+            [
+              id,
+              input.userId,
+              tokenKey(input.tokenHash),
+              input.now,
+              input.expiresAt,
+              input.ipAddress ?? null,
+              input.userAgent ?? null,
+            ],
+          )
+          .pipe(Effect.flatMap(one));
+        return toSession(row);
+      });
+
       const consumeVerificationToken: AuthStorageShape["consumeVerificationToken"] = (input) =>
         sql
           .withTransaction(
@@ -768,6 +799,67 @@ const make: <S extends AuthDrizzlePgSchema>(
         return yield* toOAuthProviderAccount(row);
       });
 
+      const completeOAuthSignInTransaction = Effect.fn("DrizzlePg.completeOAuthSignInTransaction")(
+        function* (input: Parameters<AuthStorageShape["completeOAuthSignIn"]>[0]) {
+          const existingAccount = yield* selectOAuthAccountForUpdate(
+            input.providerId,
+            input.providerAccountId,
+          );
+          if (existingAccount !== undefined) {
+            const userRow = yield* selectUserByIdForUpdate(existingAccount.userId).pipe(
+              Effect.flatMap((row) =>
+                row === undefined ? Effect.fail(backendUnavailable) : Effect.succeed(row),
+              ),
+            );
+            const account = yield* updateOAuthAccount(input);
+            return { user: toUser(userRow), account, isNewUser: false };
+          }
+
+          const existingUser = yield* selectUserByEmailForUpdate(input.email);
+          if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
+            return yield* new OAuthAccountStorageFailure({
+              reason: "AutomaticLinkingNotAllowed",
+            });
+          }
+          if (existingUser !== undefined) {
+            const account = yield* insertOAuthAccount({
+              providerId: input.providerId,
+              providerAccountId: input.providerAccountId,
+              userId: existingUser.id,
+              scopes: input.scopes,
+              providerTokens: input.providerTokens,
+              now: input.now,
+            });
+            return { user: toUser(existingUser), account, isNewUser: false };
+          }
+          if (!input.allowImplicitSignUp) {
+            return yield* new OAuthAccountStorageFailure({
+              reason: "ImplicitSignUpDisabled",
+            });
+          }
+
+          const userId = yield* makeId("usr");
+          const userRow = yield* sql
+            .unsafe<UserRow>(
+              `INSERT INTO ${tables.Users}
+                       (id, email, name, image, email_verified, created_at, updated_at)
+                     VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0), to_timestamp($6 / 1000.0))
+                     RETURNING ${userSelect(tables.Users)}`,
+              [userId, input.email, input.name, input.image, input.emailVerified, input.now],
+            )
+            .pipe(Effect.flatMap(one));
+          const account = yield* insertOAuthAccount({
+            providerId: input.providerId,
+            providerAccountId: input.providerAccountId,
+            userId,
+            scopes: input.scopes,
+            providerTokens: input.providerTokens,
+            now: input.now,
+          });
+          return { user: toUser(userRow), account, isNewUser: true };
+        },
+      );
+
       return {
         createUserWithCredentialAccount: (input) =>
           sql
@@ -875,29 +967,7 @@ const make: <S extends AuthDrizzlePgSchema>(
               Effect.mapError(storageFailure),
             ),
         consumeVerificationToken,
-        createSession: (input) =>
-          makeId("ses").pipe(
-            Effect.flatMap((id) =>
-              sql.unsafe<SessionRow>(
-                `INSERT INTO ${tables.Sessions}
-                 (id, user_id, token_hash, created_at, updated_at, expires_at, revoked_at, ip_address, user_agent)
-               VALUES ($1, $2, $3, to_timestamp($4 / 1000.0), to_timestamp($4 / 1000.0), to_timestamp($5 / 1000.0), NULL, $6, $7)
-               RETURNING ${sessionSelect(tables.Sessions)}`,
-                [
-                  id,
-                  input.userId,
-                  tokenKey(input.tokenHash),
-                  input.now,
-                  input.expiresAt,
-                  input.ipAddress ?? null,
-                  input.userAgent ?? null,
-                ],
-              ),
-            ),
-            Effect.flatMap(one),
-            Effect.map(toSession),
-            Effect.mapError(storageFailure),
-          ),
+        createSession: (input) => insertSession(input).pipe(Effect.mapError(storageFailure)),
         findSessionByTokenHash,
         rotateSessionToken: (input) =>
           sql
@@ -1117,67 +1187,33 @@ const make: <S extends AuthDrizzlePgSchema>(
             .pipe(Effect.mapError(storageFailure)),
         completeOAuthSignIn: (input) =>
           sql
+            .withTransaction(completeOAuthSignInTransaction(input))
+            .pipe(Effect.mapError(oauthAccountStorageFailure)),
+        completeOAuthSignInWithSession: (input) =>
+          sql
             .withTransaction(
               Effect.gen(function* () {
-                const existingAccount = yield* selectOAuthAccountForUpdate(
-                  input.providerId,
-                  input.providerAccountId,
-                );
-                if (existingAccount !== undefined) {
-                  const userRow = yield* selectUserByIdForUpdate(existingAccount.userId).pipe(
-                    Effect.flatMap((row) =>
-                      row === undefined ? Effect.fail(backendUnavailable) : Effect.succeed(row),
-                    ),
-                  );
-                  const account = yield* updateOAuthAccount(input);
-                  return { user: toUser(userRow), account, isNewUser: false };
-                }
-
-                const existingUser = yield* selectUserByEmailForUpdate(input.email);
-                if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
-                  return yield* new OAuthAccountStorageFailure({
-                    reason: "AutomaticLinkingNotAllowed",
-                  });
-                }
-                if (existingUser !== undefined) {
-                  const account = yield* insertOAuthAccount({
-                    providerId: input.providerId,
-                    providerAccountId: input.providerAccountId,
-                    userId: existingUser.id,
-                    scopes: input.scopes,
-                    providerTokens: input.providerTokens,
-                    now: input.now,
-                  });
-                  return { user: toUser(existingUser), account, isNewUser: false };
-                }
-                if (!input.allowImplicitSignUp) {
-                  return yield* new OAuthAccountStorageFailure({
-                    reason: "ImplicitSignUpDisabled",
-                  });
-                }
-
-                const userId = yield* makeId("usr");
-                const userRow = yield* sql
-                  .unsafe<UserRow>(
-                    `INSERT INTO ${tables.Users}
-                       (id, email, name, image, email_verified, created_at, updated_at)
-                     VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0), to_timestamp($6 / 1000.0))
-                     RETURNING ${userSelect(tables.Users)}`,
-                    [userId, input.email, input.name, input.image, input.emailVerified, input.now],
-                  )
-                  .pipe(Effect.flatMap(one));
-                const account = yield* insertOAuthAccount({
-                  providerId: input.providerId,
-                  providerAccountId: input.providerAccountId,
-                  userId,
-                  scopes: input.scopes,
-                  providerTokens: input.providerTokens,
+                const signIn = yield* completeOAuthSignInTransaction(input);
+                const session = yield* insertSession({
+                  userId: signIn.user.id,
+                  tokenHash: input.sessionTokenHash,
+                  expiresAt: input.sessionExpiresAt,
                   now: input.now,
-                });
-                return { user: toUser(userRow), account, isNewUser: true };
+                  ...(input.sessionIpAddress === undefined
+                    ? {}
+                    : { ipAddress: input.sessionIpAddress }),
+                  ...(input.sessionUserAgent === undefined
+                    ? {}
+                    : { userAgent: input.sessionUserAgent }),
+                }).pipe(
+                  Effect.mapError(
+                    () => new OAuthSessionStorageFailure({ reason: "SessionCreationFailed" }),
+                  ),
+                );
+                return { ...signIn, session };
               }),
             )
-            .pipe(Effect.mapError(oauthAccountStorageFailure)),
+            .pipe(Effect.mapError(oauthSignInWithSessionStorageFailure)),
         completeOAuthLink: (input) =>
           sql
             .withTransaction(
@@ -1199,12 +1235,12 @@ const make: <S extends AuthDrizzlePgSchema>(
                     reason: "ProviderAccountLinkedToDifferentUser",
                   });
                 }
-                if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
-                  return yield* new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" });
-                }
                 if (existingAccount !== undefined) {
                   const account = yield* updateOAuthAccount(input);
                   return { user, account, isNewUser: false };
+                }
+                if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
+                  return yield* new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" });
                 }
                 const account = yield* insertOAuthAccount({
                   providerId: input.providerId,

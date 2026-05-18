@@ -74,6 +74,9 @@ export interface AuthLiveConfigInput {
     readonly encryptionKey?: Redacted.Redacted<string>;
     readonly encryptionKeyId?: string;
   };
+  readonly oauth?: {
+    readonly allowDifferentEmailLinking?: boolean;
+  };
 }
 
 export interface AuthLiveConfigShape {
@@ -95,6 +98,9 @@ export interface AuthLiveConfigShape {
     readonly ttlMillis: number;
     readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
     readonly encryptionKeyId: string;
+  };
+  readonly oauth: {
+    readonly allowDifferentEmailLinking: boolean;
   };
 }
 
@@ -157,6 +163,9 @@ const parseAuthLiveConfig = Effect.fn("AuthLiveConfig.parse")(function* (
       encryptionKey: optionalRedacted(input.oauthState?.encryptionKey),
       encryptionKeyId: input.oauthState?.encryptionKeyId ?? encryptionKeyId,
     },
+    oauth: {
+      allowDifferentEmailLinking: input.oauth?.allowDifferentEmailLinking ?? false,
+    },
   } satisfies AuthLiveConfigShape;
 });
 
@@ -181,6 +190,9 @@ export class AuthLiveConfig extends Context.Service<
       readonly ttlMillis: number;
       readonly encryptionKey: Option.Option<Redacted.Redacted<string>>;
       readonly encryptionKeyId: string;
+    };
+    readonly oauth: {
+      readonly allowDifferentEmailLinking: boolean;
     };
   }
 >()("effect-auth/AuthLiveConfig") {

@@ -33,7 +33,12 @@ import {
   makeDevMemoryStorageState,
   type DevMemoryStorageState,
 } from "../src/storage/dev-memory";
-import { AuthStorage, AuthStorageFailure, OAuthAccountStorageFailure } from "../src/storage/index";
+import {
+  AuthStorage,
+  AuthStorageFailure,
+  OAuthAccountStorageFailure,
+  OAuthSessionStorageFailure,
+} from "../src/storage/index";
 import { AuthToken, AuthTokenLive } from "../src/token/index";
 
 const encryptionKey = Redacted.make("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
@@ -89,6 +94,17 @@ const oidcProvider: OAuthProviderInput = {
   endpoints: {
     authorizationUrl: new URL("https://oidc.example/authorize"),
     tokenUrl: new URL("https://oidc.example/token"),
+    issuer: "https://oidc.example",
+    jwksUrl: new URL("https://oidc.example/jwks"),
+  },
+};
+
+const oidcProviderWithUserInfo: OAuthProviderInput = {
+  ...oidcProvider,
+  endpoints: {
+    authorizationUrl: new URL("https://oidc.example/authorize"),
+    tokenUrl: new URL("https://oidc.example/token"),
+    userInfoUrl: new URL("https://oidc.example/userinfo"),
     issuer: "https://oidc.example",
     jwksUrl: new URL("https://oidc.example/jwks"),
   },
@@ -173,8 +189,10 @@ const oidcClaims = (input: {
 const makeFakeOidcHttpClient = (input: {
   readonly tokenResponse: () => Readonly<Record<string, unknown>>;
   readonly jwksResponses: ReadonlyArray<Readonly<Record<string, unknown>>>;
+  readonly userInfoResponses?: ReadonlyArray<Readonly<Record<string, unknown>>>;
 }) => {
   let jwksRequestCount = 0;
+  let userInfoRequestCount = 0;
   return {
     live: Layer.succeed(HttpClient.HttpClient)(
       HttpClient.make((request, url) => {
@@ -185,6 +203,14 @@ const makeFakeOidcHttpClient = (input: {
           const response = input.jwksResponses[jwksRequestCount] ??
             input.jwksResponses[input.jwksResponses.length - 1] ?? { keys: [] };
           jwksRequestCount += 1;
+          return Effect.succeed(jsonResponse(request, response));
+        }
+        if (url.href === "https://oidc.example/userinfo" && input.userInfoResponses !== undefined) {
+          const response =
+            input.userInfoResponses[userInfoRequestCount] ??
+            input.userInfoResponses[input.userInfoResponses.length - 1] ??
+            {};
+          userInfoRequestCount += 1;
           return Effect.succeed(jsonResponse(request, response));
         }
         return Effect.fail(
@@ -198,6 +224,7 @@ const makeFakeOidcHttpClient = (input: {
       }),
     ),
     jwksRequestCount: () => jwksRequestCount,
+    userInfoRequestCount: () => userInfoRequestCount,
   };
 };
 
@@ -221,11 +248,13 @@ const makeFakeOAuthHttpClientLive = (
   options: {
     readonly tokenResponses?: ReadonlyArray<Readonly<Record<string, unknown>>>;
     readonly userInfo?: Readonly<Record<string, unknown>>;
+    readonly userInfoResponses?: ReadonlyArray<Readonly<Record<string, unknown>>>;
   } = {},
 ) => {
   let tokenRequestCount = 0;
+  let userInfoRequestCount = 0;
   const tokenResponses = options.tokenResponses ?? [defaultTokenResponse];
-  const userInfo = options.userInfo ?? defaultUserInfo;
+  const userInfoResponses = options.userInfoResponses ?? [options.userInfo ?? defaultUserInfo];
   return Layer.succeed(HttpClient.HttpClient)(
     HttpClient.make((request, url) => {
       if (url.href === "https://github.example/token") {
@@ -235,7 +264,12 @@ const makeFakeOAuthHttpClientLive = (
         return Effect.succeed(jsonResponse(request, response));
       }
       if (url.href === "https://github.example/user") {
-        return Effect.succeed(jsonResponse(request, userInfo));
+        const response =
+          userInfoResponses[userInfoRequestCount] ??
+          userInfoResponses[userInfoResponses.length - 1] ??
+          defaultUserInfo;
+        userInfoRequestCount += 1;
+        return Effect.succeed(jsonResponse(request, response));
       }
       return Effect.fail(
         new HttpClientError.HttpClientError({
@@ -259,6 +293,7 @@ const makeOAuthLayer = (
     readonly httpClientLive?: Layer.Layer<HttpClient.HttpClient>;
     readonly storageLive?: Layer.Layer<AuthStorage>;
     readonly providerTokenProtectionLive?: Layer.Layer<ProviderTokenProtection>;
+    readonly allowDifferentEmailLinking?: boolean;
   } = {},
 ) => {
   const HttpLive = options.httpClientLive ?? UnexpectedHttpClientLive;
@@ -271,6 +306,9 @@ const makeOAuthLayer = (
       ...(options.oauthStateTtl === undefined
         ? {}
         : { oauthState: { ttl: options.oauthStateTtl } }),
+      ...(options.allowDifferentEmailLinking === undefined
+        ? {}
+        : { oauth: { allowDifferentEmailLinking: options.allowDifferentEmailLinking } }),
     }),
     options.storageLive ?? DevMemoryAuthStorage(storageState),
     ProvidersLive,
@@ -605,27 +643,116 @@ it.effect("validates OIDC ID Tokens and refreshes JWKS once for unknown kid", ()
   });
 });
 
-it.effect("completes OIDC new-user callbacks with validated identity and protected tokens", () => {
+it.effect(
+  "completes OIDC new-user callbacks from ID Token claims without requiring user-info",
+  () => {
+    const storageState = makeDevMemoryStorageState();
+    const key = makeOidcKey("oidc-callback-key");
+    let idToken = "";
+    const http = makeFakeOidcHttpClient({
+      tokenResponse: () => ({
+        access_token: "oidc-access-token",
+        refresh_token: "oidc-refresh-token",
+        id_token: idToken,
+        token_type: "Bearer",
+        scope: "openid email",
+        expires_in: 3600,
+      }),
+      jwksResponses: [{ keys: [key.publicJwk] }],
+    });
+
+    return Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const storage = yield* AuthStorage;
+      const protection = yield* ProviderTokenProtection;
+
+      const started = yield* oauth.startSignIn({
+        providerId: "oidc",
+        redirectUri: new URL("https://app.example.com/auth/callback/oidc"),
+      });
+      const nonce = started.authorizationUrl.searchParams.get("nonce");
+      if (nonce === null) {
+        return yield* new MissingOAuthTestFixture({ message: "expected OIDC nonce" });
+      }
+      idToken = signOidcIdToken({
+        kid: key.kid,
+        privateKey: key.privateKey,
+        claims: oidcClaims({ nonce, overrides: { exp: 1_900_000_000, iat: undefined } }),
+      });
+
+      const result = yield* oauth.completeCallback({
+        providerId: "oidc",
+        state: started.state,
+        code: "oidc-code",
+        callbackMethod: "POST",
+      });
+      if (result.flow !== "SignIn") {
+        return yield* new MissingOAuthTestFixture({ message: "expected OIDC sign-in result" });
+      }
+      assert.strictEqual(result.isNewUser, true);
+      assert.strictEqual(result.user.email, "oidc@example.com");
+      assert.strictEqual(result.user.emailVerified, true);
+      assert.strictEqual(result.account.providerId, "oidc");
+      assert.strictEqual(result.account.accountId, "oidc-user-1");
+      assert.strictEqual(result.session.userId, result.user.id);
+      assert.strictEqual(started.authorizationUrl.href.includes("oidc-access-token"), false);
+      assert.strictEqual(started.authorizationUrl.href.includes(idToken), false);
+
+      const storedAccount = yield* latestProviderAccount(storageState);
+      const protectedAccessToken = storedAccount.providerTokens.accessToken;
+      const protectedIdToken = storedAccount.providerTokens.idToken;
+      if (protectedAccessToken === undefined || protectedIdToken === undefined) {
+        return yield* new MissingOAuthTestFixture({ message: "expected protected OIDC tokens" });
+      }
+      assert.notStrictEqual(protectedAccessToken, "oidc-access-token");
+      assert.notStrictEqual(protectedIdToken, idToken);
+      const clearAccessToken = yield* protection.unprotect({
+        providerId: storedAccount.providerId,
+        providerAccountId: storedAccount.accountId,
+        kind: "AccessToken",
+        protectedToken: protectedAccessToken,
+      });
+      assert.strictEqual(Redacted.value(clearAccessToken), "oidc-access-token");
+
+      const publicAccounts = yield* storage.listUserAccounts({ userId: result.user.id });
+      const publicAccount = publicAccounts[0];
+      if (publicAccount === undefined) {
+        return yield* new MissingOAuthTestFixture({ message: "expected public OIDC account" });
+      }
+      assert.strictEqual(publicAccount.providerId, "oidc");
+      assert.strictEqual(Object.hasOwn(publicAccount, "providerTokens"), false);
+      assert.strictEqual(http.userInfoRequestCount(), 0);
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(storageState, {
+          providers: [oidcProviderWithUserInfo],
+          httpClientLive: http.live,
+        }),
+      ),
+    );
+  },
+);
+
+it.effect("falls back to OIDC user-info when validated ID Token has no email", () => {
   const storageState = makeDevMemoryStorageState();
-  const key = makeOidcKey("oidc-callback-key");
+  const key = makeOidcKey("oidc-userinfo-key");
   let idToken = "";
   const http = makeFakeOidcHttpClient({
-    tokenResponse: () => ({
-      access_token: "oidc-access-token",
-      refresh_token: "oidc-refresh-token",
-      id_token: idToken,
-      token_type: "Bearer",
-      scope: "openid email",
-      expires_in: 3600,
-    }),
+    tokenResponse: () => ({ access_token: "oidc-access-token", id_token: idToken }),
     jwksResponses: [{ keys: [key.publicJwk] }],
+    userInfoResponses: [
+      {
+        sub: "oidc-user-1",
+        email: "userinfo-oidc@example.com",
+        email_verified: true,
+        name: "OIDC UserInfo User",
+        picture: "https://oidc.example/userinfo-avatar.png",
+      },
+    ],
   });
 
   return Effect.gen(function* () {
     const oauth = yield* OAuth;
-    const storage = yield* AuthStorage;
-    const protection = yield* ProviderTokenProtection;
-
     const started = yield* oauth.startSignIn({
       providerId: "oidc",
       redirectUri: new URL("https://app.example.com/auth/callback/oidc"),
@@ -637,54 +764,36 @@ it.effect("completes OIDC new-user callbacks with validated identity and protect
     idToken = signOidcIdToken({
       kid: key.kid,
       privateKey: key.privateKey,
-      claims: oidcClaims({ nonce, overrides: { exp: 1_900_000_000, iat: undefined } }),
+      claims: oidcClaims({
+        nonce,
+        overrides: {
+          exp: 1_900_000_000,
+          iat: undefined,
+          email: undefined,
+          email_verified: undefined,
+          name: undefined,
+        },
+      }),
     });
 
     const result = yield* oauth.completeCallback({
       providerId: "oidc",
       state: started.state,
       code: "oidc-code",
-      callbackMethod: "POST",
+      callbackMethod: "GET",
     });
     if (result.flow !== "SignIn") {
       return yield* new MissingOAuthTestFixture({ message: "expected OIDC sign-in result" });
     }
-    assert.strictEqual(result.isNewUser, true);
-    assert.strictEqual(result.user.email, "oidc@example.com");
+    assert.strictEqual(result.user.email, "userinfo-oidc@example.com");
     assert.strictEqual(result.user.emailVerified, true);
-    assert.strictEqual(result.account.providerId, "oidc");
+    assert.strictEqual(result.user.name, "OIDC UserInfo User");
     assert.strictEqual(result.account.accountId, "oidc-user-1");
-    assert.strictEqual(result.session.userId, result.user.id);
-    assert.strictEqual(started.authorizationUrl.href.includes("oidc-access-token"), false);
-    assert.strictEqual(started.authorizationUrl.href.includes(idToken), false);
-
-    const storedAccount = yield* latestProviderAccount(storageState);
-    const protectedAccessToken = storedAccount.providerTokens.accessToken;
-    const protectedIdToken = storedAccount.providerTokens.idToken;
-    if (protectedAccessToken === undefined || protectedIdToken === undefined) {
-      return yield* new MissingOAuthTestFixture({ message: "expected protected OIDC tokens" });
-    }
-    assert.notStrictEqual(protectedAccessToken, "oidc-access-token");
-    assert.notStrictEqual(protectedIdToken, idToken);
-    const clearAccessToken = yield* protection.unprotect({
-      providerId: storedAccount.providerId,
-      providerAccountId: storedAccount.accountId,
-      kind: "AccessToken",
-      protectedToken: protectedAccessToken,
-    });
-    assert.strictEqual(Redacted.value(clearAccessToken), "oidc-access-token");
-
-    const publicAccounts = yield* storage.listUserAccounts({ userId: result.user.id });
-    const publicAccount = publicAccounts[0];
-    if (publicAccount === undefined) {
-      return yield* new MissingOAuthTestFixture({ message: "expected public OIDC account" });
-    }
-    assert.strictEqual(publicAccount.providerId, "oidc");
-    assert.strictEqual(Object.hasOwn(publicAccount, "providerTokens"), false);
+    assert.strictEqual(http.userInfoRequestCount(), 1);
   }).pipe(
     Effect.provide(
       makeOAuthLayer(storageState, {
-        providers: [oidcProvider],
+        providers: [oidcProviderWithUserInfo],
         httpClientLive: http.live,
       }),
     ),
@@ -1414,6 +1523,10 @@ it.effect("completes manual OAuth link callbacks without issuing new sessions", 
         expires_in: 7200,
       },
     ],
+    userInfoResponses: [
+      defaultUserInfo,
+      { ...defaultUserInfo, email: "changed-provider-email@example.com" },
+    ],
   });
 
   return Effect.gen(function* () {
@@ -1474,6 +1587,7 @@ it.effect("completes manual OAuth link callbacks without issuing new sessions", 
       });
     }
     assert.strictEqual(second.user.id, credential.user.id);
+    assert.strictEqual(second.account.userId, credential.user.id);
     assert.strictEqual(Object.hasOwn(second, "session"), false);
     assert.strictEqual(Object.hasOwn(second, "sessionToken"), false);
     assert.strictEqual(storageState.sessionsByHash.size, 1);
@@ -1617,6 +1731,46 @@ it.effect("fails manual OAuth link callbacks without partial writes", () => {
   });
 });
 
+it.effect(
+  "allows manual OAuth link callbacks with different provider email only when configured",
+  () => {
+    const storageState = makeDevMemoryStorageState();
+
+    return Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const credential = yield* createCredentialSession({
+        email: "local-user@example.com",
+        name: "Local User",
+      });
+      const started = yield* oauth.startLink({
+        providerId: "github",
+        redirectUri: new URL("https://app.example.com/auth/callback/github"),
+        sessionToken: credential.sessionToken,
+      });
+      const linked = yield* oauth.completeCallback({
+        providerId: "github",
+        state: started.state,
+        code: "different-email-code",
+        callbackMethod: "GET",
+      });
+      if (linked.flow !== "Link") {
+        return yield* new MissingOAuthTestFixture({ message: "expected link callback result" });
+      }
+      assert.strictEqual(linked.user.id, credential.user.id);
+      assert.strictEqual(linked.account.userId, credential.user.id);
+      assert.strictEqual(storageState.providerAccountsByKey.size, 1);
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(storageState, {
+          providers: [callbackProvider],
+          httpClientLive: FakeOAuthHttpClientLive,
+          allowDifferentEmailLinking: true,
+        }),
+      ),
+    );
+  },
+);
+
 it.effect("maps generic OAuth callback failures without partial public token exposure", () => {
   const storageState = makeDevMemoryStorageState();
   return Effect.gen(function* () {
@@ -1713,7 +1867,8 @@ it.effect(
     const failingSessionStorage = makeDevMemoryStorage(storageState);
     const failingSessionStorageLive = Layer.succeed(AuthStorage)({
       ...failingSessionStorage,
-      createSession: () => Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" })),
+      completeOAuthSignInWithSession: () =>
+        Effect.fail(new OAuthSessionStorageFailure({ reason: "SessionCreationFailed" })),
     });
 
     return Effect.gen(function* () {
@@ -1818,6 +1973,8 @@ it.effect(
             failure,
             new OAuthCallbackError({ reason: "SessionCreationFailed" }),
           );
+          assert.strictEqual(storageState.users.size, 0);
+          assert.strictEqual(storageState.providerAccountsByKey.size, 0);
           assert.strictEqual(storageState.sessionsByHash.size, 0);
         }).pipe(
           Effect.provide(

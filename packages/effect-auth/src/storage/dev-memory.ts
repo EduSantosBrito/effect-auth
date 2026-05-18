@@ -187,6 +187,69 @@ const updateOAuthProviderAccount = (
   updatedAt: input.now,
 });
 
+const createSessionRecord = (input: {
+  readonly userId: AuthUserId;
+  readonly tokenHash: TokenHash;
+  readonly expiresAt: number;
+  readonly now: number;
+  readonly ipAddress?: string;
+  readonly userAgent?: string;
+}): StoredSession => ({
+  id: id("ses"),
+  userId: input.userId,
+  tokenHash: input.tokenHash,
+  createdAt: input.now,
+  updatedAt: input.now,
+  expiresAt: input.expiresAt,
+  ...(input.ipAddress === undefined ? {} : { ipAddress: input.ipAddress }),
+  ...(input.userAgent === undefined ? {} : { userAgent: input.userAgent }),
+});
+
+const completeOAuthSignIn = (
+  state: DevMemoryStorageState,
+  input: Parameters<AuthStorageShape["completeOAuthSignIn"]>[0],
+) =>
+  Effect.suspend((): ReturnType<AuthStorageShape["completeOAuthSignIn"]> => {
+    const key = providerAccountKey(input.providerId, input.providerAccountId);
+    const existingAccount = state.providerAccountsByKey.get(key);
+    if (existingAccount !== undefined) {
+      const user = state.users.get(existingAccount.userId);
+      if (user === undefined) {
+        return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
+      }
+      const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
+      state.providerAccountsByKey.set(key, updatedAccount);
+      return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+    }
+
+    const existingUser = findUserByEmail(state, input.email);
+    if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
+      return Effect.fail(new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }));
+    }
+    if (existingUser !== undefined) {
+      const account = makeOAuthProviderAccount({ ...input, userId: existingUser.id });
+      state.providerAccountsByKey.set(key, account);
+      return Effect.succeed({ user: existingUser, account, isNewUser: false });
+    }
+    if (!input.allowImplicitSignUp) {
+      return Effect.fail(new OAuthAccountStorageFailure({ reason: "ImplicitSignUpDisabled" }));
+    }
+
+    const user: AuthUser = {
+      id: id("usr"),
+      email: input.email,
+      name: input.name,
+      image: input.image,
+      emailVerified: input.emailVerified,
+      createdAt: input.now,
+      updatedAt: input.now,
+    };
+    const account = makeOAuthProviderAccount({ ...input, userId: user.id });
+    state.users.set(user.id, user);
+    state.providerAccountsByKey.set(key, account);
+    return Effect.succeed({ user, account, isNewUser: true });
+  });
+
 const rotateSessionToken = (
   state: DevMemoryStorageState,
   { previousHash, nextHash, expiresAt, now }: Parameters<AuthStorageShape["rotateSessionToken"]>[0],
@@ -375,16 +438,14 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
   consumeVerificationToken: (input) => consumeVerificationToken(state, input),
   createSession: ({ userId, tokenHash, expiresAt, now, ipAddress, userAgent }) =>
     Effect.sync(() => {
-      const session: StoredSession = {
-        id: id("ses"),
+      const session = createSessionRecord({
         userId,
         tokenHash,
-        createdAt: now,
-        updatedAt: now,
         expiresAt,
+        now,
         ...(ipAddress === undefined ? {} : { ipAddress }),
         ...(userAgent === undefined ? {} : { userAgent }),
-      };
+      });
       state.sessionsByHash.set(tokenKey(tokenHash), session);
       return session;
     }),
@@ -506,49 +567,24 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       state.oauthStatesByHash.set(key, consumed);
       return Effect.succeed(consumed);
     }),
-  completeOAuthSignIn: (input) =>
-    Effect.suspend((): ReturnType<AuthStorageShape["completeOAuthSignIn"]> => {
-      const key = providerAccountKey(input.providerId, input.providerAccountId);
-      const existingAccount = state.providerAccountsByKey.get(key);
-      if (existingAccount !== undefined) {
-        const user = state.users.get(existingAccount.userId);
-        if (user === undefined) {
-          return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
-        }
-        const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
-        state.providerAccountsByKey.set(key, updatedAccount);
-        return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
-      }
-
-      const existingUser = findUserByEmail(state, input.email);
-      if (existingUser !== undefined && !input.allowAutomaticSameEmailLinking) {
-        return Effect.fail(
-          new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }),
-        );
-      }
-      if (existingUser !== undefined) {
-        const account = makeOAuthProviderAccount({ ...input, userId: existingUser.id });
-        state.providerAccountsByKey.set(key, account);
-        return Effect.succeed({ user: existingUser, account, isNewUser: false });
-      }
-      if (!input.allowImplicitSignUp) {
-        return Effect.fail(new OAuthAccountStorageFailure({ reason: "ImplicitSignUpDisabled" }));
-      }
-
-      const user: AuthUser = {
-        id: id("usr"),
-        email: input.email,
-        name: input.name,
-        image: input.image,
-        emailVerified: input.emailVerified,
-        createdAt: input.now,
-        updatedAt: input.now,
-      };
-      const account = makeOAuthProviderAccount({ ...input, userId: user.id });
-      state.users.set(user.id, user);
-      state.providerAccountsByKey.set(key, account);
-      return Effect.succeed({ user, account, isNewUser: true });
-    }),
+  completeOAuthSignIn: (input) => completeOAuthSignIn(state, input),
+  completeOAuthSignInWithSession: (input) =>
+    completeOAuthSignIn(state, input).pipe(
+      Effect.flatMap((signIn) =>
+        Effect.sync(() => {
+          const session = createSessionRecord({
+            userId: signIn.user.id,
+            tokenHash: input.sessionTokenHash,
+            expiresAt: input.sessionExpiresAt,
+            now: input.now,
+            ...(input.sessionIpAddress === undefined ? {} : { ipAddress: input.sessionIpAddress }),
+            ...(input.sessionUserAgent === undefined ? {} : { userAgent: input.sessionUserAgent }),
+          });
+          state.sessionsByHash.set(tokenKey(input.sessionTokenHash), session);
+          return { ...signIn, session };
+        }),
+      ),
+    ),
   completeOAuthLink: (input) =>
     Effect.suspend((): ReturnType<AuthStorageShape["completeOAuthLink"]> => {
       const user = state.users.get(input.userId);
@@ -562,13 +598,13 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
           new OAuthAccountStorageFailure({ reason: "ProviderAccountLinkedToDifferentUser" }),
         );
       }
-      if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
-        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
-      }
       if (existingAccount !== undefined) {
         const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
         state.providerAccountsByKey.set(key, updatedAccount);
         return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+      }
+      if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
+        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
       }
       const account = makeOAuthProviderAccount({ ...input, userId: input.userId });
       state.providerAccountsByKey.set(key, account);

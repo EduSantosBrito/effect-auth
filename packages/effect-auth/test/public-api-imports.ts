@@ -231,6 +231,7 @@ import {
   AuthStorage,
   AuthStorageFailure,
   OAuthAccountStorageFailure,
+  OAuthSessionStorageFailure,
   type AuthStorageShape,
   type AuthAccount,
   type AuthAccountBase,
@@ -240,7 +241,9 @@ import {
   type ChangePasswordSession,
   type CompleteOAuthLink,
   type CompleteOAuthSignIn,
+  type CompleteOAuthSignInWithSession,
   type CompletePasswordReset,
+  type ConsumeOAuthState as StorageConsumeOAuthState,
   type ConsumeVerificationToken,
   type CreateSession,
   type CreateUserWithCredentialAccount,
@@ -249,6 +252,7 @@ import {
   type ListUserSessions,
   type OAuthAccountAtomicSuccess,
   type OAuthProviderAccount,
+  type OAuthSignInWithSessionAtomicSuccess,
   type PublicAuthAccount,
   type PublicOAuthProviderAccount,
   type RevokeAllUserSessions,
@@ -257,7 +261,9 @@ import {
   type RevokeUserSession,
   type RotateSessionToken,
   type SessionId,
+  type StoreOAuthState as StorageStoreOAuthState,
   type StoreVerificationToken,
+  type StoredOAuthState as StorageStoredOAuthState,
   type StoredSession,
   type StoredSessionLookup,
   type UpdateCredentialAccountPasswordHash,
@@ -525,6 +531,7 @@ type PublicApiContract = {
     | typeof AuthStorage
     | typeof AuthStorageFailure
     | typeof OAuthAccountStorageFailure
+    | typeof OAuthSessionStorageFailure
     | AccountId
     | AuthAccount
     | AuthAccountBase
@@ -534,7 +541,9 @@ type PublicApiContract = {
     | ChangePasswordSession
     | CompleteOAuthLink
     | CompleteOAuthSignIn
+    | CompleteOAuthSignInWithSession
     | CompletePasswordReset
+    | StorageConsumeOAuthState
     | ConsumeVerificationToken
     | CreateSession
     | CreateUserWithCredentialAccount
@@ -543,6 +552,7 @@ type PublicApiContract = {
     | ListUserSessions
     | OAuthAccountAtomicSuccess
     | OAuthProviderAccount
+    | OAuthSignInWithSessionAtomicSuccess
     | PublicAuthAccount
     | PublicOAuthProviderAccount
     | RevokeAllUserSessions
@@ -551,7 +561,9 @@ type PublicApiContract = {
     | RevokeUserSession
     | RotateSessionToken
     | SessionId
+    | StorageStoreOAuthState
     | StoreVerificationToken
+    | StorageStoredOAuthState
     | StoredSession
     | StoredSessionLookup
     | UpdateCredentialAccountPasswordHash

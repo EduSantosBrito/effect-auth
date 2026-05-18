@@ -130,6 +130,7 @@ const storageInvariants = Effect.gen(function* () {
   const tokenD = yield* decodeTokenHash("session-d");
   const tokenE = yield* decodeTokenHash("session-e");
   const tokenF = yield* decodeTokenHash("session-f");
+  const tokenG = yield* decodeTokenHash("session-g");
   const verifyToken = yield* decodeTokenHash("verify-token");
   const resetToken = yield* decodeTokenHash("reset-token");
 
@@ -372,6 +373,59 @@ const storageInvariants = Effect.gen(function* () {
   assert.strictEqual(tokenRows[0]?.providerAccessToken, accessToken);
   assert.strictEqual(tokenRows[0]?.providerRefreshToken, refreshToken);
 
+  const oauthSessionEmail = yield* decodeEmail("oauth-session@example.com");
+  const oauthWithSession = yield* storage.completeOAuthSignInWithSession({
+    providerId: github,
+    providerAccountId: "github-with-session",
+    email: oauthSessionEmail,
+    emailVerified: true,
+    name: "OAuth With Session",
+    image: null,
+    scopes: ["read:user"],
+    providerTokens: { accessToken },
+    allowImplicitSignUp: true,
+    allowAutomaticSameEmailLinking: false,
+    now,
+    sessionTokenHash: tokenG,
+    sessionExpiresAt: activeUntil,
+    sessionIpAddress: "127.0.0.1",
+    sessionUserAgent: "drizzle-oauth-test",
+  });
+  assert.strictEqual(oauthWithSession.isNewUser, true);
+  assert.strictEqual(oauthWithSession.session.userId, oauthWithSession.user.id);
+  assert.strictEqual(oauthWithSession.session.ipAddress, "127.0.0.1");
+  assert.strictEqual(oauthWithSession.session.userAgent, "drizzle-oauth-test");
+
+  const rollbackOAuthEmail = yield* decodeEmail("oauth-session-rollback@example.com");
+  const sessionRollback = yield* Effect.flip(
+    storage.completeOAuthSignInWithSession({
+      providerId: github,
+      providerAccountId: "github-session-rollback",
+      email: rollbackOAuthEmail,
+      emailVerified: true,
+      name: "OAuth Session Rollback",
+      image: null,
+      scopes: ["read:user"],
+      providerTokens: { accessToken },
+      allowImplicitSignUp: true,
+      allowAutomaticSameEmailLinking: false,
+      now,
+      sessionTokenHash: tokenA,
+      sessionExpiresAt: activeUntil,
+    }),
+  );
+  assert.strictEqual(sessionRollback.reason, "SessionCreationFailed");
+  assert.strictEqual(
+    yield* countRows("auth_users WHERE email = 'oauth-session-rollback@example.com'"),
+    0,
+  );
+  assert.strictEqual(
+    yield* countRows(
+      "auth_accounts WHERE provider_id = 'github' AND account_id = 'github-session-rollback'",
+    ),
+    0,
+  );
+
   const returningOAuth = yield* storage.completeOAuthSignIn({
     providerId: github,
     providerAccountId: "github-user-1",
@@ -456,7 +510,7 @@ const storageInvariants = Effect.gen(function* () {
     userId: user.id,
     providerId: github,
     providerAccountId: "github-link",
-    providerEmail: email,
+    providerEmail: oauthEmail,
     scopes: ["read:user", "repo"],
     providerTokens: { accessToken: nextAccessToken },
     allowDifferentEmail: false,
@@ -466,6 +520,7 @@ const storageInvariants = Effect.gen(function* () {
 
   yield* storage.deleteUser({ userId: user.id });
   yield* storage.deleteUser({ userId: firstOAuth.user.id });
+  yield* storage.deleteUser({ userId: oauthWithSession.user.id });
   assert.strictEqual(yield* countRows("auth_users"), 0);
   assert.strictEqual(yield* countRows("auth_accounts"), 0);
   assert.strictEqual(yield* countRows("auth_sessions"), 0);
