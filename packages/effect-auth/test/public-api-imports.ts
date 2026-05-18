@@ -137,6 +137,8 @@ import {
   OAuthStateHandle,
   OAuthStateHash,
   OAuthTokenEndpointAuthMethod,
+  OidcIdTokenValidator,
+  OidcValidationError,
   ProtectedProviderToken,
   ProviderTokenKind,
   ProviderTokenProtection,
@@ -171,6 +173,7 @@ import {
   type OAuthStateSecrets,
   type OAuthTokenEndpointAuthMethod as OAuthTokenEndpointAuthMethodValue,
   type OAuthTokenSet,
+  type OidcValidationInput,
   type ProtectProviderTokenInput,
   type ProtectedProviderToken as ProtectedProviderTokenValue,
   type ProtectedProviderTokenSet,
@@ -180,6 +183,7 @@ import {
   type StoreOAuthState,
   type StoredOAuthState,
   type UnprotectProviderTokenInput,
+  type ValidatedOidcIdentity,
 } from "effect-auth/oauth";
 import {
   NativeScryptPasswordHasher,
@@ -413,6 +417,8 @@ type PublicApiContract = {
     | typeof OAuthStateHandle
     | typeof OAuthStateHash
     | typeof OAuthTokenEndpointAuthMethod
+    | typeof OidcIdTokenValidator
+    | typeof OidcValidationError
     | typeof ProtectedProviderToken
     | typeof ProviderTokenKind
     | typeof ProviderTokenProtection
@@ -447,6 +453,7 @@ type PublicApiContract = {
     | OAuthStateSecrets
     | OAuthTokenEndpointAuthMethodValue
     | OAuthTokenSet
+    | OidcValidationInput
     | ProtectProviderTokenInput
     | ProtectedProviderTokenSet
     | ProtectedProviderTokenValue
@@ -455,7 +462,8 @@ type PublicApiContract = {
     | ResolvedOAuthProvider
     | StoreOAuthState
     | StoredOAuthState
-    | UnprotectProviderTokenInput;
+    | UnprotectProviderTokenInput
+    | ValidatedOidcIdentity;
   readonly password:
     | typeof NativeScryptPasswordHasher
     | typeof PasswordHash

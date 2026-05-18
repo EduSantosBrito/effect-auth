@@ -1,5 +1,13 @@
 import { Clock, Config, Context, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
-import { createCipheriv, createDecipheriv, createHash, randomBytes } from "node:crypto";
+import {
+  createCipheriv,
+  createDecipheriv,
+  createHash,
+  createPublicKey,
+  createVerify,
+  randomBytes,
+  type webcrypto,
+} from "node:crypto";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
@@ -314,10 +322,24 @@ export interface OAuthTokenSet {
   readonly refreshTokenExpiresAt?: number;
 }
 
+export interface ValidatedOidcIdentity {
+  readonly issuer: string;
+  readonly subject: string;
+  readonly audience: ReadonlyArray<string>;
+  readonly expiresAt: number;
+  readonly issuedAt?: number;
+  readonly nonce: string;
+  readonly email?: string;
+  readonly emailVerified?: boolean;
+  readonly name?: string;
+  readonly image?: string;
+  readonly rawClaims: Readonly<Record<string, unknown>>;
+}
+
 export interface OAuthProfileMappingInput {
   readonly provider: ResolvedOAuthProvider;
   readonly tokenSet: OAuthTokenSet;
-  readonly validatedOidcIdentity?: unknown;
+  readonly validatedOidcIdentity?: ValidatedOidcIdentity;
   readonly userInfo?: Readonly<Record<string, unknown>>;
 }
 
@@ -442,6 +464,312 @@ export class OAuthProviderClientError extends Schema.TaggedErrorClass<OAuthProvi
     ]),
   },
 ) {}
+
+export interface OidcValidationInput {
+  readonly provider: ResolvedOAuthProvider;
+  readonly idToken: Redacted.Redacted<string>;
+  readonly expectedNonce: Redacted.Redacted<string>;
+  readonly now?: number;
+}
+
+export class OidcValidationError extends Schema.TaggedErrorClass<OidcValidationError>()(
+  "OidcValidationError",
+  {
+    reason: Schema.Literals([
+      "ProviderNotOidc",
+      "MissingIssuer",
+      "MissingJwksUrl",
+      "MalformedIdToken",
+      "UnsupportedAlgorithm",
+      "MissingKeyId",
+      "UnknownKeyId",
+      "JwksFetchFailed",
+      "InvalidSignature",
+      "IssuerMismatch",
+      "AudienceMismatch",
+      "ExpiredToken",
+      "IssuedAtInFuture",
+      "NonceMismatch",
+      "ClaimValidationFailed",
+    ]),
+  },
+) {}
+
+const OidcJwtHeader = Schema.Struct({
+  alg: Schema.String,
+  kid: Schema.optional(Schema.String),
+  typ: Schema.optional(Schema.String),
+});
+
+const OidcJwk = Schema.Struct({
+  kty: Schema.String,
+  kid: Schema.optional(Schema.String),
+  use: Schema.optional(Schema.String),
+  alg: Schema.optional(Schema.String),
+  n: Schema.optional(Schema.String),
+  e: Schema.optional(Schema.String),
+  crv: Schema.optional(Schema.String),
+  x: Schema.optional(Schema.String),
+  y: Schema.optional(Schema.String),
+});
+
+const OidcJwksResponse = Schema.Struct({ keys: Schema.Array(OidcJwk) });
+
+type OidcJwkShape = typeof OidcJwk.Type;
+
+type DecodedJwt = {
+  readonly header: typeof OidcJwtHeader.Type;
+  readonly claims: Readonly<Record<string, unknown>>;
+  readonly signingInput: string;
+  readonly signature: Buffer;
+};
+
+const isReadonlyRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+
+const decodeBase64UrlJson = (value: string): Effect.Effect<unknown, OidcValidationError> =>
+  decodeJsonString(Buffer.from(value, "base64url").toString("utf8")).pipe(
+    Effect.mapError(() => new OidcValidationError({ reason: "MalformedIdToken" })),
+  );
+
+const decodeIdToken: (
+  idToken: Redacted.Redacted<string>,
+) => Effect.Effect<DecodedJwt, OidcValidationError> = Effect.fn(
+  "OidcIdTokenValidator.decodeIdToken",
+)(function* (idToken: Redacted.Redacted<string>) {
+  const parts = Redacted.value(idToken).split(".");
+  const [encodedHeader, encodedPayload, encodedSignature] = parts;
+  if (
+    parts.length !== 3 ||
+    encodedHeader === undefined ||
+    encodedPayload === undefined ||
+    encodedSignature === undefined ||
+    encodedHeader === "" ||
+    encodedPayload === "" ||
+    encodedSignature === ""
+  ) {
+    return yield* new OidcValidationError({ reason: "MalformedIdToken" });
+  }
+  const header = yield* decodeBase64UrlJson(encodedHeader).pipe(
+    Effect.flatMap(Schema.decodeUnknownEffect(OidcJwtHeader)),
+    Effect.mapError(() => new OidcValidationError({ reason: "MalformedIdToken" })),
+  );
+  const claims = yield* decodeBase64UrlJson(encodedPayload).pipe(
+    Effect.flatMap((value) =>
+      isReadonlyRecord(value)
+        ? Effect.succeed(value)
+        : Effect.fail(new OidcValidationError({ reason: "MalformedIdToken" })),
+    ),
+  );
+  const signature = yield* Effect.try({
+    try: () => Buffer.from(encodedSignature, "base64url"),
+    catch: () => new OidcValidationError({ reason: "MalformedIdToken" }),
+  });
+  return { header, claims, signingInput: `${encodedHeader}.${encodedPayload}`, signature };
+});
+
+const stringClaim = (claims: Readonly<Record<string, unknown>>, key: string) => {
+  const value = claims[key];
+  return typeof value === "string" ? value : undefined;
+};
+
+const booleanClaim = (claims: Readonly<Record<string, unknown>>, key: string) => {
+  const value = claims[key];
+  return typeof value === "boolean" ? value : undefined;
+};
+
+const numberClaim = (claims: Readonly<Record<string, unknown>>, key: string) => {
+  const value = claims[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+};
+
+const audienceClaim = (
+  claims: Readonly<Record<string, unknown>>,
+): ReadonlyArray<string> | undefined => {
+  const value = claims.aud;
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value) && value.every((entry) => typeof entry === "string")) return value;
+  return undefined;
+};
+
+const jwkToJsonWebKey = (jwk: OidcJwkShape): webcrypto.JsonWebKey => ({
+  kty: jwk.kty,
+  ...(jwk.kid === undefined ? {} : { kid: jwk.kid }),
+  ...(jwk.use === undefined ? {} : { use: jwk.use }),
+  ...(jwk.alg === undefined ? {} : { alg: jwk.alg }),
+  ...(jwk.n === undefined ? {} : { n: jwk.n }),
+  ...(jwk.e === undefined ? {} : { e: jwk.e }),
+  ...(jwk.crv === undefined ? {} : { crv: jwk.crv }),
+  ...(jwk.x === undefined ? {} : { x: jwk.x }),
+  ...(jwk.y === undefined ? {} : { y: jwk.y }),
+});
+
+const verifyRs256Signature = (input: {
+  readonly jwk: OidcJwkShape;
+  readonly signingInput: string;
+  readonly signature: Buffer;
+}): Effect.Effect<void, OidcValidationError> =>
+  Effect.try({
+    try: () => {
+      const verifier = createVerify("RSA-SHA256");
+      verifier.update(input.signingInput);
+      verifier.end();
+      return verifier.verify(
+        createPublicKey({ key: jwkToJsonWebKey(input.jwk), format: "jwk" }),
+        input.signature,
+      );
+    },
+    catch: () => new OidcValidationError({ reason: "InvalidSignature" }),
+  }).pipe(
+    Effect.flatMap((valid) =>
+      valid ? Effect.void : Effect.fail(new OidcValidationError({ reason: "InvalidSignature" })),
+    ),
+  );
+
+const validatedOidcIdentity = (input: {
+  readonly provider: ResolvedOAuthProvider;
+  readonly claims: Readonly<Record<string, unknown>>;
+  readonly expectedNonce: Redacted.Redacted<string>;
+  readonly now: number;
+}): Effect.Effect<ValidatedOidcIdentity, OidcValidationError> => {
+  const issuer = stringClaim(input.claims, "iss");
+  if (issuer === undefined)
+    return Effect.fail(new OidcValidationError({ reason: "ClaimValidationFailed" }));
+  if (issuer !== input.provider.issuer)
+    return Effect.fail(new OidcValidationError({ reason: "IssuerMismatch" }));
+  const subject = stringClaim(input.claims, "sub");
+  if (subject === undefined || subject === "") {
+    return Effect.fail(new OidcValidationError({ reason: "ClaimValidationFailed" }));
+  }
+  const audience = audienceClaim(input.claims);
+  if (audience === undefined) {
+    return Effect.fail(new OidcValidationError({ reason: "AudienceMismatch" }));
+  }
+  if (!audience.includes(input.provider.clientId)) {
+    return Effect.fail(new OidcValidationError({ reason: "AudienceMismatch" }));
+  }
+  const expiresAtSeconds = numberClaim(input.claims, "exp");
+  if (expiresAtSeconds === undefined) {
+    return Effect.fail(new OidcValidationError({ reason: "ClaimValidationFailed" }));
+  }
+  const expiresAt = expiresAtSeconds * 1000;
+  if (expiresAt <= input.now) {
+    return Effect.fail(new OidcValidationError({ reason: "ExpiredToken" }));
+  }
+  const issuedAtSeconds = numberClaim(input.claims, "iat");
+  if (issuedAtSeconds !== undefined && issuedAtSeconds * 1000 > input.now) {
+    return Effect.fail(new OidcValidationError({ reason: "IssuedAtInFuture" }));
+  }
+  const notBeforeSeconds = numberClaim(input.claims, "nbf");
+  if (notBeforeSeconds !== undefined && notBeforeSeconds * 1000 > input.now) {
+    return Effect.fail(new OidcValidationError({ reason: "IssuedAtInFuture" }));
+  }
+  const nonce = stringClaim(input.claims, "nonce");
+  if (nonce === undefined || nonce !== Redacted.value(input.expectedNonce)) {
+    return Effect.fail(new OidcValidationError({ reason: "NonceMismatch" }));
+  }
+  const issuedAt = issuedAtSeconds === undefined ? undefined : issuedAtSeconds * 1000;
+  const email = stringClaim(input.claims, "email");
+  const emailVerified = booleanClaim(input.claims, "email_verified");
+  const name = stringClaim(input.claims, "name");
+  const image = stringClaim(input.claims, "picture");
+  return Effect.succeed({
+    issuer,
+    subject,
+    audience,
+    expiresAt,
+    ...(issuedAt === undefined ? {} : { issuedAt }),
+    nonce,
+    ...(email === undefined ? {} : { email }),
+    ...(emailVerified === undefined ? {} : { emailVerified }),
+    ...(name === undefined ? {} : { name }),
+    ...(image === undefined ? {} : { image }),
+    rawClaims: input.claims,
+  });
+};
+
+export class OidcIdTokenValidator extends Context.Service<
+  OidcIdTokenValidator,
+  {
+    readonly validate: (
+      input: OidcValidationInput,
+    ) => Effect.Effect<ValidatedOidcIdentity, OidcValidationError>;
+  }
+>()("effect-auth/oauth/OidcIdTokenValidator") {
+  static readonly layer = Layer.effect(OidcIdTokenValidator)(
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const cache = new Map<OAuthProviderId, ReadonlyArray<OidcJwkShape>>();
+      const fetchJwks = Effect.fn("OidcIdTokenValidator.fetchJwks")(function* (
+        provider: ResolvedOAuthProvider,
+      ) {
+        if (provider.jwksUrl === undefined) {
+          return yield* new OidcValidationError({ reason: "MissingJwksUrl" });
+        }
+        const response = yield* client.get(provider.jwksUrl).pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.mapError(() => new OidcValidationError({ reason: "JwksFetchFailed" })),
+        );
+        const decoded = yield* HttpClientResponse.schemaJson(
+          Schema.Struct({ body: OidcJwksResponse }),
+        )(response).pipe(
+          Effect.mapError(() => new OidcValidationError({ reason: "JwksFetchFailed" })),
+        );
+        cache.set(provider.id, decoded.body.keys);
+        return decoded.body.keys;
+      });
+      const cachedJwks = Effect.fn("OidcIdTokenValidator.cachedJwks")(function* (
+        provider: ResolvedOAuthProvider,
+      ) {
+        const cached = cache.get(provider.id);
+        return cached ?? (yield* fetchJwks(provider));
+      });
+      const findKey = (keys: ReadonlyArray<OidcJwkShape>, kid: string) =>
+        keys.find((key) => key.kid === kid);
+      return {
+        validate: Effect.fn("OidcIdTokenValidator.validate")(function* (input) {
+          if (!input.provider.isOidc) {
+            return yield* new OidcValidationError({ reason: "ProviderNotOidc" });
+          }
+          if (input.provider.issuer === undefined) {
+            return yield* new OidcValidationError({ reason: "MissingIssuer" });
+          }
+          if (input.provider.jwksUrl === undefined) {
+            return yield* new OidcValidationError({ reason: "MissingJwksUrl" });
+          }
+          const decoded = yield* decodeIdToken(input.idToken);
+          if (decoded.header.alg !== "RS256") {
+            return yield* new OidcValidationError({ reason: "UnsupportedAlgorithm" });
+          }
+          if (decoded.header.kid === undefined || decoded.header.kid === "") {
+            return yield* new OidcValidationError({ reason: "MissingKeyId" });
+          }
+          const keys = yield* cachedJwks(input.provider);
+          const key =
+            findKey(keys, decoded.header.kid) ??
+            findKey(yield* fetchJwks(input.provider), decoded.header.kid);
+          if (key === undefined) {
+            return yield* new OidcValidationError({ reason: "UnknownKeyId" });
+          }
+          yield* verifyRs256Signature({
+            jwk: key,
+            signingInput: decoded.signingInput,
+            signature: decoded.signature,
+          });
+          const now = input.now ?? (yield* Clock.currentTimeMillis);
+          return yield* validatedOidcIdentity({
+            provider: input.provider,
+            claims: decoded.claims,
+            expectedNonce: input.expectedNonce,
+            now,
+          });
+        }),
+      };
+    }),
+  );
+}
 
 const OAuthTokenEndpointResponse = Schema.Struct({
   access_token: Schema.optional(Schema.String),
@@ -576,6 +904,25 @@ export class OAuthProviderClient extends Context.Service<
               ),
             );
             userInfo = decoded.body;
+          }
+          if (
+            input.provider.isOidc &&
+            input.validatedOidcIdentity !== undefined &&
+            input.provider.mapProfile === undefined
+          ) {
+            const identity = input.validatedOidcIdentity;
+            if (identity.email === undefined || identity.email.trim() === "") {
+              return yield* new OAuthProviderClientError({ reason: "MissingProviderEmail" });
+            }
+            return {
+              providerId: input.provider.id,
+              providerAccountId: identity.subject,
+              email: identity.email,
+              emailVerified: identity.emailVerified ?? false,
+              name: identity.name ?? identity.email,
+              image: identity.image ?? null,
+              tokenSet: input.tokenSet,
+            } satisfies OAuthProviderIdentityResult;
           }
           if (input.provider.mapProfile === undefined) {
             return yield* new OAuthProviderClientError({ reason: "ProfileMappingFailed" });
@@ -1134,7 +1481,11 @@ export class OAuthState extends Context.Service<
 const OAuthStateDefaultLayer = OAuthState.layer.pipe(
   Layer.provide(AuthFeatureKeyMaterialService.layer),
 );
-const OAuthDependenciesLayer = Layer.mergeAll(AuthTokenLive, OAuthStateDefaultLayer);
+const OAuthDependenciesLayer = Layer.mergeAll(
+  AuthTokenLive,
+  OAuthStateDefaultLayer,
+  OidcIdTokenValidator.layer,
+);
 
 export interface OAuthStartSignInInput {
   readonly providerId: unknown;
@@ -1426,6 +1777,7 @@ export class OAuth extends Context.Service<
       const authConfig = yield* AuthLiveConfig;
       const providerClient = yield* OAuthProviderClient;
       const tokenProtection = yield* ProviderTokenProtection;
+      const oidcValidator = yield* OidcIdTokenValidator;
 
       const start = Effect.fn("OAuth.start")(function* (input: {
         readonly providerId: unknown;
@@ -1496,8 +1848,30 @@ export class OAuth extends Context.Service<
               : { codeVerifier: consumedState.secrets.codeVerifier }),
           })
           .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "TokenExchangeFailed" })));
+        const validatedOidcIdentity = provider.isOidc
+          ? yield* Effect.gen(function* () {
+              if (tokenSet.idToken === undefined || consumedState.secrets.nonce === undefined) {
+                return yield* new OAuthCallbackError({ reason: "IdentityValidationFailed" });
+              }
+              return yield* oidcValidator
+                .validate({
+                  provider,
+                  idToken: tokenSet.idToken,
+                  expectedNonce: consumedState.secrets.nonce,
+                })
+                .pipe(
+                  Effect.mapError(
+                    () => new OAuthCallbackError({ reason: "IdentityValidationFailed" }),
+                  ),
+                );
+            })
+          : undefined;
         const identity = yield* providerClient
-          .resolveIdentity({ provider, tokenSet })
+          .resolveIdentity({
+            provider,
+            tokenSet,
+            ...(validatedOidcIdentity === undefined ? {} : { validatedOidcIdentity }),
+          })
           .pipe(
             Effect.mapError((error) =>
               error.reason === "MissingProviderEmail"
