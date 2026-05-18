@@ -121,40 +121,55 @@ const jsonResponse = (
     }),
   );
 
-const FakeOAuthHttpClientLive = Layer.succeed(HttpClient.HttpClient)(
-  HttpClient.make((request, url) => {
-    if (url.href === "https://github.example/token") {
-      return Effect.succeed(
-        jsonResponse(request, {
-          access_token: "provider-access-token",
-          refresh_token: "provider-refresh-token",
-          token_type: "Bearer",
-          scope: "read:user user:email repo",
-          expires_in: 3600,
+const defaultTokenResponse = {
+  access_token: "provider-access-token",
+  refresh_token: "provider-refresh-token",
+  token_type: "Bearer",
+  scope: "read:user user:email repo",
+  expires_in: 3600,
+};
+
+const defaultUserInfo = {
+  id: "github-user-1",
+  email: "oauth@example.com",
+  email_verified: true,
+  name: "OAuth User",
+  avatar_url: "https://github.example/avatar.png",
+};
+
+const makeFakeOAuthHttpClientLive = (
+  options: {
+    readonly tokenResponses?: ReadonlyArray<Readonly<Record<string, unknown>>>;
+    readonly userInfo?: Readonly<Record<string, unknown>>;
+  } = {},
+) => {
+  let tokenRequestCount = 0;
+  const tokenResponses = options.tokenResponses ?? [defaultTokenResponse];
+  const userInfo = options.userInfo ?? defaultUserInfo;
+  return Layer.succeed(HttpClient.HttpClient)(
+    HttpClient.make((request, url) => {
+      if (url.href === "https://github.example/token") {
+        const response =
+          tokenResponses[tokenRequestCount] ?? tokenResponses[tokenResponses.length - 1];
+        tokenRequestCount += 1;
+        return Effect.succeed(jsonResponse(request, response));
+      }
+      if (url.href === "https://github.example/user") {
+        return Effect.succeed(jsonResponse(request, userInfo));
+      }
+      return Effect.fail(
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({
+            request,
+            description: `unexpected OAuth fake request: ${url.href}`,
+          }),
         }),
       );
-    }
-    if (url.href === "https://github.example/user") {
-      return Effect.succeed(
-        jsonResponse(request, {
-          id: "github-user-1",
-          email: "oauth@example.com",
-          email_verified: true,
-          name: "OAuth User",
-          avatar_url: "https://github.example/avatar.png",
-        }),
-      );
-    }
-    return Effect.fail(
-      new HttpClientError.HttpClientError({
-        reason: new HttpClientError.TransportError({
-          request,
-          description: `unexpected OAuth fake request: ${url.href}`,
-        }),
-      }),
-    );
-  }),
-);
+    }),
+  );
+};
+
+const FakeOAuthHttpClientLive = makeFakeOAuthHttpClientLive();
 
 const makeOAuthLayer = (
   storageState: DevMemoryStorageState,
@@ -649,6 +664,145 @@ it.effect("completes generic OAuth callback for a new user with protected provid
       makeOAuthLayer(storageState, {
         providers: [callbackProvider],
         httpClientLive: FakeOAuthHttpClientLive,
+      }),
+    ),
+  );
+});
+
+it.effect("signs in returning OAuth provider accounts and preserves omitted token fields", () => {
+  const storageState = makeDevMemoryStorageState();
+  const HttpLive = makeFakeOAuthHttpClientLive({
+    tokenResponses: [
+      {
+        access_token: "first-access-token",
+        refresh_token: "first-refresh-token",
+        id_token: "first-id-token",
+        token_type: "Bearer",
+        scope: "read:user",
+        expires_in: 3600,
+      },
+      {
+        access_token: "second-access-token",
+        token_type: "Bearer",
+        scope: "read:user repo",
+        expires_in: 7200,
+      },
+    ],
+  });
+
+  return Effect.gen(function* () {
+    const oauth = yield* OAuth;
+    const storage = yield* AuthStorage;
+    const protection = yield* ProviderTokenProtection;
+
+    const firstStart = yield* oauth.startSignIn({
+      providerId: "github",
+      redirectUri: new URL("https://app.example.com/auth/callback/github"),
+    });
+    const first = yield* oauth.completeCallback({
+      providerId: "github",
+      state: firstStart.state,
+      code: "first-provider-code",
+      callbackMethod: "GET",
+    });
+    if (first.flow !== "SignIn") {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected first sign-in callback result",
+      });
+    }
+    assert.strictEqual(first.isNewUser, true);
+    const firstAccount = yield* latestProviderAccount(storageState);
+    const firstRefreshToken = firstAccount.providerTokens.refreshToken;
+    const firstIdToken = firstAccount.providerTokens.idToken;
+    if (firstRefreshToken === undefined || firstIdToken === undefined) {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected initial refresh and id tokens",
+      });
+    }
+
+    const secondStart = yield* oauth.startSignIn({
+      providerId: "github",
+      redirectUri: new URL("https://app.example.com/auth/callback/github"),
+      scopes: ["repo"],
+    });
+    const second = yield* oauth.completeCallback({
+      providerId: "github",
+      state: secondStart.state,
+      code: "second-provider-code",
+      callbackMethod: "GET",
+    });
+    if (second.flow !== "SignIn") {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected returning sign-in callback result",
+      });
+    }
+
+    assert.strictEqual(second.isNewUser, false);
+    assert.strictEqual(second.user.id, first.user.id);
+    assert.notStrictEqual(second.session.id, first.session.id);
+    assert.notStrictEqual(Redacted.value(second.sessionToken), Redacted.value(first.sessionToken));
+    assert.strictEqual(storageState.users.size, 1);
+    assert.strictEqual(storageState.providerAccountsByKey.size, 1);
+    assert.strictEqual(storageState.sessionsByHash.size, 2);
+
+    const updatedAccount = yield* latestProviderAccount(storageState);
+    const updatedAccessToken = updatedAccount.providerTokens.accessToken;
+    const updatedRefreshToken = updatedAccount.providerTokens.refreshToken;
+    const updatedIdToken = updatedAccount.providerTokens.idToken;
+    if (
+      updatedAccessToken === undefined ||
+      updatedRefreshToken === undefined ||
+      updatedIdToken === undefined
+    ) {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected updated token fields",
+      });
+    }
+    assert.notStrictEqual(updatedAccessToken, firstAccount.providerTokens.accessToken);
+    assert.strictEqual(updatedRefreshToken, firstRefreshToken);
+    assert.strictEqual(updatedIdToken, firstIdToken);
+    assert.strictEqual(updatedAccount.providerTokens.scope, "read:user repo");
+    assert.ok(
+      (updatedAccount.providerTokens.accessTokenExpiresAt ?? 0) >
+        (firstAccount.providerTokens.accessTokenExpiresAt ?? 0),
+    );
+
+    const clearAccessToken = yield* protection.unprotect({
+      providerId: updatedAccount.providerId,
+      providerAccountId: updatedAccount.accountId,
+      kind: "AccessToken",
+      protectedToken: updatedAccessToken,
+    });
+    const clearRefreshToken = yield* protection.unprotect({
+      providerId: updatedAccount.providerId,
+      providerAccountId: updatedAccount.accountId,
+      kind: "RefreshToken",
+      protectedToken: updatedRefreshToken,
+    });
+    const clearIdToken = yield* protection.unprotect({
+      providerId: updatedAccount.providerId,
+      providerAccountId: updatedAccount.accountId,
+      kind: "IdToken",
+      protectedToken: updatedIdToken,
+    });
+    assert.strictEqual(Redacted.value(clearAccessToken), "second-access-token");
+    assert.strictEqual(Redacted.value(clearRefreshToken), "first-refresh-token");
+    assert.strictEqual(Redacted.value(clearIdToken), "first-id-token");
+
+    const publicAccounts = yield* storage.listUserAccounts({ userId: first.user.id });
+    const publicAccount = publicAccounts[0];
+    if (publicAccount === undefined) {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected public account projection",
+      });
+    }
+    assert.strictEqual(publicAccount.providerId, "github");
+    assert.strictEqual(Object.hasOwn(publicAccount, "providerTokens"), false);
+  }).pipe(
+    Effect.provide(
+      makeOAuthLayer(storageState, {
+        providers: [callbackProvider],
+        httpClientLive: HttpLive,
       }),
     ),
   );
