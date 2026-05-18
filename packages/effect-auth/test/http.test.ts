@@ -1,5 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import { Schema } from "effect";
+import * as HttpClient from "effect/unstable/http/HttpClient";
+import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import {
   Auth,
   AuthApiEndpoints,
@@ -8,11 +10,14 @@ import {
   AuthHttpConfig,
   AuthHttpErrorMapper,
   AuthHttpToken,
+  AuthLiveConfig,
   AuthSession,
   AuthToken,
+  AuthTokenLive,
   Context,
   Cookies,
   CurrentAuthSession,
+  DevMemoryAuthStorage,
   Effect,
   HttpClientRequest,
   HttpEffect,
@@ -20,6 +25,7 @@ import {
   HttpServerRequest,
   HttpServerResponse,
   Layer,
+  OAuthHttp,
   Option,
   Predicate,
   Redacted,
@@ -28,6 +34,7 @@ import {
   TrustedOrigins,
   checkTrustedOrigin,
   checkTrustedRequestOrigin,
+  decodePasswordHash,
   handleChangePassword,
   handleCompletePasswordReset,
   handleCurrentSession,
@@ -40,6 +47,8 @@ import {
   invalidCredentials,
   jsonString,
   jsonWithCookieInstruction,
+  makeDevMemoryStorage,
+  makeDevMemoryStorageState,
   makeWorkflowLayer,
   mapPublicHttpError,
   missingFixture,
@@ -50,6 +59,14 @@ import {
   unauthorized,
   type SessionToken,
 } from "./support";
+import {
+  AuthFeatureKeyMaterialService,
+  OAuth,
+  OAuthProviderClient,
+  OAuthProviders,
+  ProviderTokenProtection,
+  type OAuthProviderInput,
+} from "../src/oauth/index";
 
 const MountedListSessionsResponse = Schema.Struct({
   sessions: Schema.Array(
@@ -63,6 +80,68 @@ const MountedListSessionsResponseJson = Schema.fromJsonString(MountedListSession
 const decodeMountedListSessionsResponseJson = Schema.decodeUnknownEffect(
   MountedListSessionsResponseJson,
 );
+
+const OAuthAuthorizationResponse = Schema.Struct({ authorizationUrl: Schema.String });
+const OAuthAuthorizationResponseJson = Schema.fromJsonString(OAuthAuthorizationResponse);
+const decodeOAuthAuthorizationResponseJson = Schema.decodeUnknownEffect(
+  OAuthAuthorizationResponseJson,
+);
+
+const oauthHttpEncryptionKey = Redacted.make("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+
+const oauthHttpProvider: OAuthProviderInput = {
+  id: "github",
+  clientId: "github-client",
+  clientSecret: Redacted.make("github-secret"),
+  defaultScopes: ["read:user"],
+  endpoints: {
+    authorizationUrl: new URL("https://github.example/authorize"),
+    tokenUrl: new URL("https://github.example/token"),
+  },
+  mapProfile: () =>
+    Effect.succeed({
+      providerAccountId: "github-user",
+      email: "github@example.com",
+      emailVerified: true,
+      name: "GitHub User",
+      image: null,
+    }),
+};
+
+const UnexpectedOAuthHttpClientLive = Layer.succeed(HttpClient.HttpClient)(
+  HttpClient.make((request) =>
+    Effect.fail(
+      new HttpClientError.HttpClientError({
+        reason: new HttpClientError.TransportError({
+          request,
+          description: "unexpected OAuth HTTP provider request",
+        }),
+      }),
+    ),
+  ),
+);
+
+const makeOAuthHttpWorkflowLayer = (storageState = makeDevMemoryStorageState()) => {
+  const ProvidersLive = OAuthProviders.layer({ providers: [oauthHttpProvider] }).pipe(
+    Layer.provide(UnexpectedOAuthHttpClientLive),
+  );
+  const ProviderTokenProtectionLive = ProviderTokenProtection.layer.pipe(
+    Layer.provide(AuthFeatureKeyMaterialService.layer),
+  );
+  const OAuthLive = OAuth.layer.pipe(
+    Layer.provideMerge(ProviderTokenProtectionLive),
+    Layer.provideMerge(OAuthProviderClient.layer),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        AuthLiveConfig.layer({ encryptionKey: oauthHttpEncryptionKey }),
+        DevMemoryAuthStorage(storageState),
+        ProvidersLive,
+        UnexpectedOAuthHttpClientLive,
+      ),
+    ),
+  );
+  return { storageState, layer: OAuthLive };
+};
 
 it.effect("AuthHttp.mount adds a token-free sign-in route under the configured base path", () => {
   const { emailState, layer: authLayer } = makeWorkflowLayer();
@@ -120,6 +199,173 @@ it.effect("AuthHttp.mount adds a token-free sign-in route under the configured b
     assert.equal(bodyText.includes("sessionToken"), false);
     assert.equal(bodyText.includes("tokenHash"), false);
   }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("OAuthHttp.mount starts OAuth sign-in and link with server-derived callbacks", () => {
+  const { storageState, layer: oauthLayer } = makeOAuthHttpWorkflowLayer();
+  return Effect.gen(function* () {
+    const storage = makeDevMemoryStorage(storageState);
+    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    const email = yield* normalizeEmail("oauth-http-link@example.com");
+    const passwordHash = yield* decodePasswordHash("hash:oauth-http-link");
+    const user = yield* storage.createUserWithCredentialAccount({
+      email,
+      name: "OAuth HTTP Link User",
+      image: null,
+      passwordHash,
+      now,
+    });
+    const sessionToken = yield* Effect.gen(function* () {
+      const token = yield* AuthToken;
+      return yield* token.makeSessionToken();
+    }).pipe(Effect.provide(AuthTokenLive));
+    yield* storage.createSession({
+      userId: user.id,
+      tokenHash: sessionToken.hash,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      now,
+    });
+    const seededSession = yield* storage.findSessionByTokenHash(sessionToken.hash);
+    assert.strictEqual(seededSession.user.id, user.id);
+
+    const routes = OAuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({
+            baseUrl: new URL("https://app.example.com"),
+            trustedOrigins: [new URL("https://app.example.com")],
+            defaultTokenExtractor: AuthHttpToken.bearer,
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+
+    const signInResponse = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/sign-in/oauth2", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+          },
+          body: jsonString({
+            providerId: "github",
+            scopes: ["repo"],
+            allowSignUp: false,
+            disableRedirect: true,
+          }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const signInBodyText = yield* Effect.promise(() => signInResponse.text());
+    assert.strictEqual(signInResponse.status, 200, signInBodyText);
+    const signInBody = yield* decodeOAuthAuthorizationResponseJson(signInBodyText);
+    const signInUrl = new URL(signInBody.authorizationUrl);
+
+    assert.strictEqual(signInResponse.headers.get("location"), null);
+    assert.strictEqual(signInUrl.origin, "https://github.example");
+    assert.strictEqual(signInUrl.searchParams.get("client_id"), "github-client");
+    assert.strictEqual(signInUrl.searchParams.get("scope"), "read:user repo");
+    assert.strictEqual(
+      signInUrl.searchParams.get("redirect_uri"),
+      "https://app.example.com/api/auth/oauth2/callback/github",
+    );
+    assert.strictEqual(signInBodyText.includes("sessionToken"), false);
+    assert.strictEqual(signInBodyText.includes("provider-access-token"), false);
+    assert.strictEqual(storageState.oauthStatesByHash.size, 1);
+
+    const linkResponse = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/oauth2/link", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+            authorization: `Bearer ${Redacted.value(sessionToken.token)}`,
+          },
+          body: jsonString({ providerId: "github", scopes: ["repo"] }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const linkBodyText = yield* Effect.promise(() => linkResponse.text());
+    assert.strictEqual(linkResponse.status, 200, linkBodyText);
+    const linkBody = yield* decodeOAuthAuthorizationResponseJson(linkBodyText);
+    const linkUrl = new URL(linkBody.authorizationUrl);
+    yield* Effect.promise(() => web.dispose());
+
+    assert.strictEqual(
+      linkUrl.searchParams.get("redirect_uri"),
+      "https://app.example.com/api/auth/oauth2/callback/github",
+    );
+    assert.strictEqual(linkBodyText.includes(Redacted.value(sessionToken.token)), false);
+    assert.strictEqual(linkBodyText.includes("sessionToken"), false);
+    assert.strictEqual(storageState.oauthStatesByHash.size, 2);
+  });
+});
+
+it.effect("OAuthHttp.mount requires configured baseUrl and trusted origins", () => {
+  const { layer: oauthLayer } = makeOAuthHttpWorkflowLayer();
+  return Effect.gen(function* () {
+    const routes = OAuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const withoutBaseUrl = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({ trustedOrigins: [new URL("https://app.example.com")] }),
+        ),
+      ),
+    );
+    const withoutBaseUrlWeb = HttpRouter.toWebHandler(withoutBaseUrl, { disableLogger: true });
+    const missingBaseUrl = yield* Effect.promise(() =>
+      withoutBaseUrlWeb.handler(
+        new Request("https://edge.example.net/api/auth/sign-in/oauth2", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+          },
+          body: jsonString({ providerId: "github" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const missingBaseUrlBody = yield* Effect.promise(() => missingBaseUrl.text());
+    yield* Effect.promise(() => withoutBaseUrlWeb.dispose());
+
+    assert.strictEqual(missingBaseUrl.status, 400, missingBaseUrlBody);
+    assert.strictEqual(missingBaseUrlBody.includes("OAuth baseUrl is required"), true);
+
+    const withBaseUrl = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({
+            baseUrl: new URL("https://app.example.com"),
+            trustedOrigins: [new URL("https://app.example.com")],
+          }),
+        ),
+      ),
+    );
+    const withBaseUrlWeb = HttpRouter.toWebHandler(withBaseUrl, { disableLogger: true });
+    const untrustedOrigin = yield* Effect.promise(() =>
+      withBaseUrlWeb.handler(
+        new Request("https://edge.example.net/api/auth/sign-in/oauth2", {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: "https://evil.example.com" },
+          body: jsonString({ providerId: "github" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    yield* Effect.promise(() => withBaseUrlWeb.dispose());
+
+    assert.strictEqual(untrustedOrigin.status, 401);
+  });
 });
 
 it.effect("AuthHttp.mount ignores malformed forwarded client IPs", () => {
@@ -1022,9 +1268,23 @@ it.effect("AuthHttpConfig rejects invalid session cookie settings before use", (
         ),
       ),
     );
+    const invalidOAuthRedirectPath = yield* Effect.exit(
+      Effect.gen(function* () {
+        const config = yield* AuthHttpConfig;
+        return config.oauth.errorPath;
+      }).pipe(
+        Effect.provide(
+          AuthHttpConfig.layer({
+            trustedOrigins: [new URL("https://app.example.com")],
+            oauth: { errorPath: "https://evil.example.com/auth/error" },
+          }),
+        ),
+      ),
+    );
 
     assert.strictEqual(invalidName._tag, "Failure");
     assert.strictEqual(invalidPath._tag, "Failure");
+    assert.strictEqual(invalidOAuthRedirectPath._tag, "Failure");
   }),
 );
 

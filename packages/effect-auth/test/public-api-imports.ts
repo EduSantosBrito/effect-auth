@@ -84,6 +84,7 @@ import {
   AuthHttpToken,
   AuthSession,
   CurrentAuthSession,
+  OAuthHttp,
   SessionCookie,
   SessionTokenExtractResult,
   StateChangingRequest,
@@ -98,6 +99,8 @@ import {
   type AuthHttpListAccountsResponse,
   type AuthHttpListSessionsResponse,
   type AuthHttpMountOptions,
+  type AuthHttpOAuthRedirectConfigInput,
+  type AuthHttpOAuthRedirectConfigShape,
   type AuthHttpOkResponse,
   type AuthHttpOptionalAuthOptions,
   type AuthHttpRequireAuthOptions,
@@ -107,6 +110,8 @@ import {
   type AuthHttpTokenExtractor,
   type AuthHttpUserResponse,
   type AuthSessionShape,
+  type OAuthAuthorizationUrlResponse,
+  type OAuthHttpMountOptions,
   type SessionTokenExtractResult as SessionTokenExtractResultType,
   type TrustedOriginPolicyShape,
 } from "effect-auth/http";
@@ -356,6 +361,7 @@ type PublicApiContract = {
     | typeof AuthHttpToken
     | typeof AuthSession
     | typeof CurrentAuthSession
+    | typeof OAuthHttp
     | typeof SessionCookie
     | typeof SessionTokenExtractResult
     | typeof StateChangingRequest
@@ -370,6 +376,8 @@ type PublicApiContract = {
     | AuthHttpListAccountsResponse
     | AuthHttpListSessionsResponse
     | AuthHttpMountOptions
+    | AuthHttpOAuthRedirectConfigInput
+    | AuthHttpOAuthRedirectConfigShape
     | AuthHttpOkResponse
     | AuthHttpOptionalAuthOptions
     | AuthHttpRequireAuthOptions
@@ -379,6 +387,8 @@ type PublicApiContract = {
     | AuthHttpTokenExtractor
     | AuthHttpUserResponse
     | AuthSessionShape
+    | OAuthAuthorizationUrlResponse
+    | OAuthHttpMountOptions
     | SessionTokenExtractResultType
     | TrustedOriginPolicyShape;
   readonly oauth:
