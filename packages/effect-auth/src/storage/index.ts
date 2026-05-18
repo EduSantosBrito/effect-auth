@@ -215,6 +215,7 @@ export interface CompleteOAuthLink {
   readonly providerId: OAuthProviderId;
   readonly providerAccountId: string;
   readonly providerEmail: NormalizedEmail;
+  readonly providerEmailVerified: boolean;
   readonly scopes: ReadonlyArray<string>;
   readonly providerTokens: ProtectedProviderTokenSet;
   readonly allowDifferentEmail: boolean;

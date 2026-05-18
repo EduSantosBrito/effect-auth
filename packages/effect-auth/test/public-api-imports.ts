@@ -301,6 +301,10 @@ import {
 
 type ExpectTrue<T extends true> = T;
 
+type CompleteOAuthLinkContract = ExpectTrue<
+  CompleteOAuthLink extends { readonly providerEmailVerified: boolean } ? true : false
+>;
+
 type AuthLiveCallableContract = ExpectTrue<
   typeof AuthLive extends (
     config?: AuthLiveConfigInput,
@@ -365,7 +369,8 @@ type PublicApiContract = {
     | WorkflowUpdateUserInput
     | VerificationTokenConfigInput
     | VerificationTokenConfigShape
-    | AuthLiveCallableContract;
+    | AuthLiveCallableContract
+    | CompleteOAuthLinkContract;
   readonly domain:
     | typeof AuthBoundary
     | typeof AuthBoundaryLive
