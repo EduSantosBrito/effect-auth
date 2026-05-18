@@ -1,12 +1,7 @@
 import { Context, Data, Effect, Layer, Match, Option, Predicate, Redacted, Schema } from "effect";
-import type * as FileSystem from "effect/FileSystem";
-import type * as Path from "effect/Path";
 import type { unhandled } from "effect/Types";
-import type * as Etag from "effect/unstable/http/Etag";
 import * as Headers from "effect/unstable/http/Headers";
 import * as HttpEffect from "effect/unstable/http/HttpEffect";
-import type * as HttpPlatform from "effect/unstable/http/HttpPlatform";
-import type * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
 import * as UrlParams from "effect/unstable/http/UrlParams";
@@ -18,6 +13,7 @@ import {
   HttpApiMiddleware,
   HttpApiSchema,
   HttpApiSecurity,
+  OpenApi,
 } from "effect/unstable/httpapi";
 import { Auth } from "../auth.js";
 import type { PublicAuthError } from "../domain/index.js";
@@ -251,7 +247,57 @@ export class AuthHttpOAuthAuthorizationUrlResponse extends Schema.Class<AuthHttp
   authorizationUrl: Schema.String,
 }) {}
 
+export class AuthHttpOAuthCallbackPayload extends Schema.Class<AuthHttpOAuthCallbackPayload>(
+  "AuthHttpOAuthCallbackPayload",
+)({
+  state: Schema.optionalKey(Schema.String),
+  code: Schema.optionalKey(Schema.String),
+  error: Schema.optionalKey(Schema.String),
+  error_description: Schema.optionalKey(Schema.String),
+  errorDescription: Schema.optionalKey(Schema.String),
+}) {}
+
+export const AuthHttpOAuthRedirectResponse = HttpApiSchema.Empty(302).annotate({
+  identifier: "AuthHttpOAuthRedirectResponse",
+  description: "Redirect to the configured OAuth success or error path.",
+});
+
 const OAuthCallbackParams = Schema.Struct({ providerId: Schema.String });
+const OAuthCallbackQuery = AuthHttpOAuthCallbackPayload;
+const OAuthCallbackFormPayload = AuthHttpOAuthCallbackPayload.pipe(
+  HttpApiSchema.asFormUrlEncoded(),
+);
+
+const OAuthCallbackRedirectOpenApi = OpenApi.annotations({
+  summary: "Complete OAuth callback",
+  description:
+    "Consumes provider callback parameters, sets the sign-in session cookie when applicable, and redirects to the configured success or error path.",
+  transform: (operation) => {
+    const responses = operation.responses;
+    const redirectResponse = responses?.["302"] ?? {};
+    const redirectHeaders =
+      typeof redirectResponse.headers === "object" && redirectResponse.headers !== null
+        ? redirectResponse.headers
+        : {};
+    return {
+      ...operation,
+      responses: {
+        ...responses,
+        "302": {
+          ...redirectResponse,
+          description: "Redirect to the configured OAuth success or error path.",
+          headers: {
+            ...redirectHeaders,
+            Location: {
+              description: "Configured same-origin relative redirect path.",
+              schema: { type: "string" },
+            },
+          },
+        },
+      },
+    };
+  },
+});
 
 export interface AuthHttpConfigureInput {
   readonly basePath?: string;
@@ -1109,14 +1155,16 @@ const oauthPublicGroup = HttpApiGroup.make("authOAuthPublic")
     }),
     HttpApiEndpoint.get("oauthCallbackGet", "/oauth2/callback/:providerId", {
       params: OAuthCallbackParams,
-      success: AuthHttpOkResponse,
+      query: OAuthCallbackQuery,
+      success: AuthHttpOAuthRedirectResponse,
       error: AuthHttpErrors,
-    }),
+    }).annotateMerge(OAuthCallbackRedirectOpenApi),
     HttpApiEndpoint.post("oauthCallbackPost", "/oauth2/callback/:providerId", {
       params: OAuthCallbackParams,
-      success: AuthHttpOkResponse,
+      payload: [AuthHttpOAuthCallbackPayload, OAuthCallbackFormPayload],
+      success: AuthHttpOAuthRedirectResponse,
       error: AuthHttpErrors,
-    }),
+    }).annotateMerge(OAuthCallbackRedirectOpenApi),
   )
   .middleware(AuthHttpSchemaErrorMiddleware);
 
@@ -1500,7 +1548,7 @@ const oauthCallbackPayloadFromSearch = (request: HttpServerRequest.HttpServerReq
     state: search.get("state") ?? undefined,
     code: search.get("code") ?? undefined,
     error: search.get("error") ?? undefined,
-    errorDescription: search.get("error_description") ?? undefined,
+    errorDescription: search.get("error_description") ?? search.get("errorDescription") ?? undefined,
   });
 };
 
@@ -1509,7 +1557,9 @@ const oauthCallbackPayloadFromUrlParams = (params: UrlParams.UrlParams) =>
     state: Option.getOrUndefined(UrlParams.getFirst(params, "state")),
     code: Option.getOrUndefined(UrlParams.getFirst(params, "code")),
     error: Option.getOrUndefined(UrlParams.getFirst(params, "error")),
-    errorDescription: Option.getOrUndefined(UrlParams.getFirst(params, "error_description")),
+    errorDescription:
+      Option.getOrUndefined(UrlParams.getFirst(params, "error_description")) ??
+      Option.getOrUndefined(UrlParams.getFirst(params, "errorDescription")),
   });
 
 const oauthPostCallbackPayload = (request: HttpServerRequest.HttpServerRequest) => {
@@ -1675,64 +1725,13 @@ const optionalAuthEffect = Effect.fn("AuthHttp.optionalAuthEffect")(function* <A
   return yield* Effect.provideService(self, AuthHttpOptionalSessionContext, { session });
 });
 
-export interface ConfiguredAuthHttpApi {
-  readonly identifier: string;
-  readonly groups: Readonly<
-    Record<
-      string,
-      {
-        readonly identifier: string;
-        readonly endpoints: Readonly<Record<string, unknown>>;
-      }
-    >
-  >;
-}
+const attachMiddlewareLayer = <I extends HttpApiMiddleware.AnyId, S>(
+  middleware: Context.Key<I, S>,
+  layer: Layer.Layer<I, never, AuthHttpCredentialResolver>,
+): Context.Key<I, S> & { readonly layer: Layer.Layer<I, never, AuthHttpCredentialResolver> } =>
+  Object.assign(middleware, { layer });
 
-type ConfiguredAuthHttpRouteRequirements =
-  | AuthHttpCredentialResolver
-  | FileSystem.FileSystem
-  | Etag.Generator
-  | HttpPlatform.HttpPlatform
-  | HttpRouter.HttpRouter
-  | Path.Path
-  | HttpRouter.Request<"Requires", Auth>
-  | HttpRouter.Request<"Requires", AuthHttpCredentialRenderer>
-  | HttpRouter.Request<"Requires", AuthHttpCredentialResolver>
-  | HttpRouter.Request<"Requires", AuthHttpRuntimeConfig>
-  | HttpRouter.Request<"Requires", AuthHttpUrlPolicy>
-  | HttpRouter.Request<"Requires", OAuth>;
-
-export interface ConfiguredAuthHttp {
-  readonly api: ConfiguredAuthHttpApi;
-  readonly routes: Layer.Layer<never, unknown, ConfiguredAuthHttpRouteRequirements>;
-  readonly middleware: {
-    readonly layer: Layer.Layer<never, unknown, AuthHttpCredentialResolver>;
-  };
-  readonly requireAuth: <A, E, R>(
-    self: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<
-    A,
-    E | AuthHttpUnauthorized,
-    R | AuthHttpCredentialResolver | HttpServerRequest.HttpServerRequest
-  >;
-  readonly optionalAuth: <A, E, R>(
-    self: Effect.Effect<A, E, R>,
-  ) => Effect.Effect<A, E, R | AuthHttpCredentialResolver | HttpServerRequest.HttpServerRequest>;
-  readonly layer: (
-    runtimeInput: AuthHttpRuntimeInput,
-  ) => Layer.Layer<
-    | AuthHttpCredentialResolver
-    | AuthHttpCredentialRenderer
-    | AuthHttpRuntimeConfig
-    | AuthHttpUrlPolicy,
-    AuthHttpConfigError,
-    Auth
-  >;
-  readonly sessionCookieName: string;
-  readonly tokenResponseHeader: typeof tokenResponseHeader;
-}
-
-const configureAuthHttp = (input: AuthHttpConfigureInput = {}): ConfiguredAuthHttp => {
+const configureAuthHttp = (input: AuthHttpConfigureInput = {}) => {
   const contract: AuthHttpContractConfig = {
     basePath: normalizeBasePath(input.basePath),
     sessionCookieName: parseSessionCookieName(input.sessionCookieName),
@@ -1802,7 +1801,7 @@ const configureAuthHttp = (input: AuthHttpConfigureInput = {}): ConfiguredAuthHt
       };
     }).pipe(Effect.annotateLogs({ service: "ConfiguredAuthMiddleware" })),
   );
-  const middleware = Object.assign(ConfiguredAuthMiddleware, { layer: middlewareLayer });
+  const middleware = attachMiddlewareLayer(ConfiguredAuthMiddleware, middlewareLayer);
   const api = makeApi({ contract, middleware: ConfiguredAuthMiddleware });
   const handlers = Layer.mergeAll(
     publicHandlers(api),
@@ -1839,8 +1838,10 @@ const configureAuthHttp = (input: AuthHttpConfigureInput = {}): ConfiguredAuthHt
   };
 };
 
-export const AuthHttp: {
-  readonly configure: (input?: AuthHttpConfigureInput) => ConfiguredAuthHttp;
-} = {
+export type ConfiguredAuthHttp = ReturnType<typeof configureAuthHttp>;
+export type ConfiguredAuthHttpApi = ConfiguredAuthHttp["api"];
+export type ConfiguredAuthHttpMiddleware = ConfiguredAuthHttp["middleware"];
+
+export const AuthHttp = {
   configure: configureAuthHttp,
 };

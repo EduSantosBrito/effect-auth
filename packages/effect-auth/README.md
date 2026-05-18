@@ -341,12 +341,13 @@ export const authSchema = { Users, Accounts, Sessions, Verifications, OAuthState
 
 ```typescript
 import { Effect, Layer, Option } from "effect";
-import { HttpApi } from "effect/unstable/httpapi";
+import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import { AuthLive } from "effect-auth";
 import {
   AuthHttp,
   AuthHttpOptionalSessionContext,
   AuthHttpSessionContext,
+  AuthHttpUserResponse,
 } from "effect-auth/http";
 
 const authHttp = AuthHttp.configure({
@@ -370,7 +371,23 @@ const AppHttpLive = Layer.mergeAll(
   }),
 );
 
-const Api = HttpApi.make("app").addHttpApi(authHttp.api);
+const AppGroup = HttpApiGroup.make("app")
+  .add(
+    HttpApiEndpoint.get("currentUser", "/current-user", {
+      success: AuthHttpUserResponse,
+    }),
+  )
+  .middleware(authHttp.middleware);
+
+const Api = HttpApi.make("app").addHttpApi(authHttp.api).add(AppGroup);
+const AppRoutes = HttpApiBuilder.group(Api, "app", (handlers) =>
+  handlers.handle("currentUser", () =>
+    Effect.gen(function* () {
+      const { user } = yield* AuthHttpSessionContext;
+      return new AuthHttpUserResponse({ user });
+    }),
+  ),
+);
 const app = Layer.mergeAll(AppRoutes, authHttp.routes).pipe(
   Layer.provide(authHttp.middleware.layer),
   Layer.provideMerge(AppHttpLive),
@@ -390,7 +407,7 @@ const navbarProgram = Effect.gen(function* () {
 }).pipe(authHttp.optionalAuth);
 ```
 
-Configured browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Cookie auth is the default; bearer credentials are accepted only when `cookieAndBearer: true` is set, and rotated bearer credentials are returned in the `set-auth-token` response header listed by `authHttp.tokenResponseHeader`. Programmatic `Auth.signIn` still returns a redacted Session Token for server-owned bearer/API flows. The configured object owns `authHttp.api`, `authHttp.routes`, `authHttp.middleware`, `authHttp.requireAuth`, `authHttp.optionalAuth`, and `authHttp.layer(...)` so app docs, app route groups, and auth routes share the same package-owned contract.
+Configured browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Cookie auth is the default; bearer credentials are accepted only when `cookieAndBearer: true` is set, and rotated bearer credentials are returned in the `set-auth-token` response header listed by `authHttp.tokenResponseHeader`. Programmatic `Auth.signIn` still returns a redacted Session Token for server-owned bearer/API flows. The configured object owns `authHttp.api`, `authHttp.routes`, `authHttp.middleware`, `authHttp.middleware.layer`, `authHttp.requireAuth`, `authHttp.optionalAuth`, and `authHttp.layer(...)` so app docs, app route groups, protected handlers, and auth routes share the same package-owned contract.
 
 Migration note: `AuthHttp.configure(...)` supersedes the old public HTTP DX (`AuthHttp.mount`, `OAuthHttp.mount`, standalone `AuthApi`/`AuthApiEndpoints`, `AuthHttpHandlersLive`, custom `AuthHttpErrorMapper`, global `requireAuth`/`optionalAuth`, and standalone token extractor customization). Keep any legacy mount usage behind internal tests only; new application code should configure one `authHttp` object and compose its API, routes, middleware, and runtime layer.
 

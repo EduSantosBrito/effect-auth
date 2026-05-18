@@ -20,6 +20,8 @@ export {
   AuthHttpListedSession,
   AuthHttpListSessionsResponse,
   AuthHttpOAuthAuthorizationUrlResponse,
+  AuthHttpOAuthCallbackPayload,
+  AuthHttpOAuthRedirectResponse,
   AuthHttpOAuthStartLinkPayload,
   AuthHttpOAuthStartSignInPayload,
   AuthHttpOkResponse,
@@ -51,4 +53,5 @@ export type {
   AuthHttpRuntimeInput,
   ConfiguredAuthHttp,
   ConfiguredAuthHttpApi,
+  ConfiguredAuthHttpMiddleware,
 } from "./configured.js";

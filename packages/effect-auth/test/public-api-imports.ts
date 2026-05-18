@@ -1,4 +1,5 @@
-import type { Layer } from "effect";
+import { Effect, type Layer } from "effect";
+import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import {
   Auth,
   AuthLive,
@@ -110,6 +111,8 @@ import {
   AuthHttpListedSession,
   AuthHttpListSessionsResponse,
   AuthHttpOAuthAuthorizationUrlResponse,
+  AuthHttpOAuthCallbackPayload,
+  AuthHttpOAuthRedirectResponse,
   AuthHttpOAuthStartLinkPayload,
   AuthHttpOAuthStartSignInPayload,
   AuthHttpOkResponse,
@@ -138,6 +141,7 @@ import {
   type AuthHttpRuntimeInput,
   type ConfiguredAuthHttp,
   type ConfiguredAuthHttpApi,
+  type ConfiguredAuthHttpMiddleware,
 } from "effect-auth/http";
 import {
   AuthEncryptedFeature,
@@ -321,6 +325,52 @@ type AuthLiveCallableContract = ExpectTrue<
     : false
 >;
 
+type ConfiguredAuthHttpReturnContract = [
+  ExpectTrue<ReturnType<typeof AuthHttp.configure>["api"] extends ConfiguredAuthHttpApi ? true : false>,
+  ExpectTrue<
+    ReturnType<typeof AuthHttp.configure>["middleware"] extends ConfiguredAuthHttpMiddleware
+      ? true
+      : false
+  >,
+  ExpectTrue<
+    ReturnType<typeof AuthHttp.configure>["routes"] extends ConfiguredAuthHttp["routes"]
+      ? true
+      : false
+  >,
+];
+
+const configuredAuthHttpCompositionContract = (authHttp: ConfiguredAuthHttp) => {
+  const AppGroup = HttpApiGroup.make("app")
+    .add(
+      HttpApiEndpoint.get("currentUser", "/current-user", {
+        success: AuthHttpUserResponse,
+        error: AuthHttpErrors,
+      }),
+    )
+    .middleware(authHttp.middleware);
+  const ApiWithAuth = HttpApi.make("app").addHttpApi(authHttp.api);
+  const AppApi = ApiWithAuth.add(AppGroup);
+  const AppRoutes = HttpApiBuilder.group(AppApi, "app", (handlers) =>
+    handlers.handle("currentUser", () =>
+      Effect.gen(function* () {
+        const { user } = yield* AuthHttpSessionContext;
+        return new AuthHttpUserResponse({ user });
+      }),
+    ),
+  );
+
+  return {
+    AppApi,
+    AppGroup,
+    AppRoutes,
+    MiddlewareLayer: authHttp.middleware.layer,
+  };
+};
+
+type ConfiguredAuthHttpCompositionContract = ReturnType<
+  typeof configuredAuthHttpCompositionContract
+>;
+
 type PublicApiContract = {
   readonly root:
     | typeof Auth
@@ -427,6 +477,8 @@ type PublicApiContract = {
     | typeof AuthHttpListedSession
     | typeof AuthHttpListSessionsResponse
     | typeof AuthHttpOAuthAuthorizationUrlResponse
+    | typeof AuthHttpOAuthCallbackPayload
+    | typeof AuthHttpOAuthRedirectResponse
     | typeof AuthHttpOAuthStartLinkPayload
     | typeof AuthHttpOAuthStartSignInPayload
     | typeof AuthHttpOkResponse
@@ -454,7 +506,10 @@ type PublicApiContract = {
     | AuthHttpCredentialSource
     | AuthHttpRuntimeInput
     | ConfiguredAuthHttp
-    | ConfiguredAuthHttpApi;
+    | ConfiguredAuthHttpApi
+    | ConfiguredAuthHttpMiddleware
+    | ConfiguredAuthHttpCompositionContract
+    | ConfiguredAuthHttpReturnContract;
   readonly oauth:
     | typeof AuthEncryptedFeature
     | typeof AuthEncryptionKeyId

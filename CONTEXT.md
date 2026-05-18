@@ -247,7 +247,7 @@ _Avoid_: JWT verification link, reset code
 - OAuth start endpoints return JSON containing the authorization URL; first-slice OAuth HTTP does not issue automatic redirects or expose a Better Auth-style `disableRedirect` flag.
 - Public **OAuth Client Integration** HTTP routes are included by opting into `AuthHttp.configure({ oauth: true })` on the package-owned Auth HTTP facade.
 - **Configured Auth HTTP** is exported from `effect-auth/http`, not the root package.
-- The configured object exposes `api`, `routes`, `middleware`, `requireAuth`, `optionalAuth`, `layer`, cookie metadata, and bearer refresh-header metadata for Effect HTTP servers.
+- The configured object exposes `api`, `routes`, `middleware`, `middleware.layer`, `requireAuth`, `optionalAuth`, `layer`, cookie metadata, and bearer refresh-header metadata for Effect HTTP servers.
 - Public **OAuth Client Integration** callback accepts provider responses through GET query parameters and POST form/body parameters.
 - Public **OAuth Client Integration** sign-in and link requests may include client-provided raw **OAuth Scopes** for Better Auth parity.
 - Client-provided **OAuth Scopes** augment configured External Provider default scopes for both sign-in and link flows.
@@ -354,7 +354,7 @@ _Avoid_: JWT verification link, reset code
 - The **OAuth Service** default layer is exposed as `OAuth.layer`, not `OAuthLive`.
 - OAuth HTTP routes are exposed through opt-in `AuthHttp.configure({ oauth: true })` and require the **OAuth Service**.
 - `AuthHttp.configure({ basePath, oauth: true })` adds `POST /sign-in/oauth2`, `POST /oauth2/link`, and `GET|POST /oauth2/callback/:providerId` under the configured base path.
-- `authHttp.layer(...)` provides cookies, trusted origins, base URL-derived callback URLs, server-configured OAuth callback redirects, and configured middleware wiring.
+- `authHttp.layer(...)` provides cookies, trusted origins, base URL-derived callback URLs, and server-configured OAuth callback redirects; `authHttp.middleware.layer` provides the configured middleware for application route groups.
 - `authHttp.layer({ baseUrl })` requires a public base URL; OAuth callback URL derivation must not depend on untrusted request headers.
 - `authHttp.layer({ oauth })` accepts relative same-origin `signInSuccessPath`, `linkSuccessPath`, and `errorPath` with safe defaults for OAuth callback redirects.
 - The first **OAuth Client Integration** slice derives provider callback URLs from `authHttp.layer({ baseUrl })`, the configured base path, and `providerId`; provider-specific redirect URI overrides are deferred.
