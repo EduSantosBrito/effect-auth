@@ -3,6 +3,7 @@ import * as HttpEffect from "effect/unstable/http/HttpEffect";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 import * as HttpServerRequest from "effect/unstable/http/HttpServerRequest";
 import * as HttpServerResponse from "effect/unstable/http/HttpServerResponse";
+import * as UrlParams from "effect/unstable/http/UrlParams";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import { Auth } from "../auth.js";
 import { OAuth } from "../oauth/index.js";
@@ -1158,6 +1159,113 @@ const handleMountedOAuthLinkStart = (
     }),
   );
 
+interface OAuthCallbackHttpPayload {
+  readonly state?: string;
+  readonly code?: string;
+  readonly error?: string;
+  readonly errorDescription?: string;
+}
+
+const optionalStringField = (record: Readonly<Record<string, unknown>>, key: string) => {
+  const value = record[key];
+  return typeof value === "string" ? value : undefined;
+};
+
+const oauthCallbackPayload = (input: {
+  readonly state: string | undefined;
+  readonly code: string | undefined;
+  readonly error: string | undefined;
+  readonly errorDescription: string | undefined;
+}): OAuthCallbackHttpPayload => ({
+  ...(input.state === undefined ? {} : { state: input.state }),
+  ...(input.code === undefined ? {} : { code: input.code }),
+  ...(input.error === undefined ? {} : { error: input.error }),
+  ...(input.errorDescription === undefined ? {} : { errorDescription: input.errorDescription }),
+});
+
+const isReadonlyRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const oauthCallbackPayloadFromRecord = (record: Readonly<Record<string, unknown>>) =>
+  oauthCallbackPayload({
+    state: optionalStringField(record, "state"),
+    code: optionalStringField(record, "code"),
+    error: optionalStringField(record, "error"),
+    errorDescription:
+      optionalStringField(record, "error_description") ??
+      optionalStringField(record, "errorDescription"),
+  });
+
+const oauthCallbackPayloadFromSearch = (request: HttpServerRequest.HttpServerRequest) => {
+  const search = new URL(request.originalUrl, "http://effect-auth.local").searchParams;
+  return oauthCallbackPayload({
+    state: search.get("state") ?? undefined,
+    code: search.get("code") ?? undefined,
+    error: search.get("error") ?? undefined,
+    errorDescription: search.get("error_description") ?? undefined,
+  });
+};
+
+const oauthCallbackPayloadFromUrlParams = (params: UrlParams.UrlParams) =>
+  oauthCallbackPayload({
+    state: Option.getOrUndefined(UrlParams.getFirst(params, "state")),
+    code: Option.getOrUndefined(UrlParams.getFirst(params, "code")),
+    error: Option.getOrUndefined(UrlParams.getFirst(params, "error")),
+    errorDescription: Option.getOrUndefined(UrlParams.getFirst(params, "error_description")),
+  });
+
+const oauthPostCallbackPayload = (request: HttpServerRequest.HttpServerRequest) => {
+  const contentType = request.headers["content-type"]?.toLowerCase() ?? "";
+  return contentType.includes("application/json")
+    ? request.json.pipe(
+        Effect.map((body) => (isReadonlyRecord(body) ? oauthCallbackPayloadFromRecord(body) : {})),
+      )
+    : request.urlParamsBody.pipe(Effect.map(oauthCallbackPayloadFromUrlParams));
+};
+
+const oauthCallbackRedirect = (path: string): HttpServerResponse.HttpServerResponse =>
+  HttpServerResponse.redirect(path);
+
+const oauthCallbackErrorRedirect = Effect.gen(function* () {
+  const config = yield* AuthHttpConfig;
+  return oauthCallbackRedirect(config.oauth.errorPath);
+});
+
+const handleMountedOAuthCallback = (
+  callbackMethod: "GET" | "POST",
+  request: HttpServerRequest.HttpServerRequest,
+) =>
+  Effect.gen(function* () {
+    const config = yield* AuthHttpConfig;
+    const params = yield* HttpRouter.params;
+    const payload =
+      callbackMethod === "GET"
+        ? oauthCallbackPayloadFromSearch(request)
+        : yield* oauthPostCallbackPayload(request);
+    const oauth = yield* OAuth;
+    const ip = Option.getOrUndefined(request.remoteAddress);
+    const userAgent = request.headers["user-agent"];
+    const result = yield* oauth.completeCallback({
+      providerId: params.providerId,
+      state: payload.state,
+      ...(payload.code === undefined ? {} : { code: payload.code }),
+      ...(payload.error === undefined ? {} : { error: payload.error }),
+      ...(payload.errorDescription === undefined
+        ? {}
+        : { errorDescription: payload.errorDescription }),
+      callbackMethod,
+      ...(ip === undefined ? {} : { ip }),
+      ...(userAgent === undefined ? {} : { userAgent }),
+    });
+    if (result.flow === "SignIn") {
+      return applyCookieInstruction(
+        oauthCallbackRedirect(config.oauth.signInSuccessPath),
+        sessionCookieFromConfig(result.sessionToken, config),
+      );
+    }
+    return oauthCallbackRedirect(config.oauth.linkSuccessPath);
+  }).pipe(Effect.catch(() => oauthCallbackErrorRedirect));
+
 const handleMountedSignUpEmail = (request: HttpServerRequest.HttpServerRequest) =>
   mountedErrorBoundary(
     Effect.gen(function* () {
@@ -1929,6 +2037,16 @@ export const OAuthHttp = {
         ),
         HttpRouter.add("POST", mountedPath(options.basePath, "/oauth2/link"), (request) =>
           handleMountedOAuthLinkStart(options.basePath, request),
+        ),
+        HttpRouter.add(
+          "GET",
+          mountedPath(options.basePath, "/oauth2/callback/:providerId"),
+          (request) => handleMountedOAuthCallback("GET", request),
+        ),
+        HttpRouter.add(
+          "POST",
+          mountedPath(options.basePath, "/oauth2/callback/:providerId"),
+          (request) => handleMountedOAuthCallback("POST", request),
         ),
       ),
 };

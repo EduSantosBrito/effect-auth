@@ -2,6 +2,7 @@ import { assert, it } from "@effect/vitest";
 import { Schema } from "effect";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
+import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
 import {
   Auth,
   AuthApiEndpoints,
@@ -108,22 +109,64 @@ const oauthHttpProvider: OAuthProviderInput = {
     }),
 };
 
-const UnexpectedOAuthHttpClientLive = Layer.succeed(HttpClient.HttpClient)(
-  HttpClient.make((request) =>
-    Effect.fail(
-      new HttpClientError.HttpClientError({
-        reason: new HttpClientError.TransportError({
-          request,
-          description: "unexpected OAuth HTTP provider request",
-        }),
-      }),
-    ),
-  ),
-);
+const jsonOAuthResponse = (
+  request: Parameters<typeof HttpClientResponse.fromWeb>[0],
+  body: unknown,
+  status = 200,
+) =>
+  HttpClientResponse.fromWeb(
+    request,
+    new Response(JSON.stringify(body), {
+      status,
+      headers: { "content-type": "application/json" },
+    }),
+  );
 
-const makeOAuthHttpWorkflowLayer = (storageState = makeDevMemoryStorageState()) => {
+const defaultOAuthTokenResponse = {
+  access_token: "provider-access-token",
+  refresh_token: "provider-refresh-token",
+  token_type: "Bearer",
+  scope: "read:user repo",
+  expires_in: 3600,
+};
+
+const makeFakeOAuthHttpClientLive = (
+  options: {
+    readonly tokenStatus?: number;
+    readonly tokenResponse?: Readonly<Record<string, unknown>>;
+  } = {},
+) =>
+  Layer.succeed(HttpClient.HttpClient)(
+    HttpClient.make((request, url) => {
+      if (url.href === "https://github.example/token") {
+        return Effect.succeed(
+          jsonOAuthResponse(
+            request,
+            options.tokenResponse ?? defaultOAuthTokenResponse,
+            options.tokenStatus ?? 200,
+          ),
+        );
+      }
+      return Effect.fail(
+        new HttpClientError.HttpClientError({
+          reason: new HttpClientError.TransportError({
+            request,
+            description: `unexpected OAuth HTTP provider request: ${url.href}`,
+          }),
+        }),
+      );
+    }),
+  );
+
+const makeOAuthHttpWorkflowLayer = (
+  storageState = makeDevMemoryStorageState(),
+  options: {
+    readonly httpClientLive?: Layer.Layer<HttpClient.HttpClient>;
+  } = {},
+) => {
+  const HttpLive = options.httpClientLive ?? makeFakeOAuthHttpClientLive();
   const ProvidersLive = OAuthProviders.layer({ providers: [oauthHttpProvider] }).pipe(
-    Layer.provide(UnexpectedOAuthHttpClientLive),
+    Layer.provide(HttpLive),
   );
   const ProviderTokenProtectionLive = ProviderTokenProtection.layer.pipe(
     Layer.provide(AuthFeatureKeyMaterialService.layer),
@@ -136,7 +179,7 @@ const makeOAuthHttpWorkflowLayer = (storageState = makeDevMemoryStorageState()) 
         AuthLiveConfig.layer({ encryptionKey: oauthHttpEncryptionKey }),
         DevMemoryAuthStorage(storageState),
         ProvidersLive,
-        UnexpectedOAuthHttpClientLive,
+        HttpLive,
       ),
     ),
   );
@@ -365,6 +408,308 @@ it.effect("OAuthHttp.mount requires configured baseUrl and trusted origins", () 
     yield* Effect.promise(() => withBaseUrlWeb.dispose());
 
     assert.strictEqual(untrustedOrigin.status, 401);
+  });
+});
+
+it.effect("OAuthHttp.mount completes GET sign-in callbacks with a session cookie", () => {
+  const { storageState, layer: oauthLayer } = makeOAuthHttpWorkflowLayer();
+  return Effect.gen(function* () {
+    const routes = OAuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({
+            baseUrl: new URL("https://app.example.com"),
+            trustedOrigins: [new URL("https://app.example.com")],
+            oauth: { signInSuccessPath: "/signed-in", errorPath: "/auth/oauth-error" },
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+
+    const signInStart = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/sign-in/oauth2", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+          },
+          body: jsonString({ providerId: "github" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const signInStartText = yield* Effect.promise(() => signInStart.text());
+    assert.strictEqual(signInStart.status, 200, signInStartText);
+    const signInStartBody = yield* decodeOAuthAuthorizationResponseJson(signInStartText);
+    const state = new URL(signInStartBody.authorizationUrl).searchParams.get("state");
+    if (state === null) return yield* missingFixture("missing OAuth state");
+
+    const callback = yield* Effect.promise(() =>
+      web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${state}&code=callback-code`,
+          { headers: { "user-agent": "Effect Auth OAuth Browser" } },
+        ),
+        Context.empty(),
+      ),
+    );
+    const callbackText = yield* Effect.promise(() => callback.text());
+    yield* Effect.promise(() => web.dispose());
+
+    const location = callback.headers.get("location") ?? "";
+    const setCookie = callback.headers.get("set-cookie") ?? "";
+    const account = Array.from(storageState.providerAccountsByKey.values())[0];
+    if (account === undefined) return yield* missingFixture("missing OAuth provider account");
+
+    assert.strictEqual(callback.status, 302, callbackText);
+    assert.strictEqual(location, "/signed-in");
+    assert.strictEqual(setCookie.includes("effect_auth_session="), true);
+    assert.strictEqual(location.includes("sessionToken"), false);
+    assert.strictEqual(location.includes("provider-access-token"), false);
+    assert.strictEqual(callbackText.includes("provider-access-token"), false);
+    assert.notStrictEqual(account.providerTokens.accessToken, "provider-access-token");
+  });
+});
+
+it.effect("OAuthHttp.mount completes POST link callbacks without a new session cookie", () => {
+  const { storageState, layer: oauthLayer } = makeOAuthHttpWorkflowLayer();
+  return Effect.gen(function* () {
+    const storage = makeDevMemoryStorage(storageState);
+    const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+    const email = yield* normalizeEmail("github@example.com");
+    const passwordHash = yield* decodePasswordHash("hash:oauth-http-link-callback");
+    const user = yield* storage.createUserWithCredentialAccount({
+      email,
+      name: "OAuth HTTP Link Callback User",
+      image: null,
+      passwordHash,
+      now,
+    });
+    const sessionToken = yield* Effect.gen(function* () {
+      const token = yield* AuthToken;
+      return yield* token.makeSessionToken();
+    }).pipe(Effect.provide(AuthTokenLive));
+    yield* storage.createSession({
+      userId: user.id,
+      tokenHash: sessionToken.hash,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      now,
+    });
+
+    const routes = OAuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({
+            baseUrl: new URL("https://app.example.com"),
+            trustedOrigins: [new URL("https://app.example.com")],
+            defaultTokenExtractor: AuthHttpToken.bearer,
+            oauth: { linkSuccessPath: "/settings/accounts", errorPath: "/auth/oauth-error" },
+          }),
+        ),
+      ),
+    );
+    const web = HttpRouter.toWebHandler(appLayer, { disableLogger: true });
+
+    const linkStart = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/oauth2/link", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+            authorization: `Bearer ${Redacted.value(sessionToken.token)}`,
+          },
+          body: jsonString({ providerId: "github" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const linkStartText = yield* Effect.promise(() => linkStart.text());
+    assert.strictEqual(linkStart.status, 200, linkStartText);
+    const linkStartBody = yield* decodeOAuthAuthorizationResponseJson(linkStartText);
+    const state = new URL(linkStartBody.authorizationUrl).searchParams.get("state");
+    if (state === null) return yield* missingFixture("missing link OAuth state");
+
+    const form = new URLSearchParams({ state, code: "link-code" }).toString();
+    const callback = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/oauth2/callback/github", {
+          method: "POST",
+          headers: { "content-type": "application/x-www-form-urlencoded" },
+          body: form,
+        }),
+        Context.empty(),
+      ),
+    );
+    const callbackText = yield* Effect.promise(() => callback.text());
+    yield* Effect.promise(() => web.dispose());
+
+    const location = callback.headers.get("location") ?? "";
+    const account = Array.from(storageState.providerAccountsByKey.values())[0];
+    if (account === undefined) return yield* missingFixture("missing linked provider account");
+
+    assert.strictEqual(callback.status, 302, callbackText);
+    assert.strictEqual(location, "/settings/accounts");
+    assert.strictEqual(callback.headers.get("set-cookie"), null);
+    assert.strictEqual(location.includes(Redacted.value(sessionToken.token)), false);
+    assert.strictEqual(location.includes("provider-access-token"), false);
+    assert.strictEqual(callbackText.includes("provider-access-token"), false);
+    assert.strictEqual(account.userId, user.id);
+  });
+});
+
+it.effect("OAuthHttp.mount redirects callback failures safely", () => {
+  const makeWeb = (input?: Parameters<typeof makeOAuthHttpWorkflowLayer>[1]) => {
+    const storageState = makeDevMemoryStorageState();
+    const { layer: oauthLayer } = makeOAuthHttpWorkflowLayer(storageState, input);
+    const routes = OAuthHttp.mount({ basePath: "/api/auth" })(HttpRouter.layer);
+    const appLayer = routes.pipe(
+      Layer.provideMerge(
+        Layer.mergeAll(
+          oauthLayer,
+          AuthHttpConfig.layer({
+            baseUrl: new URL("https://app.example.com"),
+            trustedOrigins: [new URL("https://app.example.com")],
+            oauth: { errorPath: "/auth/oauth-error" },
+          }),
+        ),
+      ),
+    );
+    return { storageState, web: HttpRouter.toWebHandler(appLayer, { disableLogger: true }) };
+  };
+  const startState = Effect.fn("http.test.startOAuthState")(function* (
+    web: ReturnType<typeof makeWeb>["web"],
+  ) {
+    const response = yield* Effect.promise(() =>
+      web.handler(
+        new Request("https://edge.example.net/api/auth/sign-in/oauth2", {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            origin: "https://app.example.com",
+          },
+          body: jsonString({ providerId: "github" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    const text = yield* Effect.promise(() => response.text());
+    const body = yield* decodeOAuthAuthorizationResponseJson(text);
+    const state = new URL(body.authorizationUrl).searchParams.get("state");
+    if (state === null) return yield* missingFixture("missing OAuth failure state");
+    return state;
+  });
+  const expectSafeErrorRedirect = Effect.fn("http.test.expectSafeErrorRedirect")(function* (
+    response: Response,
+  ) {
+    const body = yield* Effect.promise(() => response.text());
+    const location = response.headers.get("location") ?? "";
+    assert.strictEqual(response.status, 302, body);
+    assert.strictEqual(location, "/auth/oauth-error");
+    assert.strictEqual(location.includes("provider-access-token"), false);
+    assert.strictEqual(location.includes("sessionToken"), false);
+    assert.strictEqual(body.includes("provider-access-token"), false);
+    assert.strictEqual(body.includes("sessionToken"), false);
+  });
+
+  return Effect.gen(function* () {
+    const providerError = makeWeb();
+    const providerErrorResponse = yield* Effect.promise(() =>
+      providerError.web.handler(
+        new Request("https://edge.example.net/api/auth/oauth2/callback/github", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: jsonString({ state: "ignored", error: "access_denied" }),
+        }),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(providerErrorResponse);
+    yield* Effect.promise(() => providerError.web.dispose());
+
+    const missingCode = makeWeb();
+    const missingCodeState = yield* startState(missingCode.web);
+    const missingCodeResponse = yield* Effect.promise(() =>
+      missingCode.web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${missingCodeState}`,
+        ),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(missingCodeResponse);
+    yield* Effect.promise(() => missingCode.web.dispose());
+
+    const invalidState = makeWeb();
+    const invalidStateResponse = yield* Effect.promise(() =>
+      invalidState.web.handler(
+        new Request("https://edge.example.net/api/auth/oauth2/callback/github?state=bad&code=code"),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(invalidStateResponse);
+    yield* Effect.promise(() => invalidState.web.dispose());
+
+    const consumed = makeWeb();
+    const consumedState = yield* startState(consumed.web);
+    const firstConsumedResponse = yield* Effect.promise(() =>
+      consumed.web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${consumedState}&code=first-code`,
+        ),
+        Context.empty(),
+      ),
+    );
+    assert.strictEqual(firstConsumedResponse.status, 302);
+    yield* Effect.promise(() => firstConsumedResponse.text());
+    const consumedAgainResponse = yield* Effect.promise(() =>
+      consumed.web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${consumedState}&code=second-code`,
+        ),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(consumedAgainResponse);
+    yield* Effect.promise(() => consumed.web.dispose());
+
+    const expired = makeWeb();
+    const expiredState = yield* startState(expired.web);
+    for (const [key, record] of expired.storageState.oauthStatesByHash) {
+      expired.storageState.oauthStatesByHash.set(key, { ...record, expiresAt: 0 });
+    }
+    const expiredResponse = yield* Effect.promise(() =>
+      expired.web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${expiredState}&code=expired-code`,
+        ),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(expiredResponse);
+    yield* Effect.promise(() => expired.web.dispose());
+
+    const tokenFailure = makeWeb({
+      httpClientLive: makeFakeOAuthHttpClientLive({ tokenStatus: 500 }),
+    });
+    const tokenFailureState = yield* startState(tokenFailure.web);
+    const tokenFailureResponse = yield* Effect.promise(() =>
+      tokenFailure.web.handler(
+        new Request(
+          `https://edge.example.net/api/auth/oauth2/callback/github?state=${tokenFailureState}&code=token-failure-code`,
+        ),
+        Context.empty(),
+      ),
+    );
+    yield* expectSafeErrorRedirect(tokenFailureResponse);
+    assert.strictEqual(tokenFailure.storageState.providerAccountsByKey.size, 0);
+    yield* Effect.promise(() => tokenFailure.web.dispose());
   });
 });
 
