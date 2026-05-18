@@ -18,6 +18,7 @@ const prefixedTableNames = (prefix: string) => {
     Accounts: `${safePrefix}accounts`,
     Sessions: `${safePrefix}sessions`,
     Verifications: `${safePrefix}verifications`,
+    OAuthStates: `${safePrefix}oauth_states`,
   };
 };
 
@@ -109,11 +110,40 @@ export const Verifications = pgTable(
   ],
 );
 
+export const OAuthStates = pgTable(
+  ${JSON.stringify(tables.OAuthStates)},
+  {
+    id: text("id").primaryKey(),
+    stateHash: text("state_hash").notNull(),
+    providerId: text("provider_id").notNull(),
+    flow: text("flow").notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    scopes: text("scopes").array().notNull(),
+    allowSignUp: boolean("allow_sign_up").notNull(),
+    linkUserId: text("link_user_id").references(() => Users.id, { onDelete: "cascade" }),
+    encryptedCodeVerifier: text("encrypted_code_verifier"),
+    encryptedNonce: text("encrypted_nonce"),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    consumedAt: timestamp("consumed_at", { withTimezone: true }),
+  },
+  (table) => [
+    uniqueIndex(${JSON.stringify(`${tables.OAuthStates}_state_hash_unique`)}).on(table.stateHash),
+    index(${JSON.stringify(`${tables.OAuthStates}_provider_flow_idx`)}).on(
+      table.providerId,
+      table.flow,
+    ),
+    index(${JSON.stringify(`${tables.OAuthStates}_expires_at_idx`)}).on(table.expiresAt),
+    index(${JSON.stringify(`${tables.OAuthStates}_link_user_id_idx`)}).on(table.linkUserId),
+  ],
+);
+
 export const authSchema = {
   Users,
   Accounts,
   Sessions,
   Verifications,
+  OAuthStates,
 };
 `;
 };

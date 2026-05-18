@@ -9,6 +9,7 @@
       "effect-auth/email": ["./src/email/index.ts"],
       "effect-auth/email/mock": ["./src/email/mock.ts"],
       "effect-auth/http": ["./src/http/index.ts"],
+      "effect-auth/oauth": ["./src/oauth/index.ts"],
       "effect-auth/password": ["./src/password/index.ts"],
       "effect-auth/rate-limit": ["./src/rate-limit/index.ts"],
       "effect-auth/storage/dev-memory": ["./src/storage/dev-memory.ts"],

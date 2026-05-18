@@ -17,6 +17,7 @@ export {
   type VerifyEmailInput as AuthVerifyEmailInput,
 } from "./auth.js";
 export type { PublicAuthError } from "./domain/index.js";
+export * from "./oauth/index.js";
 export {
   VerificationTokenConfig,
   VerificationTokenConfigLive,
