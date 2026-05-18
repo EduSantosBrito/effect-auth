@@ -10,6 +10,8 @@ import type {
 import type { PasswordHash } from "../password/index.js";
 import type { TokenHash } from "../token/index.js";
 
+export type { ConsumeOAuthState, StoreOAuthState, StoredOAuthState };
+
 export type AuthUserId = string;
 export type AccountId = string;
 export type SessionId = string;
@@ -183,6 +185,10 @@ export interface OAuthAccountAtomicSuccess {
   readonly isNewUser: boolean;
 }
 
+export interface OAuthSignInWithSessionAtomicSuccess extends OAuthAccountAtomicSuccess {
+  readonly session: StoredSession;
+}
+
 export interface CompleteOAuthSignIn {
   readonly providerId: OAuthProviderId;
   readonly providerAccountId: string;
@@ -197,6 +203,13 @@ export interface CompleteOAuthSignIn {
   readonly now: number;
 }
 
+export interface CompleteOAuthSignInWithSession extends CompleteOAuthSignIn {
+  readonly sessionTokenHash: TokenHash;
+  readonly sessionExpiresAt: number;
+  readonly sessionIpAddress?: string;
+  readonly sessionUserAgent?: string;
+}
+
 export interface CompleteOAuthLink {
   readonly userId: AuthUserId;
   readonly providerId: OAuthProviderId;
@@ -207,6 +220,13 @@ export interface CompleteOAuthLink {
   readonly allowDifferentEmail: boolean;
   readonly now: number;
 }
+
+export class OAuthSessionStorageFailure extends Schema.TaggedErrorClass<OAuthSessionStorageFailure>()(
+  "OAuthSessionStorageFailure",
+  {
+    reason: Schema.Literals(["SessionCreationFailed"]),
+  },
+) {}
 
 export class OAuthAccountStorageFailure extends Schema.TaggedErrorClass<OAuthAccountStorageFailure>()(
   "OAuthAccountStorageFailure",
@@ -300,6 +320,12 @@ export class AuthStorage extends Context.Service<
     readonly completeOAuthSignIn: (
       input: CompleteOAuthSignIn,
     ) => Effect.Effect<OAuthAccountAtomicSuccess, OAuthAccountStorageFailure | AuthStorageFailure>;
+    readonly completeOAuthSignInWithSession: (
+      input: CompleteOAuthSignInWithSession,
+    ) => Effect.Effect<
+      OAuthSignInWithSessionAtomicSuccess,
+      OAuthAccountStorageFailure | AuthStorageFailure | OAuthSessionStorageFailure
+    >;
     readonly completeOAuthLink: (
       input: CompleteOAuthLink,
     ) => Effect.Effect<OAuthAccountAtomicSuccess, OAuthAccountStorageFailure | AuthStorageFailure>;

@@ -18,6 +18,7 @@ import {
   AuthStorageFailure,
   type AuthUser,
   type AuthUserId,
+  type OAuthSessionStorageFailure,
   type OAuthAccountStorageFailure,
   type OAuthProviderAccount,
   type StoredSession,
@@ -881,12 +882,16 @@ export class OAuthProviderClient extends Context.Service<
         }),
         resolveIdentity: Effect.fn("OAuthProviderClient.resolveIdentity")(function* (input) {
           let userInfo = input.userInfo;
-          if (userInfo === undefined && input.provider.userInfoUrl !== undefined) {
+          const fetchUserInfo = Effect.fn("OAuthProviderClient.fetchUserInfo")(function* () {
+            const userInfoUrl = input.provider.userInfoUrl;
+            if (userInfoUrl === undefined) {
+              return undefined;
+            }
             const accessToken = input.tokenSet.accessToken;
             if (accessToken === undefined) {
               return yield* new OAuthProviderClientError({ reason: "MissingAccessToken" });
             }
-            const request = HttpClientRequest.get(input.provider.userInfoUrl).pipe(
+            const request = HttpClientRequest.get(userInfoUrl).pipe(
               HttpClientRequest.bearerToken(accessToken),
               HttpClientRequest.accept("application/json"),
             );
@@ -903,26 +908,59 @@ export class OAuthProviderClient extends Context.Service<
                 () => new OAuthProviderClientError({ reason: "UserInfoResponseInvalid" }),
               ),
             );
-            userInfo = decoded.body;
-          }
+            return decoded.body;
+          });
           if (
             input.provider.isOidc &&
             input.validatedOidcIdentity !== undefined &&
             input.provider.mapProfile === undefined
           ) {
             const identity = input.validatedOidcIdentity;
-            if (identity.email === undefined || identity.email.trim() === "") {
+            if (identity.email !== undefined && identity.email.trim() !== "") {
+              return {
+                providerId: input.provider.id,
+                providerAccountId: identity.subject,
+                email: identity.email,
+                emailVerified: identity.emailVerified ?? false,
+                name:
+                  identity.name === undefined || identity.name.trim() === ""
+                    ? identity.email
+                    : identity.name,
+                image:
+                  identity.image === undefined || identity.image.trim() === ""
+                    ? null
+                    : identity.image,
+                tokenSet: input.tokenSet,
+              } satisfies OAuthProviderIdentityResult;
+            }
+            if (userInfo === undefined) {
+              userInfo = yield* fetchUserInfo();
+            }
+            if (userInfo === undefined) {
               return yield* new OAuthProviderClientError({ reason: "MissingProviderEmail" });
             }
+            const userInfoSubject = stringClaim(userInfo, "sub");
+            if (userInfoSubject !== undefined && userInfoSubject !== identity.subject) {
+              return yield* new OAuthProviderClientError({ reason: "ProfileMappingFailed" });
+            }
+            const email = stringClaim(userInfo, "email");
+            if (email === undefined || email.trim() === "") {
+              return yield* new OAuthProviderClientError({ reason: "MissingProviderEmail" });
+            }
+            const name = stringClaim(userInfo, "name");
+            const picture = stringClaim(userInfo, "picture") ?? stringClaim(userInfo, "image");
             return {
               providerId: input.provider.id,
               providerAccountId: identity.subject,
-              email: identity.email,
-              emailVerified: identity.emailVerified ?? false,
-              name: identity.name ?? identity.email,
-              image: identity.image ?? null,
+              email,
+              emailVerified: booleanClaim(userInfo, "email_verified") ?? false,
+              name: name === undefined || name.trim() === "" ? email : name,
+              image: picture === undefined || picture.trim() === "" ? null : picture,
               tokenSet: input.tokenSet,
             } satisfies OAuthProviderIdentityResult;
+          }
+          if (userInfo === undefined) {
+            userInfo = yield* fetchUserInfo();
           }
           if (input.provider.mapProfile === undefined) {
             return yield* new OAuthProviderClientError({ reason: "ProfileMappingFailed" });
@@ -1645,6 +1683,13 @@ const mapOAuthAtomicStorageFailure = (error: OAuthAccountStorageFailure | AuthSt
     ? new OAuthCallbackError({ reason: "StorageFailed" })
     : error;
 
+const mapOAuthSignInWithSessionStorageFailure = (
+  error: OAuthAccountStorageFailure | AuthStorageFailure | OAuthSessionStorageFailure,
+) =>
+  Predicate.isTagged(error, "OAuthSessionStorageFailure")
+    ? new OAuthCallbackError({ reason: "SessionCreationFailed" })
+    : mapOAuthAtomicStorageFailure(error);
+
 const protectProviderTokenSet: (
   protection: typeof ProviderTokenProtection.Service,
   input: {
@@ -1957,7 +2002,7 @@ export class OAuth extends Context.Service<
                 providerEmail: email,
                 scopes: consumedState.scopes,
                 providerTokens,
-                allowDifferentEmail: false,
+                allowDifferentEmail: authConfig.oauth.allowDifferentEmailLinking,
                 now,
               })
               .pipe(Effect.mapError(mapOAuthAtomicStorageFailure));
@@ -1969,8 +2014,9 @@ export class OAuth extends Context.Service<
             };
             return success;
           }
+          const pair = yield* token.makeSessionToken();
           const signIn = yield* storage
-            .completeOAuthSignIn({
+            .completeOAuthSignInWithSession({
               providerId: provider.id,
               providerAccountId: identity.providerAccountId,
               email,
@@ -1982,26 +2028,17 @@ export class OAuth extends Context.Service<
               allowImplicitSignUp: consumedState.allowSignUp,
               allowAutomaticSameEmailLinking: identity.emailVerified || provider.trustedEmail,
               now,
+              sessionTokenHash: pair.hash,
+              sessionExpiresAt: now + authConfig.session.ttlMillis,
+              ...(typeof input.ip === "string" ? { sessionIpAddress: input.ip } : {}),
+              ...(input.userAgent === undefined ? {} : { sessionUserAgent: input.userAgent }),
             })
-            .pipe(Effect.mapError(mapOAuthAtomicStorageFailure));
-          const pair = yield* token.makeSessionToken();
-          const session = yield* storage
-            .createSession({
-              userId: signIn.user.id,
-              tokenHash: pair.hash,
-              expiresAt: now + authConfig.session.ttlMillis,
-              now,
-              ...(typeof input.ip === "string" ? { ipAddress: input.ip } : {}),
-              ...(input.userAgent === undefined ? {} : { userAgent: input.userAgent }),
-            })
-            .pipe(
-              Effect.mapError(() => new OAuthCallbackError({ reason: "SessionCreationFailed" })),
-            );
+            .pipe(Effect.mapError(mapOAuthSignInWithSessionStorageFailure));
           const success: OAuthSignInCallbackSuccess = {
             flow: "SignIn",
             user: signIn.user,
             account: signIn.account,
-            session,
+            session: signIn.session,
             sessionToken: pair.token,
             isNewUser: signIn.isNewUser,
           };
