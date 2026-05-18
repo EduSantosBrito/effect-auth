@@ -1416,7 +1416,9 @@ it.effect(
         }
         assert.strictEqual(result.isNewUser, false);
         assert.strictEqual(result.user.id, user.id);
+        assert.strictEqual(result.user.emailVerified, true);
         assert.strictEqual(result.session.userId, user.id);
+        assert.strictEqual(verifiedState.users.get(user.id)?.emailVerified, true);
         assert.strictEqual(verifiedState.users.size, 1);
         assert.strictEqual(verifiedState.providerAccountsByKey.size, 1);
         const accounts = yield* storage.listUserAccounts({ userId: user.id });
@@ -1455,6 +1457,8 @@ it.effect(
         }
         assert.strictEqual(result.isNewUser, false);
         assert.strictEqual(result.user.id, user.id);
+        assert.strictEqual(result.user.emailVerified, true);
+        assert.strictEqual(trustedState.users.get(user.id)?.emailVerified, true);
         assert.strictEqual(trustedState.users.size, 1);
         assert.strictEqual(trustedState.providerAccountsByKey.size, 1);
         return result;
@@ -1499,6 +1503,10 @@ it.effect(
         new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }),
       );
       assert.strictEqual(untrustedState.users.size, 1);
+      assert.deepStrictEqual(
+        Array.from(untrustedState.users.values()).map((user) => user.emailVerified),
+        [false],
+      );
       assert.strictEqual(untrustedState.providerAccountsByKey.size, 0);
       assert.strictEqual(untrustedState.sessionsByHash.size, 0);
     });
@@ -1555,6 +1563,8 @@ it.effect("completes manual OAuth link callbacks without issuing new sessions", 
       });
     }
     assert.strictEqual(first.user.id, credential.user.id);
+    assert.strictEqual(first.user.emailVerified, true);
+    assert.strictEqual(storageState.users.get(credential.user.id)?.emailVerified, true);
     assert.strictEqual(first.isNewUser, false);
     assert.strictEqual(Object.hasOwn(first, "session"), false);
     assert.strictEqual(Object.hasOwn(first, "sessionToken"), false);
@@ -1757,6 +1767,7 @@ it.effect(
         return yield* new MissingOAuthTestFixture({ message: "expected link callback result" });
       }
       assert.strictEqual(linked.user.id, credential.user.id);
+      assert.strictEqual(linked.user.emailVerified, false);
       assert.strictEqual(linked.account.userId, credential.user.id);
       assert.strictEqual(storageState.providerAccountsByKey.size, 1);
     }).pipe(

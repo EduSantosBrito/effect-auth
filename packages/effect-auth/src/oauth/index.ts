@@ -2000,6 +2000,7 @@ export class OAuth extends Context.Service<
                 providerId: provider.id,
                 providerAccountId: identity.providerAccountId,
                 providerEmail: email,
+                providerEmailVerified: identity.emailVerified || provider.trustedEmail,
                 scopes: consumedState.scopes,
                 providerTokens,
                 allowDifferentEmail: authConfig.oauth.allowDifferentEmailLinking,

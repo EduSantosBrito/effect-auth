@@ -713,6 +713,33 @@ const make: <S extends AuthDrizzlePgSchema>(
         },
       );
 
+      const verifyUserEmailWhenProviderMatches = Effect.fn(
+        "DrizzlePg.verifyUserEmailWhenProviderMatches",
+      )(function* (input: {
+        readonly user: UserRow;
+        readonly providerEmail: AuthUser["email"];
+        readonly providerEmailVerified: boolean;
+        readonly now: number;
+      }) {
+        if (
+          !input.providerEmailVerified ||
+          input.user.emailVerified ||
+          input.user.email !== String(input.providerEmail)
+        ) {
+          return input.user;
+        }
+        const row = yield* sql
+          .unsafe<UserRow>(
+            `UPDATE ${tables.Users} u
+             SET email_verified = true, updated_at = to_timestamp($2 / 1000.0)
+             WHERE u.id = $1
+             RETURNING ${userSelect("u")}`,
+            [input.user.id, input.now],
+          )
+          .pipe(Effect.flatMap(one));
+        return row;
+      });
+
       const insertOAuthAccount = Effect.fn("DrizzlePg.insertOAuthAccount")(function* (input: {
         readonly providerId: OAuthProviderId;
         readonly providerAccountId: string;
@@ -811,8 +838,14 @@ const make: <S extends AuthDrizzlePgSchema>(
                 row === undefined ? Effect.fail(backendUnavailable) : Effect.succeed(row),
               ),
             );
+            const verifiedUserRow = yield* verifyUserEmailWhenProviderMatches({
+              user: userRow,
+              providerEmail: input.email,
+              providerEmailVerified: input.emailVerified,
+              now: input.now,
+            });
             const account = yield* updateOAuthAccount(input);
-            return { user: toUser(userRow), account, isNewUser: false };
+            return { user: toUser(verifiedUserRow), account, isNewUser: false };
           }
 
           const existingUser = yield* selectUserByEmailForUpdate(input.email);
@@ -822,15 +855,21 @@ const make: <S extends AuthDrizzlePgSchema>(
             });
           }
           if (existingUser !== undefined) {
+            const verifiedUserRow = yield* verifyUserEmailWhenProviderMatches({
+              user: existingUser,
+              providerEmail: input.email,
+              providerEmailVerified: input.emailVerified,
+              now: input.now,
+            });
             const account = yield* insertOAuthAccount({
               providerId: input.providerId,
               providerAccountId: input.providerAccountId,
-              userId: existingUser.id,
+              userId: verifiedUserRow.id,
               scopes: input.scopes,
               providerTokens: input.providerTokens,
               now: input.now,
             });
-            return { user: toUser(existingUser), account, isNewUser: false };
+            return { user: toUser(verifiedUserRow), account, isNewUser: false };
           }
           if (!input.allowImplicitSignUp) {
             return yield* new OAuthAccountStorageFailure({
@@ -1236,12 +1275,24 @@ const make: <S extends AuthDrizzlePgSchema>(
                   });
                 }
                 if (existingAccount !== undefined) {
+                  const verifiedUserRow = yield* verifyUserEmailWhenProviderMatches({
+                    user: userRow,
+                    providerEmail: input.providerEmail,
+                    providerEmailVerified: input.providerEmailVerified,
+                    now: input.now,
+                  });
                   const account = yield* updateOAuthAccount(input);
-                  return { user, account, isNewUser: false };
+                  return { user: toUser(verifiedUserRow), account, isNewUser: false };
                 }
                 if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
                   return yield* new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" });
                 }
+                const verifiedUserRow = yield* verifyUserEmailWhenProviderMatches({
+                  user: userRow,
+                  providerEmail: input.providerEmail,
+                  providerEmailVerified: input.providerEmailVerified,
+                  now: input.now,
+                });
                 const account = yield* insertOAuthAccount({
                   providerId: input.providerId,
                   providerAccountId: input.providerAccountId,
@@ -1250,7 +1301,7 @@ const make: <S extends AuthDrizzlePgSchema>(
                   providerTokens: input.providerTokens,
                   now: input.now,
                 });
-                return { user, account, isNewUser: false };
+                return { user: toUser(verifiedUserRow), account, isNewUser: false };
               }),
             )
             .pipe(Effect.mapError(oauthAccountStorageFailure)),

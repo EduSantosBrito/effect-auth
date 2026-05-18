@@ -481,12 +481,59 @@ const storageInvariants = Effect.gen(function* () {
   assert.strictEqual(sameEmailLinked.isNewUser, false);
   assert.strictEqual(sameEmailLinked.user.id, user.id);
 
+  const unverifiedEmail = yield* decodeEmail("unverified-oauth-link@example.com");
+  const unverifiedUser = yield* storage.createUserWithCredentialAccount({
+    email: unverifiedEmail,
+    name: "Unverified OAuth Link",
+    image: null,
+    passwordHash,
+    now,
+  });
+  assert.strictEqual(unverifiedUser.emailVerified, false);
+  const upgradedSameEmail = yield* storage.completeOAuthSignIn({
+    providerId: github,
+    providerAccountId: "github-upgrade-same-email",
+    email: unverifiedEmail,
+    emailVerified: true,
+    name: "Unverified OAuth Link",
+    image: null,
+    scopes: ["read:user"],
+    providerTokens: { accessToken },
+    allowImplicitSignUp: true,
+    allowAutomaticSameEmailLinking: true,
+    now,
+  });
+  assert.strictEqual(upgradedSameEmail.user.id, unverifiedUser.id);
+  assert.strictEqual(upgradedSameEmail.user.emailVerified, true);
+
+  const manualEmail = yield* decodeEmail("manual-oauth-link@example.com");
+  const manualUser = yield* storage.createUserWithCredentialAccount({
+    email: manualEmail,
+    name: "Manual OAuth Link",
+    image: null,
+    passwordHash,
+    now,
+  });
+  const upgradedManualLink = yield* storage.completeOAuthLink({
+    userId: manualUser.id,
+    providerId: github,
+    providerAccountId: "github-manual-upgrade",
+    providerEmail: manualEmail,
+    providerEmailVerified: true,
+    scopes: ["read:user"],
+    providerTokens: { accessToken },
+    allowDifferentEmail: false,
+    now,
+  });
+  assert.strictEqual(upgradedManualLink.user.emailVerified, true);
+
   const linkMismatch = yield* Effect.flip(
     storage.completeOAuthLink({
       userId: user.id,
       providerId: github,
       providerAccountId: "github-link",
       providerEmail: oauthEmail,
+      providerEmailVerified: true,
       scopes: ["read:user"],
       providerTokens: { accessToken },
       allowDifferentEmail: false,
@@ -499,6 +546,7 @@ const storageInvariants = Effect.gen(function* () {
     providerId: github,
     providerAccountId: "github-link",
     providerEmail: email,
+    providerEmailVerified: true,
     scopes: ["read:user"],
     providerTokens: { accessToken },
     allowDifferentEmail: false,
@@ -511,6 +559,7 @@ const storageInvariants = Effect.gen(function* () {
     providerId: github,
     providerAccountId: "github-link",
     providerEmail: oauthEmail,
+    providerEmailVerified: true,
     scopes: ["read:user", "repo"],
     providerTokens: { accessToken: nextAccessToken },
     allowDifferentEmail: false,
@@ -519,6 +568,8 @@ const storageInvariants = Effect.gen(function* () {
   assert.strictEqual(relinked.account.providerTokens.accessToken, nextAccessToken);
 
   yield* storage.deleteUser({ userId: user.id });
+  yield* storage.deleteUser({ userId: unverifiedUser.id });
+  yield* storage.deleteUser({ userId: manualUser.id });
   yield* storage.deleteUser({ userId: firstOAuth.user.id });
   yield* storage.deleteUser({ userId: oauthWithSession.user.id });
   assert.strictEqual(yield* countRows("auth_users"), 0);

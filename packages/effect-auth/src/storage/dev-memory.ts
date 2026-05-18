@@ -133,6 +133,19 @@ const publicAccount = (account: AuthAccount): PublicAuthAccount => ({
 const findUserByEmail = (state: DevMemoryStorageState, email: AuthUser["email"]) =>
   Array.from(state.users.values()).find((user) => user.email === email);
 
+const verifyUserEmailWhenProviderMatches = (
+  state: DevMemoryStorageState,
+  user: AuthUser,
+  providerEmail: AuthUser["email"],
+  providerEmailVerified: boolean,
+  now: number,
+): AuthUser => {
+  if (!providerEmailVerified || user.emailVerified || user.email !== providerEmail) return user;
+  const updated = { ...user, emailVerified: true, updatedAt: now };
+  state.users.set(user.id, updated);
+  return updated;
+};
+
 const mergeProtectedTokens = (
   previous: ProtectedProviderTokenSet | undefined,
   next: ProtectedProviderTokenSet,
@@ -217,9 +230,16 @@ const completeOAuthSignIn = (
       if (user === undefined) {
         return Effect.fail(new AuthStorageFailure({ reason: "BackendUnavailable" }));
       }
+      const updatedUser = verifyUserEmailWhenProviderMatches(
+        state,
+        user,
+        input.email,
+        input.emailVerified,
+        input.now,
+      );
       const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
       state.providerAccountsByKey.set(key, updatedAccount);
-      return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+      return Effect.succeed({ user: updatedUser, account: updatedAccount, isNewUser: false });
     }
 
     const existingUser = findUserByEmail(state, input.email);
@@ -227,9 +247,16 @@ const completeOAuthSignIn = (
       return Effect.fail(new OAuthAccountStorageFailure({ reason: "AutomaticLinkingNotAllowed" }));
     }
     if (existingUser !== undefined) {
-      const account = makeOAuthProviderAccount({ ...input, userId: existingUser.id });
+      const updatedUser = verifyUserEmailWhenProviderMatches(
+        state,
+        existingUser,
+        input.email,
+        input.emailVerified,
+        input.now,
+      );
+      const account = makeOAuthProviderAccount({ ...input, userId: updatedUser.id });
       state.providerAccountsByKey.set(key, account);
-      return Effect.succeed({ user: existingUser, account, isNewUser: false });
+      return Effect.succeed({ user: updatedUser, account, isNewUser: false });
     }
     if (!input.allowImplicitSignUp) {
       return Effect.fail(new OAuthAccountStorageFailure({ reason: "ImplicitSignUpDisabled" }));
@@ -599,16 +626,30 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
         );
       }
       if (existingAccount !== undefined) {
+        const updatedUser = verifyUserEmailWhenProviderMatches(
+          state,
+          user,
+          input.providerEmail,
+          input.providerEmailVerified,
+          input.now,
+        );
         const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
         state.providerAccountsByKey.set(key, updatedAccount);
-        return Effect.succeed({ user, account: updatedAccount, isNewUser: false });
+        return Effect.succeed({ user: updatedUser, account: updatedAccount, isNewUser: false });
       }
       if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
         return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
       }
+      const updatedUser = verifyUserEmailWhenProviderMatches(
+        state,
+        user,
+        input.providerEmail,
+        input.providerEmailVerified,
+        input.now,
+      );
       const account = makeOAuthProviderAccount({ ...input, userId: input.userId });
       state.providerAccountsByKey.set(key, account);
-      return Effect.succeed({ user, account, isNewUser: false });
+      return Effect.succeed({ user: updatedUser, account, isNewUser: false });
     }),
 });
 
