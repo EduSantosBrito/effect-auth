@@ -34,12 +34,10 @@ const cliEnvironment = (args: ReadonlyArray<string>) =>
 
 const loadNodeModules = Effect.fn("loadNodeModules")(function* () {
   const fs = yield* Effect.tryPromise({
-    // @effect-diagnostics-next-line nodeBuiltinImport:off - The CLI writes generated schema files using Node fs.
     try: () => import("node:fs/promises"),
     catch: () => new CliFailure({ reason: "Unable to load fs module" }),
   });
   const path = yield* Effect.tryPromise({
-    // @effect-diagnostics-next-line nodeBuiltinImport:off - The CLI resolves output paths using Node path.
     try: () => import("node:path"),
     catch: () => new CliFailure({ reason: "Unable to load path module" }),
   });
