@@ -10,7 +10,6 @@ import type { TokenHash } from "../../token/index.js";
 import {
   AuthStorage,
   AuthStorageFailure,
-  type AuthAccount,
   type CredentialAuthAccount,
   type AuthStorageShape,
   type AuthUser,
@@ -164,7 +163,7 @@ type UserRow = {
 
 type AccountRow = {
   readonly id: string;
-  readonly providerId: "credential";
+  readonly providerId: "credential" | OAuthProviderId;
   readonly accountId: string;
   readonly userId: string;
   readonly scopes: ReadonlyArray<string>;
@@ -330,21 +329,15 @@ const toUser = (row: UserRow): AuthUser => ({
   updatedAt: row.updatedAt,
 });
 
-const toAccount = (row: AccountRow): AuthAccount => ({
+const toPublicAccount = (row: AccountRow): PublicAuthAccount => ({
   id: row.id,
   providerId: row.providerId,
   accountId: row.accountId,
   userId: row.userId,
   scopes: row.scopes,
-  ...(row.passwordHash === null ? {} : { passwordHash: Redacted.make(row.passwordHash) }),
   createdAt: row.createdAt,
   updatedAt: row.updatedAt,
 });
-
-const toPublicAccount = ({
-  passwordHash: _passwordHash,
-  ...account
-}: AuthAccount): PublicAuthAccount => account;
 
 const joinedCredentialUser = (row: CredentialJoinRow): AuthUser => ({
   id: row.userId,
@@ -622,7 +615,7 @@ const make: <S extends AuthDrizzlePgSchema>(
               [userId],
             )
             .pipe(
-              Effect.map((rows) => rows.map((row) => toPublicAccount(toAccount(row)))),
+              Effect.map((rows) => rows.map(toPublicAccount)),
               Effect.mapError(storageFailure),
             ),
         storeVerificationToken: (input) =>
@@ -915,6 +908,8 @@ const make: <S extends AuthDrizzlePgSchema>(
                 ),
             )
             .pipe(Effect.mapError(storageFailure)),
+        completeOAuthSignIn: () => Effect.fail(backendUnavailable),
+        completeOAuthLink: () => Effect.fail(backendUnavailable),
       };
     }),
 );

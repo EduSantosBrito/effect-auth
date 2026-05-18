@@ -116,8 +116,11 @@ import {
   AuthFeatureKeyMaterialFailure,
   AuthFeatureKeyMaterialService,
   OAuth,
+  OAuthCallbackError,
   OAuthFlow,
   OAuthPkceMode,
+  OAuthProviderClient,
+  OAuthProviderClientError,
   OAuthProviderConfigError,
   OAuthProviderId,
   OAuthProviderNotFound,
@@ -129,19 +132,28 @@ import {
   OAuthStateHandle,
   OAuthStateHash,
   OAuthTokenEndpointAuthMethod,
+  ProtectedProviderToken,
+  ProviderTokenKind,
+  ProviderTokenProtection,
+  ProviderTokenProtectionFailure,
   normalizeOAuthScopes,
   type AuthEncryptedFeature as AuthEncryptedFeatureValue,
   type AuthEncryptionKeyId as AuthEncryptionKeyIdValue,
   type AuthFeatureKeyMaterial,
   type ConsumeOAuthState,
+  type OAuthAuthorizationCodeExchangeInput,
   type OAuthAuthorizationStartResult,
+  type OAuthCallbackInput,
+  type OAuthCallbackSuccess,
   type OAuthFlow as OAuthFlowValue,
   type OAuthPkceMode as OAuthPkceModeValue,
   type OAuthProfileMappingInput,
   type OAuthProviderConfigInput,
   type OAuthProviderConfigLayerInput,
+  type OAuthLinkCallbackSuccess,
   type OAuthProviderEndpointsInput,
   type OAuthProviderId as OAuthProviderIdValue,
+  type OAuthProviderIdentityResult,
   type OAuthProviderInput,
   type OAuthProviderProfile,
   type OAuthStartLinkInput,
@@ -150,12 +162,19 @@ import {
   type OAuthStateCreateResult,
   type OAuthStateHash as OAuthStateHashValue,
   type OAuthStateHandle as OAuthStateHandleValue,
+  type OAuthSignInCallbackSuccess,
   type OAuthStateSecrets,
   type OAuthTokenEndpointAuthMethod as OAuthTokenEndpointAuthMethodValue,
   type OAuthTokenSet,
+  type ProtectProviderTokenInput,
+  type ProtectedProviderToken as ProtectedProviderTokenValue,
+  type ProtectedProviderTokenSet,
+  type ProviderTokenAad,
+  type ProviderTokenKind as ProviderTokenKindValue,
   type ResolvedOAuthProvider,
   type StoreOAuthState,
   type StoredOAuthState,
+  type UnprotectProviderTokenInput,
 } from "effect-auth/oauth";
 import {
   NativeScryptPasswordHasher,
@@ -186,12 +205,16 @@ import {
 import {
   AuthStorage,
   AuthStorageFailure,
+  OAuthAccountStorageFailure,
   type AuthStorageShape,
   type AuthAccount,
+  type AuthAccountBase,
   type AccountId,
   type AuthUser,
   type AuthUserId,
   type ChangePasswordSession,
+  type CompleteOAuthLink,
+  type CompleteOAuthSignIn,
   type CompletePasswordReset,
   type ConsumeVerificationToken,
   type CreateSession,
@@ -199,6 +222,8 @@ import {
   type CredentialAccountLookup,
   type DeleteUserStorageInput,
   type ListUserSessions,
+  type OAuthAccountAtomicSuccess,
+  type OAuthProviderAccount,
   type PublicAuthAccount,
   type RevokeAllUserSessions,
   type RevokeOtherSessions,
@@ -362,8 +387,11 @@ type PublicApiContract = {
     | typeof AuthFeatureKeyMaterialFailure
     | typeof AuthFeatureKeyMaterialService
     | typeof OAuth
+    | typeof OAuthCallbackError
     | typeof OAuthFlow
     | typeof OAuthPkceMode
+    | typeof OAuthProviderClient
+    | typeof OAuthProviderClientError
     | typeof OAuthProviderConfigError
     | typeof OAuthProviderId
     | typeof OAuthProviderNotFound
@@ -375,33 +403,49 @@ type PublicApiContract = {
     | typeof OAuthStateHandle
     | typeof OAuthStateHash
     | typeof OAuthTokenEndpointAuthMethod
+    | typeof ProtectedProviderToken
+    | typeof ProviderTokenKind
+    | typeof ProviderTokenProtection
+    | typeof ProviderTokenProtectionFailure
     | typeof normalizeOAuthScopes
     | AuthEncryptedFeatureValue
     | AuthEncryptionKeyIdValue
     | AuthFeatureKeyMaterial
     | ConsumeOAuthState
+    | OAuthAuthorizationCodeExchangeInput
     | OAuthAuthorizationStartResult
+    | OAuthCallbackInput
+    | OAuthCallbackSuccess
     | OAuthFlowValue
     | OAuthPkceModeValue
     | OAuthProfileMappingInput
     | OAuthProviderConfigInput
     | OAuthProviderConfigLayerInput
+    | OAuthLinkCallbackSuccess
     | OAuthProviderEndpointsInput
     | OAuthProviderIdValue
+    | OAuthProviderIdentityResult
     | OAuthProviderInput
     | OAuthProviderProfile
     | OAuthStartLinkInput
     | OAuthStartSignInInput
     | OAuthStateCreateInput
+    | OAuthSignInCallbackSuccess
     | OAuthStateCreateResult
     | OAuthStateHashValue
     | OAuthStateHandleValue
     | OAuthStateSecrets
     | OAuthTokenEndpointAuthMethodValue
     | OAuthTokenSet
+    | ProtectProviderTokenInput
+    | ProtectedProviderTokenSet
+    | ProtectedProviderTokenValue
+    | ProviderTokenAad
+    | ProviderTokenKindValue
     | ResolvedOAuthProvider
     | StoreOAuthState
-    | StoredOAuthState;
+    | StoredOAuthState
+    | UnprotectProviderTokenInput;
   readonly password:
     | typeof NativeScryptPasswordHasher
     | typeof PasswordHash
@@ -429,12 +473,16 @@ type PublicApiContract = {
   readonly storage:
     | typeof AuthStorage
     | typeof AuthStorageFailure
+    | typeof OAuthAccountStorageFailure
     | AccountId
     | AuthAccount
+    | AuthAccountBase
     | AuthStorageShape
     | AuthUser
     | AuthUserId
     | ChangePasswordSession
+    | CompleteOAuthLink
+    | CompleteOAuthSignIn
     | CompletePasswordReset
     | ConsumeVerificationToken
     | CreateSession
@@ -442,6 +490,8 @@ type PublicApiContract = {
     | CredentialAccountLookup
     | DeleteUserStorageInput
     | ListUserSessions
+    | OAuthAccountAtomicSuccess
+    | OAuthProviderAccount
     | PublicAuthAccount
     | RevokeAllUserSessions
     | RevokeOtherSessions

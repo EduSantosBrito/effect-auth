@@ -1,6 +1,12 @@
 import { Context, Effect, Schema } from "effect";
 import type { NormalizedEmail } from "../domain/index.js";
-import type { ConsumeOAuthState, StoreOAuthState, StoredOAuthState } from "../oauth/index.js";
+import type {
+  ConsumeOAuthState,
+  OAuthProviderId,
+  ProtectedProviderTokenSet,
+  StoreOAuthState,
+  StoredOAuthState,
+} from "../oauth/index.js";
 import type { PasswordHash } from "../password/index.js";
 import type { TokenHash } from "../token/index.js";
 
@@ -18,30 +24,29 @@ export interface AuthUser {
   readonly updatedAt: number;
 }
 
-export interface AuthAccount {
+export interface AuthAccountBase {
   readonly id: AccountId;
-  readonly providerId: "credential";
+  readonly providerId: "credential" | OAuthProviderId;
   readonly accountId: string;
   readonly userId: AuthUserId;
   readonly scopes: ReadonlyArray<string>;
-  readonly passwordHash?: PasswordHash;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
 
-export interface CredentialAuthAccount extends AuthAccount {
+export interface CredentialAuthAccount extends AuthAccountBase {
+  readonly providerId: "credential";
   readonly passwordHash: PasswordHash;
 }
 
-export interface PublicAuthAccount {
-  readonly id: AccountId;
-  readonly providerId: "credential";
-  readonly accountId: string;
-  readonly userId: AuthUserId;
-  readonly scopes: ReadonlyArray<string>;
-  readonly createdAt: number;
-  readonly updatedAt: number;
+export interface OAuthProviderAccount extends AuthAccountBase {
+  readonly providerId: OAuthProviderId;
+  readonly providerTokens: ProtectedProviderTokenSet;
 }
+
+export type AuthAccount = CredentialAuthAccount | OAuthProviderAccount;
+
+export interface PublicAuthAccount extends AuthAccountBase {}
 
 export interface CredentialAccountLookup {
   readonly user: AuthUser;
@@ -168,6 +173,50 @@ export interface DeleteUserStorageInput {
   readonly userId: AuthUserId;
 }
 
+export interface OAuthAccountAtomicSuccess {
+  readonly user: AuthUser;
+  readonly account: OAuthProviderAccount;
+  readonly isNewUser: boolean;
+}
+
+export interface CompleteOAuthSignIn {
+  readonly providerId: OAuthProviderId;
+  readonly providerAccountId: string;
+  readonly email: NormalizedEmail;
+  readonly emailVerified: boolean;
+  readonly name: string;
+  readonly image: string | null;
+  readonly scopes: ReadonlyArray<string>;
+  readonly providerTokens: ProtectedProviderTokenSet;
+  readonly allowImplicitSignUp: boolean;
+  readonly allowAutomaticSameEmailLinking: boolean;
+  readonly now: number;
+}
+
+export interface CompleteOAuthLink {
+  readonly userId: AuthUserId;
+  readonly providerId: OAuthProviderId;
+  readonly providerAccountId: string;
+  readonly providerEmail: NormalizedEmail;
+  readonly scopes: ReadonlyArray<string>;
+  readonly providerTokens: ProtectedProviderTokenSet;
+  readonly allowDifferentEmail: boolean;
+  readonly now: number;
+}
+
+export class OAuthAccountStorageFailure extends Schema.TaggedErrorClass<OAuthAccountStorageFailure>()(
+  "OAuthAccountStorageFailure",
+  {
+    reason: Schema.Literals([
+      "ImplicitSignUpDisabled",
+      "AutomaticLinkingNotAllowed",
+      "ProviderAccountLinkedToDifferentUser",
+      "LinkUserNotFound",
+      "LinkEmailMismatch",
+    ]),
+  },
+) {}
+
 export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailure>()(
   "AuthStorageFailure",
   {
@@ -244,6 +293,12 @@ export class AuthStorage extends Context.Service<
     readonly consumeOAuthState: (
       input: ConsumeOAuthState,
     ) => Effect.Effect<StoredOAuthState, AuthStorageFailure>;
+    readonly completeOAuthSignIn: (
+      input: CompleteOAuthSignIn,
+    ) => Effect.Effect<OAuthAccountAtomicSuccess, OAuthAccountStorageFailure | AuthStorageFailure>;
+    readonly completeOAuthLink: (
+      input: CompleteOAuthLink,
+    ) => Effect.Effect<OAuthAccountAtomicSuccess, OAuthAccountStorageFailure | AuthStorageFailure>;
   }
 >()("effect-auth/AuthStorage") {}
 export type AuthStorageShape = typeof AuthStorage.Service;
