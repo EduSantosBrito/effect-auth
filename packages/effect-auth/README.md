@@ -210,9 +210,9 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. OIDC ID Token validation, mounted OAuth callback routes, and Drizzle provider-account persistence are separate follow-up slices.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. OIDC ID Token validation and Drizzle provider-account persistence are separate follow-up slices.
 
-Mounted OAuth start routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
+Mounted OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
 
 ```typescript
 import { Layer } from "effect";
@@ -238,7 +238,7 @@ const oauthRoutes = HttpRouter.layer.pipe(
 );
 ```
 
-`POST /api/auth/sign-in/oauth2` and `POST /api/auth/oauth2/link` return `{ authorizationUrl }` JSON only; they never include Session Tokens or Provider Tokens and never redirect automatically. OAuth HTTP routes require `AuthHttpConfig.baseUrl` so provider callback URLs are derived as `baseUrl + basePath + /oauth2/callback/:providerId`. OAuth redirect result paths are same-origin relative paths; absolute and protocol-relative paths are rejected during `AuthHttpConfig.layer(...)` construction.
+`POST /api/auth/sign-in/oauth2` and `POST /api/auth/oauth2/link` return `{ authorizationUrl }` JSON only; they never include Session Tokens or Provider Tokens and never redirect automatically. OAuth HTTP routes require `AuthHttpConfig.baseUrl` so provider callback URLs are derived as `baseUrl + basePath + /oauth2/callback/:providerId`. `GET`/`POST /api/auth/oauth2/callback/:providerId` complete sign-in/link callbacks, set the normal session cookie only for sign-in success, and redirect only to configured same-origin paths. Callback failures redirect to `oauth.errorPath` without putting Session Tokens or Provider Tokens in URLs or bodies. OAuth redirect result paths are same-origin relative paths; absolute and protocol-relative paths are rejected during `AuthHttpConfig.layer(...)` construction.
 
 ## Drizzle Postgres Storage
 
@@ -381,18 +381,20 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 
 Mounted with `OAuthHttp.mount({ basePath: "/api/auth" })`:
 
-| Method | Path                         |
-| ------ | ---------------------------- |
-| `POST` | `/api/auth/sign-in/oauth2`   |
-| `POST` | `/api/auth/oauth2/link`      |
+| Method | Path                                      |
+| ------ | ----------------------------------------- |
+| `POST` | `/api/auth/sign-in/oauth2`                |
+| `POST` | `/api/auth/oauth2/link`                   |
+| `GET`  | `/api/auth/oauth2/callback/:providerId`   |
+| `POST` | `/api/auth/oauth2/callback/:providerId`   |
 
-OAuth start route bodies accept `providerId`, optional `scopes`, and optional `allowSignUp` for sign-in starts. Responses are `{ authorizationUrl }` JSON and use the configured `baseUrl` plus mount path for provider callback URL derivation; untrusted request headers are never used for callback URLs.
+OAuth start route bodies accept `providerId`, optional `scopes`, and optional `allowSignUp` for sign-in starts. Responses are `{ authorizationUrl }` JSON and use the configured `baseUrl` plus mount path for provider callback URL derivation; untrusted request headers are never used for callback URLs. Callback routes read `state`, `code`, `error`, and `error_description` from GET query params or POST JSON/form bodies. Sign-in success sets the normal Session Cookie and redirects to `oauth.signInSuccessPath`; link success redirects to `oauth.linkSuccessPath` without a new Session Token.
 
 Identity Core changes the `AuthStorage` contract before 1.0: storage adapters should create Users and Credential Accounts atomically via `createUserWithCredentialAccount`, store password hashes only on Credential Accounts, use the User Id as the credential `accountId`, update User-level `emailVerified`, and expose secret-free account projections through `listUserAccounts`. No legacy credential storage shim is provided.
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication plus generic OAuth start/callback workflow slices and mounted OAuth start routes. OIDC ID Token validation, mounted OAuth callback routes, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication plus generic OAuth start/callback workflow slices and mounted OAuth routes. OIDC ID Token validation, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 
