@@ -1289,6 +1289,11 @@ const mapOAuthStateConsumeFailure = (error: OAuthStateFailure | AuthStorageFailu
   return error;
 };
 
+const mapOAuthAtomicStorageFailure = (error: OAuthAccountStorageFailure | AuthStorageFailure) =>
+  Predicate.isTagged(error, "AuthStorageFailure")
+    ? new OAuthCallbackError({ reason: "StorageFailed" })
+    : error;
+
 const protectProviderTokenSet: (
   protection: typeof ProviderTokenProtection.Service,
   input: {
@@ -1581,7 +1586,7 @@ export class OAuth extends Context.Service<
                 allowDifferentEmail: false,
                 now,
               })
-              .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "StorageFailed" })));
+              .pipe(Effect.mapError(mapOAuthAtomicStorageFailure));
             const success: OAuthLinkCallbackSuccess = {
               flow: "Link",
               user: result.user,
@@ -1604,7 +1609,7 @@ export class OAuth extends Context.Service<
               allowAutomaticSameEmailLinking: identity.emailVerified || provider.trustedEmail,
               now,
             })
-            .pipe(Effect.mapError(() => new OAuthCallbackError({ reason: "StorageFailed" })));
+            .pipe(Effect.mapError(mapOAuthAtomicStorageFailure));
           const pair = yield* token.makeSessionToken();
           const session = yield* storage
             .createSession({

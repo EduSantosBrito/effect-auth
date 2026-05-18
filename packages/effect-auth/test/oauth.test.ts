@@ -30,7 +30,7 @@ import {
   makeDevMemoryStorageState,
   type DevMemoryStorageState,
 } from "../src/storage/dev-memory";
-import { AuthStorage, AuthStorageFailure } from "../src/storage/index";
+import { AuthStorage, AuthStorageFailure, OAuthAccountStorageFailure } from "../src/storage/index";
 import { AuthToken, AuthTokenLive } from "../src/token/index";
 
 const encryptionKey = Redacted.make("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
@@ -236,6 +236,32 @@ const latestProviderAccount = Effect.fn("oauth.test.latestProviderAccount")(func
 });
 
 const s256 = (value: string) => new Bun.CryptoHasher("sha256").update(value).digest("base64url");
+
+const createCredentialSession = Effect.fn("oauth.test.createCredentialSession")(function* (input: {
+  readonly email: string;
+  readonly name: string;
+}) {
+  const storage = yield* AuthStorage;
+  const token = yield* AuthToken;
+  const now = yield* Effect.clockWith((clock) => clock.currentTimeMillis);
+  const email = yield* decodeEmail(input.email);
+  const passwordHash = yield* decodePasswordHash("hash:oauth-link");
+  const user = yield* storage.createUserWithCredentialAccount({
+    email,
+    name: input.name,
+    image: null,
+    passwordHash,
+    now,
+  });
+  const sessionToken = yield* token.makeSessionToken();
+  const session = yield* storage.createSession({
+    userId: user.id,
+    tokenHash: sessionToken.hash,
+    expiresAt: now + 60_000,
+    now,
+  });
+  return { user, session, sessionToken: sessionToken.token };
+});
 
 it.effect("starts OAuth sign-in with storage-backed encrypted PKCE state", () => {
   const storageState = makeDevMemoryStorageState();
@@ -808,6 +834,227 @@ it.effect("signs in returning OAuth provider accounts and preserves omitted toke
   );
 });
 
+it.effect("completes manual OAuth link callbacks without issuing new sessions", () => {
+  const storageState = makeDevMemoryStorageState();
+  const HttpLive = makeFakeOAuthHttpClientLive({
+    tokenResponses: [
+      {
+        access_token: "first-link-access-token",
+        refresh_token: "first-link-refresh-token",
+        token_type: "Bearer",
+        scope: "read:user",
+        expires_in: 3600,
+      },
+      {
+        access_token: "second-link-access-token",
+        token_type: "Bearer",
+        scope: "read:user repo",
+        expires_in: 7200,
+      },
+    ],
+  });
+
+  return Effect.gen(function* () {
+    const oauth = yield* OAuth;
+    const storage = yield* AuthStorage;
+    const protection = yield* ProviderTokenProtection;
+    const credential = yield* createCredentialSession({
+      email: "oauth@example.com",
+      name: "Credential User",
+    });
+
+    const firstStart = yield* oauth.startLink({
+      providerId: "github",
+      redirectUri: new URL("https://app.example.com/auth/callback/github"),
+      sessionToken: credential.sessionToken,
+    });
+    const first = yield* oauth.completeCallback({
+      providerId: "github",
+      state: firstStart.state,
+      code: "first-link-code",
+      callbackMethod: "GET",
+    });
+    if (first.flow !== "Link") {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected first link callback result",
+      });
+    }
+    assert.strictEqual(first.user.id, credential.user.id);
+    assert.strictEqual(first.isNewUser, false);
+    assert.strictEqual(Object.hasOwn(first, "session"), false);
+    assert.strictEqual(Object.hasOwn(first, "sessionToken"), false);
+    assert.strictEqual(storageState.sessionsByHash.size, 1);
+    assert.strictEqual(storageState.providerAccountsByKey.size, 1);
+
+    const firstAccount = yield* latestProviderAccount(storageState);
+    const firstRefreshToken = firstAccount.providerTokens.refreshToken;
+    if (firstRefreshToken === undefined) {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected linked refresh token",
+      });
+    }
+
+    const secondStart = yield* oauth.startLink({
+      providerId: "github",
+      redirectUri: new URL("https://app.example.com/auth/callback/github"),
+      sessionToken: credential.sessionToken,
+      scopes: ["repo"],
+    });
+    const second = yield* oauth.completeCallback({
+      providerId: "github",
+      state: secondStart.state,
+      code: "second-link-code",
+      callbackMethod: "GET",
+    });
+    if (second.flow !== "Link") {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected idempotent link callback result",
+      });
+    }
+    assert.strictEqual(second.user.id, credential.user.id);
+    assert.strictEqual(Object.hasOwn(second, "session"), false);
+    assert.strictEqual(Object.hasOwn(second, "sessionToken"), false);
+    assert.strictEqual(storageState.sessionsByHash.size, 1);
+    assert.strictEqual(storageState.providerAccountsByKey.size, 1);
+
+    const updatedAccount = yield* latestProviderAccount(storageState);
+    const updatedAccessToken = updatedAccount.providerTokens.accessToken;
+    const updatedRefreshToken = updatedAccount.providerTokens.refreshToken;
+    if (updatedAccessToken === undefined || updatedRefreshToken === undefined) {
+      return yield* new MissingOAuthTestFixture({
+        message: "expected idempotent link token fields",
+      });
+    }
+    assert.notStrictEqual(updatedAccessToken, firstAccount.providerTokens.accessToken);
+    assert.strictEqual(updatedRefreshToken, firstRefreshToken);
+    assert.strictEqual(updatedAccount.providerTokens.scope, "read:user repo");
+
+    const clearAccessToken = yield* protection.unprotect({
+      providerId: updatedAccount.providerId,
+      providerAccountId: updatedAccount.accountId,
+      kind: "AccessToken",
+      protectedToken: updatedAccessToken,
+    });
+    const clearRefreshToken = yield* protection.unprotect({
+      providerId: updatedAccount.providerId,
+      providerAccountId: updatedAccount.accountId,
+      kind: "RefreshToken",
+      protectedToken: updatedRefreshToken,
+    });
+    assert.strictEqual(Redacted.value(clearAccessToken), "second-link-access-token");
+    assert.strictEqual(Redacted.value(clearRefreshToken), "first-link-refresh-token");
+
+    const publicAccounts = yield* storage.listUserAccounts({ userId: credential.user.id });
+    assert.strictEqual(publicAccounts.length, 2);
+    for (const account of publicAccounts) {
+      assert.strictEqual(Object.hasOwn(account, "providerTokens"), false);
+    }
+  }).pipe(
+    Effect.provide(
+      makeOAuthLayer(storageState, {
+        providers: [callbackProvider],
+        httpClientLive: HttpLive,
+      }),
+    ),
+  );
+});
+
+it.effect("fails manual OAuth link callbacks without partial writes", () => {
+  const mismatchState = makeDevMemoryStorageState();
+  const conflictState = makeDevMemoryStorageState();
+
+  return Effect.gen(function* () {
+    const mismatch = yield* Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const credential = yield* createCredentialSession({
+        email: "mismatch@example.com",
+        name: "Mismatch User",
+      });
+      const started = yield* oauth.startLink({
+        providerId: "github",
+        redirectUri: new URL("https://app.example.com/auth/callback/github"),
+        sessionToken: credential.sessionToken,
+      });
+      return yield* Effect.flip(
+        oauth.completeCallback({
+          providerId: "github",
+          state: started.state,
+          code: "mismatch-code",
+          callbackMethod: "GET",
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(mismatchState, {
+          providers: [callbackProvider],
+          httpClientLive: FakeOAuthHttpClientLive,
+        }),
+      ),
+    );
+    assert.deepStrictEqual(
+      mismatch,
+      new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }),
+    );
+    assert.strictEqual(mismatchState.providerAccountsByKey.size, 0);
+    assert.strictEqual(mismatchState.sessionsByHash.size, 1);
+
+    const conflict = yield* Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const first = yield* createCredentialSession({
+        email: "oauth@example.com",
+        name: "First User",
+      });
+      const firstStart = yield* oauth.startLink({
+        providerId: "github",
+        redirectUri: new URL("https://app.example.com/auth/callback/github"),
+        sessionToken: first.sessionToken,
+      });
+      const linked = yield* oauth.completeCallback({
+        providerId: "github",
+        state: firstStart.state,
+        code: "first-link-code",
+        callbackMethod: "GET",
+      });
+      if (linked.flow !== "Link") {
+        return yield* new MissingOAuthTestFixture({
+          message: "expected setup link callback result",
+        });
+      }
+
+      const second = yield* createCredentialSession({
+        email: "second@example.com",
+        name: "Second User",
+      });
+      const secondStart = yield* oauth.startLink({
+        providerId: "github",
+        redirectUri: new URL("https://app.example.com/auth/callback/github"),
+        sessionToken: second.sessionToken,
+      });
+      return yield* Effect.flip(
+        oauth.completeCallback({
+          providerId: "github",
+          state: secondStart.state,
+          code: "second-link-code",
+          callbackMethod: "GET",
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(conflictState, {
+          providers: [callbackProvider],
+          httpClientLive: FakeOAuthHttpClientLive,
+        }),
+      ),
+    );
+    assert.deepStrictEqual(
+      conflict,
+      new OAuthAccountStorageFailure({ reason: "ProviderAccountLinkedToDifferentUser" }),
+    );
+    assert.strictEqual(conflictState.providerAccountsByKey.size, 1);
+    assert.strictEqual(conflictState.sessionsByHash.size, 2);
+  });
+});
+
 it.effect("maps generic OAuth callback failures without partial public token exposure", () => {
   const storageState = makeDevMemoryStorageState();
   return Effect.gen(function* () {
@@ -977,7 +1224,10 @@ it.effect(
               callbackMethod: "GET",
             }),
           );
-          assert.deepStrictEqual(failure, new OAuthCallbackError({ reason: "StorageFailed" }));
+          assert.deepStrictEqual(
+            failure,
+            new OAuthAccountStorageFailure({ reason: "ImplicitSignUpDisabled" }),
+          );
         }).pipe(
           Effect.provide(
             makeOAuthLayer(makeDevMemoryStorageState(), {

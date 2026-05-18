@@ -555,15 +555,15 @@ export const makeDevMemoryStorage = (state = makeDevMemoryStorageState()): AuthS
       if (user === undefined) {
         return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkUserNotFound" }));
       }
-      if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
-        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
-      }
       const key = providerAccountKey(input.providerId, input.providerAccountId);
       const existingAccount = state.providerAccountsByKey.get(key);
       if (existingAccount !== undefined && existingAccount.userId !== input.userId) {
         return Effect.fail(
           new OAuthAccountStorageFailure({ reason: "ProviderAccountLinkedToDifferentUser" }),
         );
+      }
+      if (user.email !== input.providerEmail && !input.allowDifferentEmail) {
+        return Effect.fail(new OAuthAccountStorageFailure({ reason: "LinkEmailMismatch" }));
       }
       if (existingAccount !== undefined) {
         const updatedAccount = updateOAuthProviderAccount(existingAccount, input);
