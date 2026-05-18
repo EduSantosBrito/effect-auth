@@ -1,0 +1,3 @@
+# Rate Limiter Is App-Provided For The OAuth Prerequisite Slice
+
+Effect Auth will not introduce an Auth Storage-backed rate-limit table, a separate rate-limit storage boundary, a package-owned in-memory default, or `AuthLiveConfig.rateLimit` before the OAuth client integration. Better Auth's built-in limiter is intentionally simple and memory-first, but copying that into Effect Auth would weaken the secure-default posture while storage-backed rate limiting would expand adapter and migration scope too early; for now applications provide a Rate Limiter service suitable for their deployment, including policy and no-op behavior if they intentionally want it.

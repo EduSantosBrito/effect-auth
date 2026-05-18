@@ -1,0 +1,3 @@
+# Auth Live Defaults Are Production-Secure
+
+Effect Auth's primary live composition uses a single secure `AuthLive(config?)` factory backed by **Auth Live Config**, rather than exposing production/dev/default layer variants that can silently weaken protections. Applications may still replace services through normal Effect layer composition, but no-op rate limiting or plaintext provider-token handling must be application-owned decisions instead of package-provided shortcuts, because accidentally shipping permissive auth behavior is more dangerous than requiring explicit setup for local development.
