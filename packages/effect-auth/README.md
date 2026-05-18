@@ -211,7 +211,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. OIDC providers validate signed ID Tokens against configured issuer, client audience, encrypted state nonce, expiry/not-before claims, and JWKS keys before claims can create/link local users. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Drizzle provider-account persistence is a separate follow-up slice.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. OIDC providers validate signed ID Tokens against configured issuer, client audience, encrypted state nonce, expiry/not-before claims, and JWKS keys before claims can create/link local users. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior.
 
 Mounted OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
 
@@ -268,7 +268,7 @@ export const AppLive = AuthLive().pipe(
 );
 ```
 
-`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, `Verifications`, and `OAuthStates`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, OAuth State consumption, session rotation, password reset, password change, revocation, and user deletion operations transactional.
+`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, `Verifications`, and `OAuthStates`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, OAuth State consumption, OAuth provider-account sign-in/linking, session rotation, password reset, password change, revocation, and user deletion operations transactional. Provider token columns store already-protected envelopes and are omitted from public account projections.
 
 Generate the Drizzle schema TypeScript file once, use its `authSchema` for runtime, and let Drizzle Kit own SQL migrations:
 
@@ -289,7 +289,7 @@ export const Users = pgTable("auth_users", {
 });
 
 export const Accounts = pgTable("auth_accounts", {
-  // ...
+  // credential proof plus protected OAuth provider token columns
 });
 
 export const Sessions = pgTable("auth_sessions", {
@@ -395,7 +395,7 @@ Identity Core changes the `AuthStorage` contract before 1.0: storage adapters sh
 
 ## Current Scope
 
-`effect-auth` is backend-first and currently focuses on email/password authentication plus generic OAuth start/callback workflow slices and mounted OAuth routes. OIDC ID Token validation, passkeys, multi-factor authentication, organization auth, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
+`effect-auth` is backend-first and currently focuses on email/password authentication plus OAuth/OIDC client sign-in and account-linking workflows. Passkeys, multi-factor authentication, organization auth, unlinking, provider token APIs, additional-scope workflows, provider helper packages, emailless OAuth users, and additional database-specific storage adapters beyond the built-in Drizzle Postgres adapter are not shipped yet.
 
 Use `AuthStorage` and `AuthEmail` to connect your own database and email provider today. We suggest [`effect-email`](https://github.com/EduSantosBrito/effect-email) for the email provider boundary.
 

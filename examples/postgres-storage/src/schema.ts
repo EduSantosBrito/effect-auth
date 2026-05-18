@@ -27,6 +27,17 @@ export const Accounts = pgTable(
       .references(() => Users.id, { onDelete: "cascade" }),
     scopes: text("scopes").array().notNull(),
     passwordHash: text("password_hash"),
+    providerAccessToken: text("provider_access_token"),
+    providerRefreshToken: text("provider_refresh_token"),
+    providerIdToken: text("provider_id_token"),
+    providerTokenType: text("provider_token_type"),
+    providerTokenScope: text("provider_token_scope"),
+    providerAccessTokenExpiresAt: timestamp("provider_access_token_expires_at", {
+      withTimezone: true,
+    }),
+    providerRefreshTokenExpiresAt: timestamp("provider_refresh_token_expires_at", {
+      withTimezone: true,
+    }),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull(),
   },

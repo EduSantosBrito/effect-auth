@@ -15,6 +15,13 @@
       "when": 1779065678126,
       "tag": "0001_sticky_jean_grey",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1779072240857,
+      "tag": "0002_even_longshot",
+      "breakpoints": true
     }
   ]
 }
