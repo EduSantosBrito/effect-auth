@@ -11,7 +11,7 @@
     "check": "bun --bun tsgo -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@effect/sql-pg": "4.0.0-beta.64",
+    "@effect/sql-pg": "4.0.0-beta.65",
     "drizzle-orm": "^0.45.2",
     "effect": "catalog:",
     "effect-auth": "workspace:*"
