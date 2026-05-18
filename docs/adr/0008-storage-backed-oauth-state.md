@@ -1,0 +1,3 @@
+# Storage-Backed OAuth State
+
+OAuth Client Integration uses storage-backed **OAuth State** records: opaque random state values are hashed at rest, short-lived, and consumed exactly once with encrypted callback-required secrets such as the PKCE verifier and OIDC nonce. State binds provider, flow, exact redirect URI, requested scopes, sign-up intent, expiry, and consumption metadata, but first-slice post-auth redirects are server-configured rather than public Better Auth-style callback URL fields. This rejects self-contained signed state because replay resistance, one-time consumption, callback metadata integrity, and consistency with Effect Auth's existing token storage model are more important than avoiding persistence for the OAuth redirect round-trip.
