@@ -19,10 +19,9 @@ const redactDatabaseUrl = (url: string) => url.replace(/:([^:@/]+)@/u, ":***@");
 const tokenPreview = (token: Redacted.Redacted<string>) =>
   `${Redacted.value(token).slice(0, 8)}...`;
 
-const firstVerificationEmail = Effect.sync(() => {
+const firstVerificationEmail = Effect.gen(function* () {
   const message = emailState.sent.find((email) => email.kind === "EmailVerification");
-  if (message === undefined) throw new Error("Expected a verification email to be sent");
-  return message;
+  return yield* Effect.fromNullishOr(message);
 });
 
 const demo = Effect.gen(function* () {

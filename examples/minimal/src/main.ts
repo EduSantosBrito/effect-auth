@@ -12,10 +12,9 @@ const AppLive = AuthLive.dev.pipe(
 const email = "demo@example.com";
 const password = "correct horse battery staple";
 
-const firstVerificationEmail = Effect.sync(() => {
+const firstVerificationEmail = Effect.gen(function* () {
   const message = emailState.sent.find((email) => email.kind === "EmailVerification");
-  if (message === undefined) throw new Error("Expected a verification email to be sent");
-  return message;
+  return yield* Effect.fromNullishOr(message);
 });
 
 const tokenPreview = (token: Redacted.Redacted<string>) =>
