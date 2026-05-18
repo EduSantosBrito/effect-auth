@@ -1,12 +1,15 @@
 import { Console, Effect, Layer, Redacted } from "effect";
 import { Auth, AuthLive } from "effect-auth";
 import { MockAuthEmail, makeMockAuthEmailState } from "effect-auth/email/mock";
+import { BoundedDevRateLimiter } from "effect-auth/rate-limit";
 import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
 
 const emailState = makeMockAuthEmailState();
 
-const AppLive = AuthLive.dev.pipe(
-  Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail(emailState))),
+const AppLive = AuthLive().pipe(
+  Layer.provide(
+    Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail(emailState), BoundedDevRateLimiter()),
+  ),
 );
 
 const email = "demo@example.com";

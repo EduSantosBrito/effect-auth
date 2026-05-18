@@ -35,7 +35,7 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 - Trusted Origin checks for state-changing browser requests.
 - Boundary Parse for external email, password, token, and URL inputs.
 - Secure Default Password Policy and native Scrypt password hashing.
-- Rate Limiter service boundary with development presets.
+- Rate Limiter service boundary that applications provide explicitly.
 
 ## Install
 
@@ -49,10 +49,13 @@ bun add effect-auth effect
 import { Effect, Layer } from "effect";
 import { Auth, AuthLive } from "effect-auth";
 import { MockAuthEmail } from "effect-auth/email/mock";
+import { BoundedDevRateLimiter } from "effect-auth/rate-limit";
 import { DevMemoryAuthStorage } from "effect-auth/storage/dev-memory";
 
-const AuthTestLayer = AuthLive.dev.pipe(
-  Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail())),
+const AuthTestLayer = AuthLive().pipe(
+  Layer.provide(
+    Layer.mergeAll(DevMemoryAuthStorage(), MockAuthEmail(), BoundedDevRateLimiter()),
+  ),
 );
 
 const program = Effect.gen(function* () {
@@ -69,25 +72,20 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(AuthTestLayer));
 ```
 
-`AuthLive.dev` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, workflow composition, and a permissive development Rate Limiter. `DevMemoryAuthStorage` and `MockAuthEmail` are no-network helpers for examples and tests. Production apps should provide real Auth Storage, Auth Email, and Rate Limiter layers with `AuthLive.production`.
+`AuthLive(config?)` wires Boundary Parse, Secure Default Password Policy, native Scrypt hashing, token generation, and workflow composition. Auth Storage, Auth Email, and Rate Limiter are always application-provided layers. `DevMemoryAuthStorage`, `MockAuthEmail`, and `BoundedDevRateLimiter` are explicit helpers for examples and tests.
 
-Token TTLs and Session Policy are configured at the workflow seam:
+Token TTLs and Session Policy are configured through nested Auth Live Config:
 
 ```typescript
-import { SessionPolicyLive, VerificationTokenConfigLive } from "effect-auth";
-
-const TokenPolicyLive = VerificationTokenConfigLive({
-  emailVerificationTtl: "24 hours",
-  passwordResetTtl: "15 minutes",
-});
-
-const SessionPolicy = SessionPolicyLive({
-  sessionTtl: "7 days",
-  sessionUpdateAge: "1 day",
-});
+const AuthServicesLive = AuthLive({
+  session: { ttl: "7 days", updateAge: "1 day" },
+  verification: { emailVerificationTtl: "24 hours", passwordResetTtl: "15 minutes" },
+}).pipe(
+  Layer.provide(Layer.mergeAll(AppAuthStorage, AppAuthEmail, AppRateLimiter)),
+);
 ```
 
-Session Policy controls how long issued/refreshed Sessions remain valid and how old a Session must be before lookup rotates its Session Token. Defaults remain 7 days for `sessionTtl` and 1 day for `sessionUpdateAge`.
+Session Policy controls how long issued/refreshed Sessions remain valid and how old a Session must be before lookup rotates its Session Token. Defaults remain 7 days for `session.ttl` and 1 day for `session.updateAge`.
 
 Programmatic Session Management verbs are available on `Auth`:
 
@@ -140,7 +138,7 @@ const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema }).pipe(
   Layer.provide(PgLive),
 );
 
-export const AppLive = AuthLive.production.pipe(
+export const AppLive = AuthLive().pipe(
   Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
 );
 ```
@@ -188,7 +186,7 @@ import { AuthLive } from "effect-auth";
 import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession } from "effect-auth/http";
 import * as HttpRouter from "effect/unstable/http/HttpRouter";
 
-const AuthServicesLive = AuthLive.production.pipe(
+const AuthServicesLive = AuthLive().pipe(
   Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
 );
 

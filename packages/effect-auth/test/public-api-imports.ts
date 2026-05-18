@@ -1,12 +1,16 @@
+import type { Layer } from "effect";
 import {
   Auth,
   AuthLive,
+  AuthLiveConfig,
   SessionPolicy,
   SessionPolicyLive,
   VerificationTokenConfig,
   VerificationTokenConfigLive,
   createEffectAuthClient,
   packageName,
+  type AuthLiveConfigInput,
+  type AuthLiveConfigShape,
   type AuthRevokeUserSessionInput,
   type AuthSessionTokenInput,
   type AuthShape,
@@ -191,16 +195,29 @@ import {
   type VerificationToken as VerificationTokenValue,
 } from "effect-auth/token";
 
+type ExpectTrue<T extends true> = T;
+
+type AuthLiveCallableContract = ExpectTrue<
+  typeof AuthLive extends (
+    config?: AuthLiveConfigInput,
+  ) => Layer.Layer<Auth | AuthLiveConfig, BoundaryParseError, AuthStorage | AuthEmail | RateLimiter>
+    ? true
+    : false
+>;
+
 type PublicApiContract = {
   readonly root:
     | typeof Auth
     | typeof AuthLive
+    | typeof AuthLiveConfig
     | typeof SessionPolicy
     | typeof SessionPolicyLive
     | typeof VerificationTokenConfig
     | typeof VerificationTokenConfigLive
     | typeof createEffectAuthClient
     | typeof packageName
+    | AuthLiveConfigInput
+    | AuthLiveConfigShape
     | AuthRevokeUserSessionInput
     | AuthSessionTokenInput
     | AuthShape
@@ -227,7 +244,8 @@ type PublicApiContract = {
     | WorkflowDeleteUserInput
     | WorkflowUpdateUserInput
     | VerificationTokenConfigInput
-    | VerificationTokenConfigShape;
+    | VerificationTokenConfigShape
+    | AuthLiveCallableContract;
   readonly domain:
     | typeof AuthBoundary
     | typeof AuthBoundaryLive

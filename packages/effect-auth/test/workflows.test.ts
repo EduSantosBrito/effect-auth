@@ -12,6 +12,7 @@ import {
   AuthEmail,
   AuthEmailFailure,
   AuthLive,
+  AuthLiveConfig,
   AuthTestLive,
   BoundaryParseError,
   AuthStorageFailure,
@@ -26,9 +27,11 @@ import {
   IdentityWorkflowsLive,
   Layer,
   MockAuthEmail,
+  Option,
   PasswordHasher,
   PasswordPolicyFailure,
   PasswordRecoveryWorkflowsLive,
+  PermissiveDevRateLimiter,
   Predicate,
   RateLimitExceeded,
   RateLimiter,
@@ -176,11 +179,17 @@ it.effect("verification token TTLs are configured at the workflow seam", () => {
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session token", () => {
+it.effect("AuthLive() exposes flat Auth sign-in with a redacted session token", () => {
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
-  const authLayer = AuthLive.default.pipe(
-    Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
+  const authLayer = AuthLive().pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        DevMemoryAuthStorage(storageState),
+        MockAuthEmail(emailState),
+        PermissiveDevRateLimiter,
+      ),
+    ),
   );
   return Effect.gen(function* () {
     const auth = yield* Auth;
@@ -208,6 +217,79 @@ it.effect("AuthLive.default exposes flat Auth sign-in with a redacted session to
       jsonString(signedIn.sessionToken).includes(Redacted.value(signedIn.sessionToken)),
       false,
     );
+  }).pipe(Effect.provide(authLayer));
+});
+
+it.effect("AuthLiveConfig.layer validates nested policy defaults and key overrides", () =>
+  Effect.gen(function* () {
+    const config = yield* AuthLiveConfig;
+    assert.strictEqual(config.session.ttlMillis, 2 * 60 * 60 * 1000);
+    assert.strictEqual(config.session.updateAgeMillis, 30 * 60 * 1000);
+    assert.strictEqual(config.verification.emailVerificationTtlMillis, 3 * 60 * 60 * 1000);
+    assert.strictEqual(config.verification.passwordResetTtlMillis, 4 * 60 * 1000);
+    assert.strictEqual(config.oauthState.ttlMillis, 5 * 60 * 1000);
+    assert.strictEqual(config.encryptionKeyId, "root-key");
+    assert.strictEqual(config.providerTokens.encryptionKeyId, "provider-key");
+    assert.strictEqual(config.oauthState.encryptionKeyId, "root-key");
+    assert.strictEqual(Option.isSome(config.encryptionKey), true);
+    assert.strictEqual(Option.isSome(config.providerTokens.encryptionKey), true);
+    assert.strictEqual(Option.isSome(config.oauthState.encryptionKey), false);
+  }).pipe(
+    Effect.provide(
+      AuthLiveConfig.layer({
+        session: { ttl: "2 hours", updateAge: "30 minutes" },
+        verification: { emailVerificationTtl: "3 hours", passwordResetTtl: "4 minutes" },
+        encryptionKey: Redacted.make("root-secret"),
+        encryptionKeyId: "root-key",
+        providerTokens: {
+          encryptionKey: Redacted.make("provider-secret"),
+          encryptionKeyId: "provider-key",
+        },
+        oauthState: { ttl: "5 minutes" },
+      }),
+    ),
+  ),
+);
+
+it.effect("AuthLiveConfig.layer rejects invalid nested durations", () =>
+  Effect.gen(function* () {
+    const rejected = yield* Effect.exit(
+      Effect.service(AuthLiveConfig).pipe(
+        Effect.provide(AuthLiveConfig.layer({ oauthState: { ttl: 0 } })),
+      ),
+    );
+    assert.strictEqual(rejected._tag, "Failure");
+  }),
+);
+
+it.effect("AuthLive() uses the application-provided RateLimiter", () => {
+  const storageState = makeDevMemoryStorageState();
+  const emailState = makeMockAuthEmailState();
+  const rejectingRateLimiter = Layer.succeed(RateLimiter)({
+    check: () => Effect.fail(new RateLimitExceeded({ bucket: "SignUp", retryAfterMillis: 1_000 })),
+  });
+  const authLayer = AuthLive().pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        DevMemoryAuthStorage(storageState),
+        MockAuthEmail(emailState),
+        rejectingRateLimiter,
+      ),
+    ),
+  );
+  return Effect.gen(function* () {
+    const auth = yield* Auth;
+    const rejected = yield* Effect.flip(
+      auth.signUp({
+        email: "rate-limit@example.com",
+        password: "correct horse battery staple",
+        name: "Test User",
+        verificationCallbackUrl: new URL("https://app.example.com/verify"),
+      }),
+    );
+
+    assert.deepStrictEqual(rejected, rateLimited);
+    assert.strictEqual(storageState.users.size, 0);
   }).pipe(Effect.provide(authLayer));
 });
 
@@ -286,8 +368,14 @@ it.effect("Auth.signUp requires a display name", () => {
 it.effect("AuthLive rejects malformed verification tokens before workflow storage lookup", () => {
   const storageState = makeDevMemoryStorageState();
   const emailState = makeMockAuthEmailState();
-  const authLayer = AuthLive.default.pipe(
-    Layer.provide(Layer.mergeAll(DevMemoryAuthStorage(storageState), MockAuthEmail(emailState))),
+  const authLayer = AuthLive().pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        DevMemoryAuthStorage(storageState),
+        MockAuthEmail(emailState),
+        PermissiveDevRateLimiter,
+      ),
+    ),
   );
   return Effect.gen(function* () {
     const auth = yield* Auth;
