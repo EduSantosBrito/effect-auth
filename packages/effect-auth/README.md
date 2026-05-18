@@ -245,16 +245,17 @@ const program = Effect.gen(function* () {
 
 Compared with Better Auth-style convenience defaults, this first OAuth slice is stricter by default: rate limiting is app-provided, OAuth State is storage-backed and one-time consumed, callback URLs come from server configuration instead of request headers or provider fields, and Provider Tokens are encrypted by Effect Auth-owned services before storage. Effect Auth acts as an OAuth/OIDC client for your application, not as an OAuth/OIDC provider.
 
-Mounted OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
+Configured OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
 
 ```typescript
 import { Layer } from "effect";
-import { AuthHttpConfig, OAuthHttp } from "effect-auth/http";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import { AuthHttp } from "effect-auth/http";
 
-const OAuthHttpLive = Layer.mergeAll(
+const authHttp = AuthHttp.configure({ basePath: "/api/auth", oauth: true });
+
+const AuthHttpLive = Layer.mergeAll(
   OAuthLive, // from the OAuth service wiring above
-  AuthHttpConfig.layer({
+  authHttp.layer({
     baseUrl: new URL("https://app.example.com"),
     trustedOrigins: [new URL("https://app.example.com")],
     oauth: {
@@ -265,13 +266,10 @@ const OAuthHttpLive = Layer.mergeAll(
   }),
 );
 
-const oauthRoutes = HttpRouter.layer.pipe(
-  OAuthHttp.mount({ basePath: "/api/auth" }),
-  Layer.provideMerge(OAuthHttpLive),
-);
+const oauthRoutes = authHttp.routes.pipe(Layer.provideMerge(AuthHttpLive));
 ```
 
-`POST /api/auth/sign-in/oauth2` and `POST /api/auth/oauth2/link` return `{ authorizationUrl }` JSON only; they never include Session Tokens or Provider Tokens and never redirect automatically. OAuth HTTP routes require `AuthHttpConfig.baseUrl` so provider callback URLs are derived as `baseUrl + basePath + /oauth2/callback/:providerId`. `GET`/`POST /api/auth/oauth2/callback/:providerId` complete sign-in/link callbacks, set the normal session cookie only for sign-in success, and redirect only to configured same-origin paths. Callback failures redirect to `oauth.errorPath` without putting Session Tokens or Provider Tokens in URLs or bodies. OAuth redirect result paths are same-origin relative paths; absolute and protocol-relative paths are rejected during `AuthHttpConfig.layer(...)` construction.
+`POST /api/auth/sign-in/oauth2` and `POST /api/auth/oauth2/link` return `{ authorizationUrl }` JSON only; they never include Session Tokens or Provider Tokens and never redirect automatically. OAuth HTTP routes require `AuthHttp.configure(...).layer({ baseUrl })` so provider callback URLs are derived as `baseUrl + basePath + /oauth2/callback/:providerId`. `GET`/`POST /api/auth/oauth2/callback/:providerId` complete sign-in/link callbacks, set the normal session cookie only for sign-in success, and redirect only to configured same-origin paths. Callback failures redirect to `oauth.errorPath` without putting Session Tokens or Provider Tokens in URLs or bodies. OAuth redirect result paths are same-origin relative paths; absolute and protocol-relative paths are rejected during configured layer construction.
 
 ## Drizzle Postgres Storage
 
@@ -343,9 +341,20 @@ export const authSchema = { Users, Accounts, Sessions, Verifications, OAuthState
 
 ```typescript
 import { Effect, Layer, Option } from "effect";
+import { HttpApi } from "effect/unstable/httpapi";
 import { AuthLive } from "effect-auth";
-import { AuthHttp, AuthHttpConfig, AuthSession, CurrentAuthSession, OAuthHttp } from "effect-auth/http";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import {
+  AuthHttp,
+  AuthHttpOptionalSessionContext,
+  AuthHttpSessionContext,
+} from "effect-auth/http";
+
+const authHttp = AuthHttp.configure({
+  basePath: "/api/auth",
+  sessionCookieName: "__Host_effect_auth_session",
+  cookieAndBearer: true, // omit for cookie-only browser auth
+  oauth: true, // omit if you do not use OAuth routes
+});
 
 const AuthServicesLive = AuthLive().pipe(
   Layer.provide(Layer.mergeAll(PostgresAuthStorage, ResendAuthEmail, RedisRateLimiter)),
@@ -353,40 +362,41 @@ const AuthServicesLive = AuthLive().pipe(
 
 const AppHttpLive = Layer.mergeAll(
   AuthServicesLive,
-  OAuthLive, // omit this and OAuthHttp.mount if you do not use OAuth routes
-  AuthHttpConfig.layer({
+  OAuthLive, // omit this when authHttp is configured without OAuth routes
+  authHttp.layer({
     baseUrl: new URL("https://app.example.com"),
     trustedOrigins: [new URL("https://app.example.com")],
-    sessionCookieName: "__Host_effect_auth_session",
-    secureCookies: true,
+    cookies: { secure: true },
   }),
 );
 
-const app = HttpRouter.layer.pipe(
-  AuthHttp.mount({ basePath: "/api/auth" }),
-  OAuthHttp.mount({ basePath: "/api/auth" }),
+const Api = HttpApi.make("app").addHttpApi(authHttp.api);
+const app = Layer.mergeAll(AppRoutes, authHttp.routes).pipe(
+  Layer.provide(authHttp.middleware.layer),
   Layer.provideMerge(AppHttpLive),
 );
 
 const protectedProgram = Effect.gen(function* () {
-  const authSession = yield* AuthSession;
+  const authSession = yield* AuthHttpSessionContext;
   return authSession.user;
-}).pipe(AuthHttp.requireAuth);
+}).pipe(authHttp.requireAuth);
 
 const navbarProgram = Effect.gen(function* () {
-  const session = yield* CurrentAuthSession;
-  return Option.match(session.current, {
+  const { session } = yield* AuthHttpOptionalSessionContext;
+  return Option.match(session, {
     onNone: () => ({ signedIn: false }),
     onSome: ({ user }) => ({ signedIn: true, user }),
   });
-}).pipe(AuthHttp.optionalAuth);
+}).pipe(authHttp.optionalAuth);
 ```
 
-Mounted browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Programmatic `Auth.signIn` returns a redacted Session Token for server-owned bearer/API flows. The mounted router uses `Layer.provideMerge` intentionally so request-time `Auth` and `AuthHttpConfig` services remain available to the web handler.
+Configured browser sign-in sets the configured HttpOnly SameSite=Lax Session Cookie and does not return Session Tokens in JSON. Cookie auth is the default; bearer credentials are accepted only when `cookieAndBearer: true` is set, and rotated bearer credentials are returned in the `set-auth-token` response header listed by `authHttp.tokenResponseHeader`. Programmatic `Auth.signIn` still returns a redacted Session Token for server-owned bearer/API flows. The configured object owns `authHttp.api`, `authHttp.routes`, `authHttp.middleware`, `authHttp.requireAuth`, `authHttp.optionalAuth`, and `authHttp.layer(...)` so app docs, app route groups, and auth routes share the same package-owned contract.
+
+Migration note: `AuthHttp.configure(...)` supersedes the old public HTTP DX (`AuthHttp.mount`, `OAuthHttp.mount`, standalone `AuthApi`/`AuthApiEndpoints`, `AuthHttpHandlersLive`, custom `AuthHttpErrorMapper`, global `requireAuth`/`optionalAuth`, and standalone token extractor customization). Keep any legacy mount usage behind internal tests only; new application code should configure one `authHttp` object and compose its API, routes, middleware, and runtime layer.
 
 ## HTTP Endpoints
 
-Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
+Configured with `AuthHttp.configure({ basePath: "/api/auth" })`:
 
 | Method | Path                                |
 | ------ | ----------------------------------- |
@@ -407,12 +417,12 @@ Mounted with `AuthHttp.mount({ basePath: "/api/auth" })`:
 | `POST` | `/api/auth/password/change`         |
 | `POST` | `/api/auth/delete-user`             |
 
-`GET /sessions` requires a valid Session Token from the configured extractor and returns active, token-free listed sessions. State-changing Session Management routes enforce trusted-origin checks. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid. Listed-session revocation is Session Id scoped; see `docs/adr/0004-session-id-scoped-revocation.md` for the design rationale.
+`GET /sessions` requires a valid configured credential and returns active, token-free listed sessions. Cookie credentials are enabled by default; bearer credentials are opt-in via `cookieAndBearer: true`. State-changing Session Management routes enforce trusted-origin checks for cookie credentials while bearer-protected state changes rely on the bearer credential instead of Origin/Referer. Cookie-authenticated `POST /sessions/revoke` clears the session cookie when the current Session is revoked, and `POST /sessions/revoke-all` clears it after revoking every current-user Session. `POST /sessions/revoke-others` keeps the current Session cookie valid. Listed-session revocation is Session Id scoped; see `docs/adr/0004-session-id-scoped-revocation.md` for the design rationale.
 
 `POST /update-user` requires a valid Session Token and trusted origin, updates `name` and/or `image`, and returns `{ user }`. `GET /accounts` requires a valid Session Token and returns `{ accounts }`; account responses never include password hashes, access tokens, refresh tokens, ID tokens, or other provider secrets.
 `POST /delete-user` requires a valid Session Token, trusted origin, and a `password` body field. Cookie-authenticated deletion clears the Session Cookie and returns `{ ok: true }`.
 
-Mounted with `OAuthHttp.mount({ basePath: "/api/auth" })`:
+Included when configured with `AuthHttp.configure({ basePath: "/api/auth", oauth: true })`:
 
 | Method | Path                                      |
 | ------ | ----------------------------------------- |

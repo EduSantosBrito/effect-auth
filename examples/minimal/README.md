@@ -25,8 +25,7 @@ OAuth is not wired into this smallest example, but the secure shape is the same 
 ```typescript
 import { Config, Effect, Layer } from "effect";
 import { AuthLive, OAuth, OAuthProviders } from "effect-auth";
-import { AuthHttpConfig, OAuthHttp } from "effect-auth/http";
-import * as HttpRouter from "effect/unstable/http/HttpRouter";
+import { AuthHttp } from "effect-auth/http";
 
 const AuthSettings = Config.all({
   encryptionKey: Config.redacted("AUTH_ENCRYPTION_KEY"),
@@ -60,13 +59,14 @@ const AuthLiveLayer = Layer.unwrap(
   ),
 );
 
-const OAuthRoutes = HttpRouter.layer.pipe(
-  OAuthHttp.mount({ basePath: "/api/auth" }),
+const authHttp = AuthHttp.configure({ basePath: "/api/auth", oauth: true });
+
+const OAuthRoutes = authHttp.routes.pipe(
   Layer.provideMerge(
     Layer.mergeAll(
       OAuth.layer,
       ProvidersLive,
-      AuthHttpConfig.layer({ baseUrl: new URL("https://app.example.com") }),
+      authHttp.layer({ baseUrl: new URL("https://app.example.com") }),
     ),
   ),
 );
