@@ -1,5 +1,6 @@
 import { assert, it } from "@effect/vitest";
 import { Duration, Effect, Layer, Predicate, Redacted, Schema } from "effect";
+import { createSign, generateKeyPairSync, type KeyObject } from "node:crypto";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
@@ -18,6 +19,8 @@ import {
   OAuthProviders,
   OAuthStartError,
   OAuthState,
+  OidcIdTokenValidator,
+  OidcValidationError,
   ProtectedProviderToken,
   ProviderTokenProtection,
   ProviderTokenProtectionFailure,
@@ -120,6 +123,83 @@ const jsonResponse = (
       headers: { "content-type": "application/json" },
     }),
   );
+
+const base64UrlJson = (body: unknown) => Buffer.from(JSON.stringify(body)).toString("base64url");
+
+const makeOidcKey = (kid: string) => {
+  const { privateKey, publicKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+  return {
+    kid,
+    privateKey,
+    publicJwk: { ...publicKey.export({ format: "jwk" }), kid, use: "sig", alg: "RS256" },
+  };
+};
+
+const signOidcIdToken = (input: {
+  readonly kid: string;
+  readonly privateKey: KeyObject;
+  readonly claims: Readonly<Record<string, unknown>>;
+}) => {
+  const header = base64UrlJson({ alg: "RS256", kid: input.kid, typ: "JWT" });
+  const payload = base64UrlJson(input.claims);
+  const signingInput = `${header}.${payload}`;
+  const signer = createSign("RSA-SHA256");
+  signer.update(signingInput);
+  signer.end();
+  return `${signingInput}.${signer.sign(input.privateKey).toString("base64url")}`;
+};
+
+const oidcClaims = (input: {
+  readonly nonce: string;
+  readonly nowSeconds?: number;
+  readonly overrides?: Readonly<Record<string, unknown>>;
+}) => {
+  const nowSeconds = input.nowSeconds ?? 1_700_000_000;
+  return {
+    iss: "https://oidc.example",
+    sub: "oidc-user-1",
+    aud: "oidc-client",
+    exp: nowSeconds + 600,
+    iat: nowSeconds,
+    nonce: input.nonce,
+    email: "oidc@example.com",
+    email_verified: true,
+    name: "OIDC User",
+    picture: "https://oidc.example/avatar.png",
+    ...input.overrides,
+  };
+};
+
+const makeFakeOidcHttpClient = (input: {
+  readonly tokenResponse: () => Readonly<Record<string, unknown>>;
+  readonly jwksResponses: ReadonlyArray<Readonly<Record<string, unknown>>>;
+}) => {
+  let jwksRequestCount = 0;
+  return {
+    live: Layer.succeed(HttpClient.HttpClient)(
+      HttpClient.make((request, url) => {
+        if (url.href === "https://oidc.example/token") {
+          return Effect.succeed(jsonResponse(request, input.tokenResponse()));
+        }
+        if (url.href === "https://oidc.example/jwks") {
+          const response = input.jwksResponses[jwksRequestCount] ??
+            input.jwksResponses[input.jwksResponses.length - 1] ?? { keys: [] };
+          jwksRequestCount += 1;
+          return Effect.succeed(jsonResponse(request, response));
+        }
+        return Effect.fail(
+          new HttpClientError.HttpClientError({
+            reason: new HttpClientError.TransportError({
+              request,
+              description: `unexpected OIDC fake request: ${url.href}`,
+            }),
+          }),
+        );
+      }),
+    ),
+    jwksRequestCount: () => jwksRequestCount,
+  };
+};
 
 const defaultTokenResponse = {
   access_token: "provider-access-token",
@@ -362,6 +442,347 @@ it.effect("adds and encrypts OIDC nonce state for OIDC providers", () => {
     }
     assert.strictEqual(Redacted.value(consumedNonce), nonce);
   }).pipe(Effect.provide(makeOAuthLayer(storageState)));
+});
+
+it.effect("validates OIDC ID Tokens and refreshes JWKS once for unknown kid", () => {
+  const nowSeconds = 1_700_000_000;
+  const now = nowSeconds * 1000;
+  const nonce = "oidc-nonce";
+  const key = makeOidcKey("oidc-key-1");
+  const rotatedKey = makeOidcKey("oidc-key-2");
+  const claims = oidcClaims({ nonce, nowSeconds });
+  const idToken = signOidcIdToken({ kid: key.kid, privateKey: key.privateKey, claims });
+  const validatorLayer = (httpClientLive: Layer.Layer<HttpClient.HttpClient>) =>
+    Layer.mergeAll(
+      OAuthProviders.layer({ providers: [oidcProvider] }),
+      OidcIdTokenValidator.layer,
+    ).pipe(Layer.provide(httpClientLive));
+  const validateWith = (input: {
+    readonly token: string;
+    readonly expectedNonce: string;
+    readonly httpClientLive: Layer.Layer<HttpClient.HttpClient>;
+  }) =>
+    Effect.gen(function* () {
+      const providers = yield* OAuthProviders;
+      const validator = yield* OidcIdTokenValidator;
+      const providerId = yield* decodeOAuthProviderId("oidc");
+      const provider = yield* providers.get(providerId);
+      return yield* validator.validate({
+        provider,
+        idToken: Redacted.make(input.token),
+        expectedNonce: Redacted.make(input.expectedNonce),
+        now,
+      });
+    }).pipe(Effect.provide(validatorLayer(input.httpClientLive)));
+  const clientWithKeys = (keys: ReadonlyArray<Readonly<Record<string, unknown>>>) =>
+    makeFakeOidcHttpClient({
+      tokenResponse: () => ({}),
+      jwksResponses: [{ keys }],
+    }).live;
+
+  return Effect.gen(function* () {
+    const valid = yield* validateWith({
+      token: idToken,
+      expectedNonce: nonce,
+      httpClientLive: clientWithKeys([key.publicJwk]),
+    });
+    assert.strictEqual(valid.issuer, "https://oidc.example");
+    assert.strictEqual(valid.subject, "oidc-user-1");
+    assert.deepStrictEqual(valid.audience, ["oidc-client"]);
+    assert.strictEqual(valid.nonce, nonce);
+    assert.strictEqual(valid.email, "oidc@example.com");
+
+    const invalidNonce = yield* Effect.flip(
+      validateWith({
+        token: idToken,
+        expectedNonce: "wrong-nonce",
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(invalidNonce, new OidcValidationError({ reason: "NonceMismatch" }));
+
+    const invalidIssuer = yield* Effect.flip(
+      validateWith({
+        token: signOidcIdToken({
+          kid: key.kid,
+          privateKey: key.privateKey,
+          claims: oidcClaims({ nonce, nowSeconds, overrides: { iss: "https://evil.example" } }),
+        }),
+        expectedNonce: nonce,
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(invalidIssuer, new OidcValidationError({ reason: "IssuerMismatch" }));
+
+    const invalidAudience = yield* Effect.flip(
+      validateWith({
+        token: signOidcIdToken({
+          kid: key.kid,
+          privateKey: key.privateKey,
+          claims: oidcClaims({ nonce, nowSeconds, overrides: { aud: "other-client" } }),
+        }),
+        expectedNonce: nonce,
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(
+      invalidAudience,
+      new OidcValidationError({ reason: "AudienceMismatch" }),
+    );
+
+    const expired = yield* Effect.flip(
+      validateWith({
+        token: signOidcIdToken({
+          kid: key.kid,
+          privateKey: key.privateKey,
+          claims: oidcClaims({ nonce, nowSeconds, overrides: { exp: nowSeconds - 1 } }),
+        }),
+        expectedNonce: nonce,
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(expired, new OidcValidationError({ reason: "ExpiredToken" }));
+
+    const notBefore = yield* Effect.flip(
+      validateWith({
+        token: signOidcIdToken({
+          kid: key.kid,
+          privateKey: key.privateKey,
+          claims: oidcClaims({ nonce, nowSeconds, overrides: { nbf: nowSeconds + 60 } }),
+        }),
+        expectedNonce: nonce,
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(notBefore, new OidcValidationError({ reason: "IssuedAtInFuture" }));
+
+    const invalidSignature = yield* Effect.flip(
+      validateWith({
+        token: signOidcIdToken({
+          kid: key.kid,
+          privateKey: rotatedKey.privateKey,
+          claims,
+        }),
+        expectedNonce: nonce,
+        httpClientLive: clientWithKeys([key.publicJwk]),
+      }),
+    );
+    assert.deepStrictEqual(
+      invalidSignature,
+      new OidcValidationError({ reason: "InvalidSignature" }),
+    );
+
+    const rotatedToken = signOidcIdToken({
+      kid: rotatedKey.kid,
+      privateKey: rotatedKey.privateKey,
+      claims,
+    });
+    const rotatedHttp = makeFakeOidcHttpClient({
+      tokenResponse: () => ({}),
+      jwksResponses: [{ keys: [key.publicJwk] }, { keys: [rotatedKey.publicJwk] }],
+    });
+    const refreshed = yield* validateWith({
+      token: rotatedToken,
+      expectedNonce: nonce,
+      httpClientLive: rotatedHttp.live,
+    });
+    assert.strictEqual(refreshed.subject, "oidc-user-1");
+    assert.strictEqual(rotatedHttp.jwksRequestCount(), 2);
+
+    const unknownHttp = makeFakeOidcHttpClient({
+      tokenResponse: () => ({}),
+      jwksResponses: [{ keys: [key.publicJwk] }, { keys: [key.publicJwk] }],
+    });
+    const unknown = yield* Effect.flip(
+      validateWith({
+        token: rotatedToken,
+        expectedNonce: nonce,
+        httpClientLive: unknownHttp.live,
+      }),
+    );
+    assert.deepStrictEqual(unknown, new OidcValidationError({ reason: "UnknownKeyId" }));
+    assert.strictEqual(unknownHttp.jwksRequestCount(), 2);
+  });
+});
+
+it.effect("completes OIDC new-user callbacks with validated identity and protected tokens", () => {
+  const storageState = makeDevMemoryStorageState();
+  const key = makeOidcKey("oidc-callback-key");
+  let idToken = "";
+  const http = makeFakeOidcHttpClient({
+    tokenResponse: () => ({
+      access_token: "oidc-access-token",
+      refresh_token: "oidc-refresh-token",
+      id_token: idToken,
+      token_type: "Bearer",
+      scope: "openid email",
+      expires_in: 3600,
+    }),
+    jwksResponses: [{ keys: [key.publicJwk] }],
+  });
+
+  return Effect.gen(function* () {
+    const oauth = yield* OAuth;
+    const storage = yield* AuthStorage;
+    const protection = yield* ProviderTokenProtection;
+
+    const started = yield* oauth.startSignIn({
+      providerId: "oidc",
+      redirectUri: new URL("https://app.example.com/auth/callback/oidc"),
+    });
+    const nonce = started.authorizationUrl.searchParams.get("nonce");
+    if (nonce === null) {
+      return yield* new MissingOAuthTestFixture({ message: "expected OIDC nonce" });
+    }
+    idToken = signOidcIdToken({
+      kid: key.kid,
+      privateKey: key.privateKey,
+      claims: oidcClaims({ nonce, overrides: { exp: 1_900_000_000, iat: undefined } }),
+    });
+
+    const result = yield* oauth.completeCallback({
+      providerId: "oidc",
+      state: started.state,
+      code: "oidc-code",
+      callbackMethod: "POST",
+    });
+    if (result.flow !== "SignIn") {
+      return yield* new MissingOAuthTestFixture({ message: "expected OIDC sign-in result" });
+    }
+    assert.strictEqual(result.isNewUser, true);
+    assert.strictEqual(result.user.email, "oidc@example.com");
+    assert.strictEqual(result.user.emailVerified, true);
+    assert.strictEqual(result.account.providerId, "oidc");
+    assert.strictEqual(result.account.accountId, "oidc-user-1");
+    assert.strictEqual(result.session.userId, result.user.id);
+    assert.strictEqual(started.authorizationUrl.href.includes("oidc-access-token"), false);
+    assert.strictEqual(started.authorizationUrl.href.includes(idToken), false);
+
+    const storedAccount = yield* latestProviderAccount(storageState);
+    const protectedAccessToken = storedAccount.providerTokens.accessToken;
+    const protectedIdToken = storedAccount.providerTokens.idToken;
+    if (protectedAccessToken === undefined || protectedIdToken === undefined) {
+      return yield* new MissingOAuthTestFixture({ message: "expected protected OIDC tokens" });
+    }
+    assert.notStrictEqual(protectedAccessToken, "oidc-access-token");
+    assert.notStrictEqual(protectedIdToken, idToken);
+    const clearAccessToken = yield* protection.unprotect({
+      providerId: storedAccount.providerId,
+      providerAccountId: storedAccount.accountId,
+      kind: "AccessToken",
+      protectedToken: protectedAccessToken,
+    });
+    assert.strictEqual(Redacted.value(clearAccessToken), "oidc-access-token");
+
+    const publicAccounts = yield* storage.listUserAccounts({ userId: result.user.id });
+    const publicAccount = publicAccounts[0];
+    if (publicAccount === undefined) {
+      return yield* new MissingOAuthTestFixture({ message: "expected public OIDC account" });
+    }
+    assert.strictEqual(publicAccount.providerId, "oidc");
+    assert.strictEqual(Object.hasOwn(publicAccount, "providerTokens"), false);
+  }).pipe(
+    Effect.provide(
+      makeOAuthLayer(storageState, {
+        providers: [oidcProvider],
+        httpClientLive: http.live,
+      }),
+    ),
+  );
+});
+
+it.effect("rejects OIDC callbacks without state nonce match or provider email", () => {
+  const nonceMismatchState = makeDevMemoryStorageState();
+  const missingEmailState = makeDevMemoryStorageState();
+  const key = makeOidcKey("oidc-failure-key");
+  let nonceMismatchIdToken = "";
+  let missingEmailIdToken = "";
+  const nonceMismatchHttp = makeFakeOidcHttpClient({
+    tokenResponse: () => ({ access_token: "oidc-access-token", id_token: nonceMismatchIdToken }),
+    jwksResponses: [{ keys: [key.publicJwk] }],
+  });
+  const missingEmailHttp = makeFakeOidcHttpClient({
+    tokenResponse: () => ({ access_token: "oidc-access-token", id_token: missingEmailIdToken }),
+    jwksResponses: [{ keys: [key.publicJwk] }],
+  });
+
+  return Effect.gen(function* () {
+    const nonceMismatch = yield* Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const started = yield* oauth.startSignIn({
+        providerId: "oidc",
+        redirectUri: new URL("https://app.example.com/auth/callback/oidc"),
+      });
+      nonceMismatchIdToken = signOidcIdToken({
+        kid: key.kid,
+        privateKey: key.privateKey,
+        claims: oidcClaims({
+          nonce: "wrong-nonce",
+          overrides: { exp: 1_900_000_000, iat: undefined },
+        }),
+      });
+      return yield* Effect.flip(
+        oauth.completeCallback({
+          providerId: "oidc",
+          state: started.state,
+          code: "oidc-code",
+          callbackMethod: "GET",
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(nonceMismatchState, {
+          providers: [oidcProvider],
+          httpClientLive: nonceMismatchHttp.live,
+        }),
+      ),
+    );
+    assert.deepStrictEqual(
+      nonceMismatch,
+      new OAuthCallbackError({ reason: "IdentityValidationFailed" }),
+    );
+    assert.strictEqual(nonceMismatchState.users.size, 0);
+
+    const missingEmail = yield* Effect.gen(function* () {
+      const oauth = yield* OAuth;
+      const started = yield* oauth.startSignIn({
+        providerId: "oidc",
+        redirectUri: new URL("https://app.example.com/auth/callback/oidc"),
+      });
+      const nonce = started.authorizationUrl.searchParams.get("nonce");
+      if (nonce === null) {
+        return yield* new MissingOAuthTestFixture({ message: "expected OIDC nonce" });
+      }
+      missingEmailIdToken = signOidcIdToken({
+        kid: key.kid,
+        privateKey: key.privateKey,
+        claims: oidcClaims({
+          nonce,
+          overrides: { email: undefined, exp: 1_900_000_000, iat: undefined },
+        }),
+      });
+      return yield* Effect.flip(
+        oauth.completeCallback({
+          providerId: "oidc",
+          state: started.state,
+          code: "oidc-code",
+          callbackMethod: "GET",
+        }),
+      );
+    }).pipe(
+      Effect.provide(
+        makeOAuthLayer(missingEmailState, {
+          providers: [oidcProvider],
+          httpClientLive: missingEmailHttp.live,
+        }),
+      ),
+    );
+    assert.deepStrictEqual(
+      missingEmail,
+      new OAuthCallbackError({ reason: "ProviderEmailRequired" }),
+    );
+    assert.strictEqual(missingEmailState.users.size, 0);
+  });
 });
 
 it.effect("validates provider IDs, scopes, and reserved authorization params", () => {

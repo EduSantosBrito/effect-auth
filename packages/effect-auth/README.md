@@ -38,6 +38,7 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 - Rate Limiter service boundary that applications provide explicitly.
 - OAuth provider registry plus authorization-start and generic callback completion APIs.
 - Storage-backed OAuth State with hashed handles and encrypted PKCE/OIDC secrets.
+- OIDC ID Token validation for issuer, audience, expiry/not-before, nonce, and JWKS signatures.
 - Effect Auth-owned provider token encryption with replaceable protection services.
 
 ## Install
@@ -210,7 +211,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. OIDC ID Token validation and Drizzle provider-account persistence are separate follow-up slices.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins and idempotent manual links update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Verified or trusted same-email sign-ins link atomically to the existing User; untrusted/unverified same-email sign-ins fail without linking. Link callback success returns no new Session Token. OIDC providers validate signed ID Tokens against configured issuer, client audience, encrypted state nonce, expiry/not-before claims, and JWKS keys before claims can create/link local users. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Drizzle provider-account persistence is a separate follow-up slice.
 
 Mounted OAuth routes live in `effect-auth/http` and derive callback URLs from server config instead of request headers:
 
