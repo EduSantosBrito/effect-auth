@@ -70,6 +70,9 @@ const OAuthRoutes = authHttp.routes.pipe(
     ),
   ),
 );
+
+// Application HttpApi groups can use authHttp.middleware and provide authHttp.middleware.layer
+// so protected handlers read AuthHttpSessionContext instead of duplicating cookie/session plumbing.
 ```
 
 Use the package README for the full OAuth/OIDC setup, including provider endpoints, HTTP client wiring, and Provider Token Protection.

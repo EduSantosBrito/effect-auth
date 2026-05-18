@@ -28,7 +28,13 @@ import {
 } from "../src/domain/index";
 import { AuthEmail, AuthEmailFailure } from "../src/email/index";
 import { makeMockAuthEmailState, MockAuthEmail } from "../src/email/mock";
-import { AuthHttp as ConfiguredAuthHttp } from "../src/http/index";
+import {
+  AuthHttp as ConfiguredAuthHttp,
+  AuthHttpCredentialMaintenance,
+  AuthHttpCredentialRenderer,
+  AuthHttpCredentialResolver,
+  AuthHttpUrlPolicy,
+} from "../src/http/index";
 import {
   AuthHttp as LegacyAuthHttp,
   AuthApiEndpoints,
@@ -322,8 +328,12 @@ export {
   AuthHttp,
   AuthHttpAdapter,
   AuthHttpConfig,
+  AuthHttpCredentialMaintenance,
+  AuthHttpCredentialRenderer,
+  AuthHttpCredentialResolver,
   AuthHttpErrorMapper,
   AuthHttpToken,
+  AuthHttpUrlPolicy,
   AuthLive,
   AuthLiveConfig,
   AuthTestLive,
