@@ -238,16 +238,16 @@ _Avoid_: JWT verification link, reset code
 - **OAuth State Secrets** are encrypted at rest because callback handling requires the original PKCE code verifier and OIDC nonce values.
 - **OAuth State** records bind the External Provider, flow type, exact redirect URI, requested scopes, sign-up intent, expiry, and consumption metadata for the redirect transaction.
 - Better Auth-style public `callbackUrl`, `errorCallbackUrl`, and `newUserCallbackUrl` are not OAuth standard fields and are deferred from the first slice.
-- First-slice OAuth post-auth redirects are server-configured through OAuth HTTP/Auth HTTP configuration, not supplied by public OAuth start requests or provider callbacks.
+- First-slice OAuth post-auth redirects are server-configured through the configured Auth HTTP runtime layer, not supplied by public OAuth start requests or provider callbacks.
 - OAuth callbacks set the normal session cookie on sign-in success and then redirect to server-configured success or error destinations without placing Provider Tokens or Session Tokens in URLs.
 - New OAuth users use the same first-slice success redirect as existing users; separate new-user redirect behavior is deferred.
 - **OAuth State** defaults to a 10-minute TTL, configurable through `oauthState.ttl` in **Auth Live Config**.
 - Link-flow **OAuth State** records also bind the current User.
 - Public **OAuth Client Integration** HTTP endpoints use `/sign-in/oauth2`, `/oauth2/link`, and `/oauth2/callback/:providerId`.
 - OAuth start endpoints return JSON containing the authorization URL; first-slice OAuth HTTP does not issue automatic redirects or expose a Better Auth-style `disableRedirect` flag.
-- Public **OAuth Client Integration** HTTP routes are mounted through opt-in **OAuth HTTP**, not automatically by core auth HTTP.
-- **OAuth HTTP** is exported from `effect-auth/http`, not the root package.
-- **OAuth HTTP** exposes `OAuthHttp.mount({ basePath })` as route-mount glue for Effect HTTP servers.
+- Public **OAuth Client Integration** HTTP routes are included by opting into `AuthHttp.configure({ oauth: true })` on the package-owned Auth HTTP facade.
+- **Configured Auth HTTP** is exported from `effect-auth/http`, not the root package.
+- The configured object exposes `api`, `routes`, `middleware`, `requireAuth`, `optionalAuth`, `layer`, cookie metadata, and bearer refresh-header metadata for Effect HTTP servers.
 - Public **OAuth Client Integration** callback accepts provider responses through GET query parameters and POST form/body parameters.
 - Public **OAuth Client Integration** sign-in and link requests may include client-provided raw **OAuth Scopes** for Better Auth parity.
 - Client-provided **OAuth Scopes** augment configured External Provider default scopes for both sign-in and link flows.
@@ -352,12 +352,12 @@ _Avoid_: JWT verification link, reset code
 - OAuth workflows are exposed through a separate **OAuth Service** layer rather than added to the core Auth service.
 - The exported **OAuth Service** is named `OAuth`, not `AuthOAuth`.
 - The **OAuth Service** default layer is exposed as `OAuth.layer`, not `OAuthLive`.
-- OAuth HTTP routes are exposed through separate opt-in **OAuth HTTP** that requires the **OAuth Service**.
-- `OAuthHttp.mount({ basePath })` adds `POST /sign-in/oauth2`, `POST /oauth2/link`, and `GET|POST /oauth2/callback/:providerId` under the configured base path.
-- `OAuthHttp.mount` uses the same `AuthHttpConfig` service as core `AuthHttp.mount` for cookies, trusted origins, base URL-derived callback URLs, and server-configured OAuth callback redirects.
-- `OAuthHttp.mount` requires `AuthHttpConfig.baseUrl` to be configured; OAuth callback URL derivation must not depend on untrusted request headers.
-- `AuthHttpConfig.oauth` provides relative same-origin `signInSuccessPath`, `linkSuccessPath`, and `errorPath` with safe defaults for OAuth callback redirects.
-- The first **OAuth Client Integration** slice derives provider callback URLs from `AuthHttpConfig.baseUrl`, `OAuthHttp.mount({ basePath })`, and `providerId`; provider-specific redirect URI overrides are deferred.
+- OAuth HTTP routes are exposed through opt-in `AuthHttp.configure({ oauth: true })` and require the **OAuth Service**.
+- `AuthHttp.configure({ basePath, oauth: true })` adds `POST /sign-in/oauth2`, `POST /oauth2/link`, and `GET|POST /oauth2/callback/:providerId` under the configured base path.
+- `authHttp.layer(...)` provides cookies, trusted origins, base URL-derived callback URLs, server-configured OAuth callback redirects, and configured middleware wiring.
+- `authHttp.layer({ baseUrl })` requires a public base URL; OAuth callback URL derivation must not depend on untrusted request headers.
+- `authHttp.layer({ oauth })` accepts relative same-origin `signInSuccessPath`, `linkSuccessPath`, and `errorPath` with safe defaults for OAuth callback redirects.
+- The first **OAuth Client Integration** slice derives provider callback URLs from `authHttp.layer({ baseUrl })`, the configured base path, and `providerId`; provider-specific redirect URI overrides are deferred.
 - First-slice **OAuth Providers** may define either explicit OAuth/OIDC endpoints or an OIDC discovery URL.
 - **OAuth Providers** requires provider `clientSecret` as a redacted value, not a plain string.
 - Effect Auth OAuth examples use Effect `Config` such as `Config.redacted(...)` for **OAuth Client Secret** values instead of reading `process.env` directly.
@@ -376,10 +376,10 @@ _Avoid_: JWT verification link, reset code
 - OAuth public service shape resolved as a separate **OAuth Service**, not extra methods on the core Auth service.
 - OAuth service export name resolved as `OAuth`, not `AuthOAuth`.
 - OAuth layer naming resolved as `OAuth.layer`, not `OAuthLive`.
-- OAuth HTTP route mounting resolved as opt-in `OAuthHttp.mount({ basePath })` from `effect-auth/http`, separate from core auth HTTP.
+- OAuth HTTP route inclusion resolved as opt-in `AuthHttp.configure({ oauth: true })` from `effect-auth/http`, on the same configured Auth HTTP facade as core auth routes.
 - OAuth HTTP endpoint set resolved as `POST /sign-in/oauth2`, `POST /oauth2/link`, and `GET|POST /oauth2/callback/:providerId` under the configured base path.
-- OAuth HTTP config dependency resolved as shared `AuthHttpConfig` for session cookies, trusted origins, and callback URL derivation.
-- OAuth HTTP public base URL resolved as required for `OAuthHttp.mount`, while core auth HTTP may keep `baseUrl` optional.
+- OAuth HTTP runtime dependency resolved as `authHttp.layer(...)` for session cookies, trusted origins, middleware, and callback URL derivation.
+- OAuth HTTP public base URL resolved as required for `authHttp.layer({ baseUrl })`.
 - Provider-specific OAuth redirect URI overrides are deferred; first-slice callback URLs are derived only from configured HTTP base URL, mount base path, and provider id.
 - OIDC discovery URL support is included in the first provider definition slice as an alternative to explicit endpoints.
 - OIDC discovery resolution happens at **OAuth Providers** layer construction, not lazily per request.
@@ -410,7 +410,7 @@ _Avoid_: JWT verification link, reset code
 - Better Auth-style OAuth post-auth callback URL fields resolved as deferred because they are not OAuth standard fields and increase open-redirect risk; first-slice redirects are server-configured.
 - OAuth start HTTP response resolved as JSON authorization URL only, with no automatic redirect or `disableRedirect` behavior in the first slice.
 - OAuth callback HTTP behavior resolved as setting normal session cookie on sign-in success and redirecting to server-configured success/error destinations without URL token material.
-- OAuth HTTP redirect configuration resolved as nested `AuthHttpConfig.oauth` relative paths: `signInSuccessPath`, `linkSuccessPath`, and `errorPath`, with defaults `/`, `/settings/accounts`, and `/auth/error`.
+- OAuth HTTP redirect configuration resolved as nested `authHttp.layer({ oauth })` relative paths: `signInSuccessPath`, `linkSuccessPath`, and `errorPath`, with defaults `/`, `/settings/accounts`, and `/auth/error`.
 - Manual OAuth account linking idempotency resolved as success when the Provider Account is already linked to the current User, including token/metadata refresh; linking to a different User remains an error.
 - OAuth sign-in token update resolved as default behavior for already-linked Provider Accounts: update returned token fields/metadata, preserve existing fields omitted by provider response.
 - OAuth sign-in/linking storage invariants resolved as dedicated atomic AuthStorage behavior rather than service-level primitive find/create/update sequences.
