@@ -210,7 +210,7 @@ const program = Effect.gen(function* () {
 }).pipe(Effect.provide(OAuthLive));
 ```
 
-`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Mounted OAuth HTTP routes, OIDC ID Token validation, returning-account updates, same-email linking, and Drizzle provider-account persistence are separate follow-up slices.
+`startSignIn` returns data for your HTTP layer to redirect or serialize. `startLink` additionally requires a valid current Session Token and stores the state-bound User Id. `completeCallback` consumes State exactly once, protects provider tokens before storage, and returns a normal Session Token for sign-in success. Returning provider-account sign-ins update returned token fields/metadata while preserving omitted token fields such as refresh tokens. Treat callback account data as internal workflow data; HTTP responses should serialize only application-safe fields and the normal session cookie/token behavior. Mounted OAuth HTTP routes, OIDC ID Token validation, same-email linking, manual linking, and Drizzle provider-account persistence are separate follow-up slices.
 
 ## Drizzle Postgres Storage
 
