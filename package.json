@@ -50,7 +50,7 @@
     "knip": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
-    "pkg-pr-new": "^0.0.71",
+    "pkg-pr-new": "^0.0.78",
     "vitest": "catalog:"
   }
 }
