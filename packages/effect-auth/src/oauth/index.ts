@@ -6,7 +6,7 @@ import {
   createPublicKey,
   createVerify,
   randomBytes,
-  type JsonWebKey,
+  type webcrypto,
 } from "node:crypto";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
@@ -595,7 +595,7 @@ const audienceClaim = (
   return undefined;
 };
 
-const jwkToJsonWebKey = (jwk: OidcJwkShape): JsonWebKey => ({
+const jwkToJsonWebKey = (jwk: OidcJwkShape): webcrypto.JsonWebKey => ({
   kty: jwk.kty,
   ...(jwk.kid === undefined ? {} : { kid: jwk.kid }),
   ...(jwk.use === undefined ? {} : { use: jwk.use }),
