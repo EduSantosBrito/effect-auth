@@ -49,8 +49,6 @@ bun add effect-auth effect@4.0.0-rc.115
 
 Requires Effect `4.0.0-rc.115` or a compatible newer v4 release. Use the matching `@effect/sql-pg` RC for Postgres storage.
 
-Requires Effect `4.0.0-rc.115` or a compatible newer v4 release. Use the matching `@effect/sql-pg` RC for Postgres storage.
-
 ## Backend Usage
 
 ```typescript
