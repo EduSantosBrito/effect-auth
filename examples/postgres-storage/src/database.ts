@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import { Layer, Redacted } from "effect";
 import { DrizzlePg } from "effect-auth/storage/drizzle-pg";
@@ -5,5 +6,8 @@ import { authSchema } from "./schema.js";
 
 export const makePostgresLive = (databaseUrl: string) => {
   const PgLive = PgClient.layer({ url: Redacted.make(databaseUrl) });
-  return DrizzlePg.layer({ schema: authSchema }).pipe(Layer.provide(PgLive));
+  return DrizzlePg.layer({ schema: authSchema }).pipe(
+    Layer.provide(PgLive),
+    Layer.provide(BunCrypto.layer),
+  );
 };

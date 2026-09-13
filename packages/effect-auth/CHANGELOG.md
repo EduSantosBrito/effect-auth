@@ -4,6 +4,16 @@ All notable user-facing changes should be documented here.
 
 This project follows npm package versions for `effect-auth`. While the package is `0.x`, minor releases may include breaking changes.
 
+## Unreleased
+
+- Upgrade Effect and its integrations from `4.0.0-beta.64` to `4.0.0-rc.115`, with Vitest 5 for the matching Effect test integration.
+- Migrate schema errors, configuration and service access, JSON decoding, UUID generation, and configured HTTP API composition to the RC APIs.
+- Breaking: `DrizzlePg.layer` now requires Effect’s `Crypto` service for UUID generation; provide the runtime’s Crypto layer.
+- Preserve storage conflict errors for the RC’s dedicated SQL `UniqueViolation` reason.
+- Explicitly encode OAuth scope arrays as PostgreSQL text arrays, including empty scopes.
+- Execute Postgres integration fixture statements individually for the RC SQL driver.
+- Preserve CLI boolean flag defaults and supply the terminal dimensions required by the RC.
+
 ## 0.5.0
 
 - Add first-class configured Effect HttpApi integration via `AuthHttp.configure(...)`, including package-owned API contract, routes, middleware, auth helpers, runtime layer wiring, cookie metadata, bearer refresh metadata, exported public HTTP schemas, and OAuth route-family support.

@@ -95,7 +95,7 @@ export class AuthHttpOkResponse extends Schema.Class<AuthHttpOkResponse>("AuthHt
 
 export const AuthHttpCurrentSessionResponse = Schema.NullOr(AuthHttpSessionResponse);
 
-export class AuthHttpBadRequest extends Schema.TaggedErrorClass<AuthHttpBadRequest>()(
+export class AuthHttpBadRequest extends Schema.TaggedError<AuthHttpBadRequest>()(
   "AuthHttpBadRequest",
   {
     code: Schema.String,
@@ -103,7 +103,7 @@ export class AuthHttpBadRequest extends Schema.TaggedErrorClass<AuthHttpBadReque
   },
 ) {}
 
-export class AuthHttpUnauthorized extends Schema.TaggedErrorClass<AuthHttpUnauthorized>()(
+export class AuthHttpUnauthorized extends Schema.TaggedError<AuthHttpUnauthorized>()(
   "AuthHttpUnauthorized",
   {
     code: Schema.String,
@@ -111,7 +111,7 @@ export class AuthHttpUnauthorized extends Schema.TaggedErrorClass<AuthHttpUnauth
   },
 ) {}
 
-export class AuthHttpForbidden extends Schema.TaggedErrorClass<AuthHttpForbidden>()(
+export class AuthHttpForbidden extends Schema.TaggedError<AuthHttpForbidden>()(
   "AuthHttpForbidden",
   {
     code: Schema.String,
@@ -119,7 +119,7 @@ export class AuthHttpForbidden extends Schema.TaggedErrorClass<AuthHttpForbidden
   },
 ) {}
 
-export class AuthHttpRateLimited extends Schema.TaggedErrorClass<AuthHttpRateLimited>()(
+export class AuthHttpRateLimited extends Schema.TaggedError<AuthHttpRateLimited>()(
   "AuthHttpRateLimited",
   {
     code: Schema.String,
@@ -143,7 +143,7 @@ export const AuthHttpErrors = [
   AuthHttpRateLimitedSchema,
 ];
 
-export class AuthHttpConfigError extends Schema.TaggedErrorClass<AuthHttpConfigError>()(
+export class AuthHttpConfigError extends Schema.TaggedError<AuthHttpConfigError>()(
   "AuthHttpConfigError",
   {
     field: Schema.String,
@@ -1196,19 +1196,21 @@ const makeApi = <I extends HttpApiMiddleware.AnyId>(input: {
   const protectedIdentity = protectedIdentityGroup
     .middleware(input.middleware)
     .middleware(AuthHttpSchemaErrorMiddleware);
-  const base = HttpApi.make("effectAuth").add(
+  const api = HttpApi.make("effectAuth").add(
     publicGroup,
     optionalGroup,
     protectedSession,
     protectedIdentity,
+    ...(input.contract.oauth
+      ? [
+          oauthPublicGroup,
+          oauthProtectedGroup
+            .middleware(input.middleware)
+            .middleware(AuthHttpSchemaErrorMiddleware),
+        ]
+      : []),
   );
-  const withOAuth = input.contract.oauth
-    ? base.add(
-        oauthPublicGroup,
-        oauthProtectedGroup.middleware(input.middleware).middleware(AuthHttpSchemaErrorMiddleware),
-      )
-    : base;
-  return withOAuth.prefix(input.contract.basePath);
+  return api.prefix(input.contract.basePath);
 };
 
 const publicHandlers = <I extends HttpApiMiddleware.AnyId>(api: ReturnType<typeof makeApi<I>>) =>

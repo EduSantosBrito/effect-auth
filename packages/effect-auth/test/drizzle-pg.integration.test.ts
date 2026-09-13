@@ -1,3 +1,4 @@
+import { BunCrypto } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import { assert, it } from "@effect/vitest";
 import { Config, ConfigProvider, Effect, Layer, Option, Predicate, Redacted, Schema } from "effect";
@@ -17,18 +18,21 @@ const decodeOAuthProviderId = Schema.decodeUnknownEffect(OAuthProviderId);
 const decodeOAuthStateHash = Schema.decodeUnknownEffect(OAuthStateHash);
 const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
 const decodeTokenHash = Schema.decodeUnknownEffect(TokenHash);
-const postgresUrl = Config.option(Config.string("EFFECT_AUTH_POSTGRES_URL")).parse(
+const postgresUrl = Config.option(Config.String("EFFECT_AUTH_POSTGRES_URL")).parse(
   ConfigProvider.fromEnv(),
 );
 
 const live = (url: string) => {
   const PgLive = PgClient.layer({ url: Redacted.make(url) });
-  return DrizzlePg.layer({ schema: auth }).pipe(Layer.provideMerge(PgLive));
+  return DrizzlePg.layer({ schema: auth }).pipe(
+    Layer.provideMerge(PgLive),
+    Layer.provide(BunCrypto.layer),
+  );
 };
 
 const setupSchema = Effect.fn("setupSchema")(function* () {
   const sql = yield* SqlClient.SqlClient;
-  yield* sql.unsafe(`
+  const statements = `
     DROP TABLE IF EXISTS auth_oauth_states;
     DROP TABLE IF EXISTS auth_verifications;
     DROP TABLE IF EXISTS auth_sessions;
@@ -103,7 +107,10 @@ const setupSchema = Effect.fn("setupSchema")(function* () {
     CREATE INDEX auth_oauth_states_provider_flow_idx ON auth_oauth_states(provider_id, flow);
     CREATE INDEX auth_oauth_states_expires_at_idx ON auth_oauth_states(expires_at);
     CREATE INDEX auth_oauth_states_link_user_id_idx ON auth_oauth_states(link_user_id);
-  `);
+  `;
+  for (const statement of statements.split(";")) {
+    if (statement.trim() !== "") yield* sql.unsafe(statement);
+  }
 });
 
 const countRows = Effect.fn("countRows")(function* (table: string) {

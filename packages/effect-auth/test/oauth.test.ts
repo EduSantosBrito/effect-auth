@@ -47,7 +47,7 @@ const decodeOAuthProviderId = Schema.decodeUnknownEffect(OAuthProviderId);
 const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 const decodeProtectedProviderToken = Schema.decodeUnknownEffect(ProtectedProviderToken);
 
-class MissingOAuthTestFixture extends Schema.TaggedErrorClass<MissingOAuthTestFixture>()(
+class MissingOAuthTestFixture extends Schema.TaggedError<MissingOAuthTestFixture>()(
   "MissingOAuthTestFixture",
   {
     message: Schema.String,
@@ -920,7 +920,7 @@ it.effect("validates provider IDs, scopes, and reserved authorization params", (
       providers: [{ ...githubProvider, extraAuthorizationParams: { state: "override" } }],
     }).pipe(Layer.provide(UnexpectedHttpClientLive));
     const reserved = yield* Effect.flip(
-      OAuthProviders.asEffect().pipe(Effect.asVoid, Effect.provide(reservedProviders)),
+      OAuthProviders.pipe(Effect.asVoid, Effect.provide(reservedProviders)),
     );
     assert.strictEqual(Predicate.isTagged(reserved, "OAuthProviderConfigError"), true);
     if (Predicate.isTagged(reserved, "OAuthProviderConfigError")) {
@@ -2007,7 +2007,7 @@ it.effect("fails provider layer construction for duplicate IDs", () =>
       Layer.provide(UnexpectedHttpClientLive),
     );
     const failure = yield* Effect.flip(
-      OAuthProviders.asEffect().pipe(Effect.asVoid, Effect.provide(duplicated)),
+      OAuthProviders.pipe(Effect.asVoid, Effect.provide(duplicated)),
     );
 
     assert.strictEqual(Predicate.isTagged(failure, "OAuthProviderConfigError"), true);
@@ -2041,7 +2041,7 @@ it.effect("requires OAuth state encryption key material at layer construction", 
         ),
       ),
     );
-    const failure = yield* Effect.flip(OAuth.asEffect().pipe(Effect.asVoid, Effect.provide(layer)));
+    const failure = yield* Effect.flip(OAuth.pipe(Effect.asVoid, Effect.provide(layer)));
 
     assert.deepStrictEqual(
       failure,

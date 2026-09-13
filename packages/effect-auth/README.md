@@ -44,8 +44,12 @@ Authentication code tends to mix transport, storage, crypto, validation, and app
 ## Install
 
 ```bash
-bun add effect-auth effect
+bun add effect-auth effect@4.0.0-rc.115
 ```
+
+Requires Effect `4.0.0-rc.115` or a compatible newer v4 release. Use the matching `@effect/sql-pg` RC for Postgres storage.
+
+Requires Effect `4.0.0-rc.115` or a compatible newer v4 release. Use the matching `@effect/sql-pg` RC for Postgres storage.
 
 ## Backend Usage
 
@@ -274,6 +278,7 @@ const oauthRoutes = authHttp.routes.pipe(Layer.provideMerge(AuthHttpLive));
 ## Drizzle Postgres Storage
 
 ```typescript
+import { BunCrypto } from "@effect/platform-bun";
 import { PgClient } from "@effect/sql-pg";
 import { Layer, Redacted } from "effect";
 import { AuthLive } from "effect-auth";
@@ -291,6 +296,7 @@ const PgLive = PgClient.layer({
 
 const PostgresAuthStorage = DrizzlePg.layer({ schema: authSchema }).pipe(
   Layer.provide(PgLive),
+  Layer.provide(BunCrypto.layer),
 );
 
 export const AppLive = AuthLive().pipe(
@@ -298,7 +304,7 @@ export const AppLive = AuthLive().pipe(
 );
 ```
 
-`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, `Verifications`, and `OAuthStates`. It provides `AuthStorage` from an Effect SQL Postgres client layer and keeps token consumption, OAuth State consumption, OAuth provider-account sign-in/linking, OAuth sign-in plus Session issuance, session rotation, password reset, password change, revocation, and user deletion operations transactional. OAuth account operations also upgrade `emailVerified` when a verified/trusted provider email matches the existing User email. Provider token columns store already-protected envelopes and are omitted from public account projections.
+`DrizzlePg.layer(...)` accepts plain Drizzle tables with plural keys: `Users`, `Accounts`, `Sessions`, `Verifications`, and `OAuthStates`. It requires `SqlClient` and Effect’s `Crypto` service (provide `BunCrypto.layer` on Bun or `NodeCrypto.layer` from `@effect/platform-node` on Node) and provides `AuthStorage` and keeps token consumption, OAuth State consumption, OAuth provider-account sign-in/linking, OAuth sign-in plus Session issuance, session rotation, password reset, password change, revocation, and user deletion operations transactional. OAuth account operations also upgrade `emailVerified` when a verified/trusted provider email matches the existing User email. Provider token columns store already-protected envelopes and are omitted from public account projections.
 
 Generate the Drizzle schema TypeScript file once, use its `authSchema` for runtime, and let Drizzle Kit own SQL migrations:
 

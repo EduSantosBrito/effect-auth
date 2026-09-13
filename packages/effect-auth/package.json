@@ -99,7 +99,7 @@
     "test": "bun --bun vitest run --config vitest.config.ts"
   },
   "dependencies": {
-    "effect": "^4.0.0-beta.64"
+    "effect": "^4.0.0-rc.115"
   },
   "devDependencies": {
     "@effect/tsgo": "catalog:",
@@ -113,7 +113,7 @@
   },
   "peerDependencies": {
     "@effect/sql": "*",
-    "@effect/sql-pg": "^4.0.0-beta.64",
+    "@effect/sql-pg": "^4.0.0-rc.115",
     "drizzle-orm": "^0.45.2"
   },
   "peerDependenciesMeta": {
