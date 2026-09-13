@@ -16,7 +16,7 @@ export type OriginUrl = typeof OriginUrl.Type;
 export const ClientIp = Schema.String.pipe(Schema.brand("ClientIp"));
 export type ClientIp = typeof ClientIp.Type;
 
-export class BoundaryParseError extends Schema.TaggedErrorClass<BoundaryParseError>()(
+export class BoundaryParseError extends Schema.TaggedError<BoundaryParseError>()(
   "BoundaryParseError",
   {
     field: Schema.String,
@@ -24,7 +24,7 @@ export class BoundaryParseError extends Schema.TaggedErrorClass<BoundaryParseErr
   },
 ) {}
 
-export class PublicAuthError extends Schema.TaggedErrorClass<PublicAuthError>()("PublicAuthError", {
+export class PublicAuthError extends Schema.TaggedError<PublicAuthError>()("PublicAuthError", {
   code: Schema.Literals([
     "InvalidCredentials",
     "EmailNotVerified",

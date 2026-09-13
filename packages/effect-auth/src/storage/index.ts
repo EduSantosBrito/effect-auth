@@ -222,14 +222,14 @@ export interface CompleteOAuthLink {
   readonly now: number;
 }
 
-export class OAuthSessionStorageFailure extends Schema.TaggedErrorClass<OAuthSessionStorageFailure>()(
+export class OAuthSessionStorageFailure extends Schema.TaggedError<OAuthSessionStorageFailure>()(
   "OAuthSessionStorageFailure",
   {
     reason: Schema.Literals(["SessionCreationFailed"]),
   },
 ) {}
 
-export class OAuthAccountStorageFailure extends Schema.TaggedErrorClass<OAuthAccountStorageFailure>()(
+export class OAuthAccountStorageFailure extends Schema.TaggedError<OAuthAccountStorageFailure>()(
   "OAuthAccountStorageFailure",
   {
     reason: Schema.Literals([
@@ -242,7 +242,7 @@ export class OAuthAccountStorageFailure extends Schema.TaggedErrorClass<OAuthAcc
   },
 ) {}
 
-export class AuthStorageFailure extends Schema.TaggedErrorClass<AuthStorageFailure>()(
+export class AuthStorageFailure extends Schema.TaggedError<AuthStorageFailure>()(
   "AuthStorageFailure",
   {
     reason: Schema.Literals([

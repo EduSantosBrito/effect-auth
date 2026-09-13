@@ -20,7 +20,7 @@ export type SessionToken = typeof SessionToken.Type;
 export const TokenHash = Schema.RedactedFromValue(Schema.String, { label: "TokenHash" });
 export type TokenHash = typeof TokenHash.Type;
 
-export class TokenGenerationFailure extends Schema.TaggedErrorClass<TokenGenerationFailure>()(
+export class TokenGenerationFailure extends Schema.TaggedError<TokenGenerationFailure>()(
   "TokenGenerationFailure",
   {
     reason: Schema.Literals(["UnavailableEntropy", "HashingFailed"]),

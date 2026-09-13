@@ -10,7 +10,7 @@ import {
 
 const packageVersion = "0.5.0";
 
-class CliFailure extends Schema.TaggedErrorClass<CliFailure>()("CliFailure", {
+class CliFailure extends Schema.TaggedError<CliFailure>()("CliFailure", {
   reason: Schema.String,
 }) {}
 
@@ -18,6 +18,7 @@ const unavailableChildProcessSpawner = ChildProcessSpawner.make(() => Effect.nev
 
 const terminal = Terminal.make({
   columns: Effect.succeed(80),
+  rows: Effect.succeed(24),
   readInput: Queue.unbounded<Terminal.UserInput>(),
   readLine: Effect.fail(new Terminal.QuitError()),
   display: (text) => Console.log(text),
@@ -85,22 +86,24 @@ export const makeCli = (cwd: string) => {
   const generate = Command.make(
     "generate",
     {
-      output: Flag.string("output").pipe(
+      output: Flag.String("output").pipe(
         Flag.withAlias("o"),
         Flag.withMetavar("path"),
         Flag.withDescription("Output TypeScript schema file"),
         Flag.withDefault(defaultDrizzlePgSchemaOutput),
       ),
-      prefix: Flag.string("prefix").pipe(
+      prefix: Flag.String("prefix").pipe(
         Flag.withMetavar("value"),
         Flag.withDescription("Table prefix for generated Drizzle Postgres tables"),
         Flag.withDefault(defaultDrizzlePgSchemaPrefix),
       ),
-      force: Flag.boolean("force").pipe(
+      force: Flag.Boolean("force").pipe(
+        Flag.withDefault(false),
         Flag.withAlias("f"),
         Flag.withDescription("Overwrite an existing output file"),
       ),
-      dryRun: Flag.boolean("dry-run").pipe(
+      dryRun: Flag.Boolean("dry-run").pipe(
+        Flag.withDefault(false),
         Flag.withDescription("Print generated schema instead of writing it"),
       ),
     },

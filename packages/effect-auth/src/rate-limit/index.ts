@@ -11,7 +11,7 @@ export const RateLimitBucket = Schema.Literals([
 ]);
 export type RateLimitBucket = typeof RateLimitBucket.Type;
 
-export class RateLimitExceeded extends Schema.TaggedErrorClass<RateLimitExceeded>()(
+export class RateLimitExceeded extends Schema.TaggedError<RateLimitExceeded>()(
   "RateLimitExceeded",
   {
     bucket: RateLimitBucket,

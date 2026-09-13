@@ -1,4 +1,5 @@
-import { Effect, type Layer } from "effect";
+import { Effect, type Crypto, type Layer } from "effect";
+import type { SqlClient } from "effect/unstable/sql/SqlClient";
 import { HttpApi, HttpApiBuilder, HttpApiEndpoint, HttpApiGroup } from "effect/unstable/httpapi";
 import {
   Auth,
@@ -326,7 +327,9 @@ type AuthLiveCallableContract = ExpectTrue<
 >;
 
 type ConfiguredAuthHttpReturnContract = [
-  ExpectTrue<ReturnType<typeof AuthHttp.configure>["api"] extends ConfiguredAuthHttpApi ? true : false>,
+  ExpectTrue<
+    ReturnType<typeof AuthHttp.configure>["api"] extends ConfiguredAuthHttpApi ? true : false
+  >,
   ExpectTrue<
     ReturnType<typeof AuthHttp.configure>["middleware"] extends ConfiguredAuthHttpMiddleware
       ? true
@@ -672,4 +675,12 @@ type PublicApiContract = {
     | VerificationTokenValue;
 };
 
-export type { PublicApiContract };
+type DrizzlePgCryptoRequirement = ExpectTrue<
+  Layer.Services<ReturnType<typeof drizzlePgLayer>> extends SqlClient | Crypto.Crypto
+    ? SqlClient | Crypto.Crypto extends Layer.Services<ReturnType<typeof drizzlePgLayer>>
+      ? true
+      : false
+    : false
+>;
+
+export type { PublicApiContract, DrizzlePgCryptoRequirement };

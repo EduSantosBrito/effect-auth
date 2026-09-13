@@ -1,4 +1,5 @@
-import { Clock, Effect, Layer, Predicate, Random, Redacted, Schema } from "effect";
+import { PgTypes } from "@effect/sql-pg";
+import { Clock, Crypto, Effect, Layer, Predicate, Redacted, Result, Schema } from "effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 import type { SqlError } from "effect/unstable/sql/SqlError";
 import { getTableName } from "drizzle-orm";
@@ -262,7 +263,8 @@ const notFound = new AuthStorageFailure({ reason: "NotFound" });
 const backendUnavailable = new AuthStorageFailure({ reason: "BackendUnavailable" });
 
 const sqlFailure = (error: SqlError) =>
-  Predicate.isTagged(error.reason, "ConstraintError")
+  Predicate.isTagged(error.reason, "ConstraintError") ||
+  Predicate.isTagged(error.reason, "UniqueViolation")
     ? new AuthStorageFailure({ reason: "Conflict" })
     : backendUnavailable;
 
@@ -564,15 +566,20 @@ const sessionJoinSelect = `
   ${millis("u.updated_at")} AS "userUpdatedAt"
 `;
 
-const makeId = (prefix: string) =>
-  Random.nextUUIDv4.pipe(Effect.map((uuid) => `${prefix}_${uuid.replaceAll("-", "")}`));
+type StorageServices = SqlClient.SqlClient | Crypto.Crypto;
 
 const make: <S extends AuthDrizzlePgSchema>(
   options: LayerOptions<S>,
-) => Effect.Effect<AuthStorageShape, never, SqlClient.SqlClient> = Effect.fn("DrizzlePg.make")(
+) => Effect.Effect<AuthStorageShape, never, StorageServices> = Effect.fn("DrizzlePg.make")(
   (options) =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
+      const crypto = yield* Crypto.Crypto;
+      const makeId = (prefix: string) =>
+        crypto.randomUUIDv4.pipe(
+          Effect.map((uuid) => `${prefix}_${uuid.replaceAll("-", "")}`),
+          Effect.mapError(() => new AuthStorageFailure({ reason: "BackendUnavailable" })),
+        );
       const tables = tableNames(options.schema);
 
       const findCredentialAccountByEmail: AuthStorageShape["findCredentialAccountByEmail"] = (
@@ -768,7 +775,7 @@ const make: <S extends AuthDrizzlePgSchema>(
               input.providerId,
               input.providerAccountId,
               input.userId,
-              input.scopes,
+              Result.getOrThrow(PgTypes.array(input.scopes, PgTypes.OID.text)),
               input.providerTokens.accessToken ?? null,
               input.providerTokens.refreshToken ?? null,
               input.providerTokens.idToken ?? null,
@@ -809,7 +816,7 @@ const make: <S extends AuthDrizzlePgSchema>(
             [
               input.providerId,
               input.providerAccountId,
-              input.scopes,
+              Result.getOrThrow(PgTypes.array(input.scopes, PgTypes.OID.text)),
               input.providerTokens.accessToken ?? null,
               input.providerTokens.refreshToken ?? null,
               input.providerTokens.idToken ?? null,
@@ -1182,7 +1189,7 @@ const make: <S extends AuthDrizzlePgSchema>(
                   input.providerId,
                   input.flow,
                   input.redirectUri.href,
-                  input.scopes,
+                  Result.getOrThrow(PgTypes.array(input.scopes, PgTypes.OID.text)),
                   input.allowSignUp,
                   input.linkUserId ?? null,
                   input.encryptedCodeVerifier ?? null,

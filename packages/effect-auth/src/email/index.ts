@@ -2,12 +2,9 @@ import { Context, Effect, Schema } from "effect";
 import type { NormalizedEmail } from "../domain/index.js";
 import type { VerificationToken } from "../token/index.js";
 
-export class AuthEmailFailure extends Schema.TaggedErrorClass<AuthEmailFailure>()(
-  "AuthEmailFailure",
-  {
-    reason: Schema.Literals(["DeliveryUnavailable", "InvalidRecipient"]),
-  },
-) {}
+export class AuthEmailFailure extends Schema.TaggedError<AuthEmailFailure>()("AuthEmailFailure", {
+  reason: Schema.Literals(["DeliveryUnavailable", "InvalidRecipient"]),
+}) {}
 
 export interface SentAuthEmail {
   readonly kind: "EmailVerification" | "PasswordReset";

@@ -9,17 +9,17 @@
       "examples/*"
     ],
     "catalog": {
-      "@effect/platform-bun": "^4.0.0-beta.64",
+      "@effect/platform-bun": "^4.0.0-rc.115",
       "@effect/tsgo": "0.5.2",
-      "@effect/vitest": "^4.0.0-beta.64",
+      "@effect/vitest": "^4.0.0-rc.115",
       "@types/bun": "latest",
       "@typescript/native-preview": "latest",
-      "effect": "^4.0.0-beta.64",
+      "effect": "^4.0.0-rc.115",
       "effect-rules": "0.3.3",
       "knip": "^6.12.2",
       "oxfmt": "^0.48.0",
       "oxlint": "^1.63.0",
-      "vitest": "^4.1.5"
+      "vitest": "^5.0.0"
     }
   },
   "type": "module",
@@ -40,7 +40,8 @@
     "prepare": "bun --bun effect-tsgo patch"
   },
   "devDependencies": {
-    "@effect/sql-pg": "4.0.0-beta.64",
+    "@effect/platform-bun": "catalog:",
+    "@effect/sql-pg": "4.0.0-rc.115",
     "@effect/tsgo": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/bun": "catalog:",

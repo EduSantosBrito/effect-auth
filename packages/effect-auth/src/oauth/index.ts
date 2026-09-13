@@ -6,7 +6,7 @@ import {
   createPublicKey,
   createVerify,
   randomBytes,
-  type webcrypto,
+  type JsonWebKey,
 } from "node:crypto";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
@@ -47,7 +47,7 @@ export interface AuthFeatureKeyMaterial {
   readonly keyBytes: Redacted.Redacted<Uint8Array>;
 }
 
-export class AuthFeatureKeyMaterialFailure extends Schema.TaggedErrorClass<AuthFeatureKeyMaterialFailure>()(
+export class AuthFeatureKeyMaterialFailure extends Schema.TaggedError<AuthFeatureKeyMaterialFailure>()(
   "AuthFeatureKeyMaterialFailure",
   {
     feature: AuthEncryptedFeature,
@@ -167,7 +167,7 @@ export interface UnprotectProviderTokenInput extends ProviderTokenAad {
   readonly protectedToken: ProtectedProviderToken;
 }
 
-export class ProviderTokenProtectionFailure extends Schema.TaggedErrorClass<ProviderTokenProtectionFailure>()(
+export class ProviderTokenProtectionFailure extends Schema.TaggedError<ProviderTokenProtectionFailure>()(
   "ProviderTokenProtectionFailure",
   {
     reason: Schema.Literals([
@@ -352,7 +352,7 @@ export interface OAuthProviderProfile {
   readonly image: string | null;
 }
 
-export class OAuthProviderProfileMappingFailure extends Schema.TaggedErrorClass<OAuthProviderProfileMappingFailure>()(
+export class OAuthProviderProfileMappingFailure extends Schema.TaggedError<OAuthProviderProfileMappingFailure>()(
   "OAuthProviderProfileMappingFailure",
   {
     reason: Schema.String,
@@ -409,7 +409,7 @@ export interface ResolvedOAuthProvider {
   readonly mapProfile?: OAuthProviderInput["mapProfile"];
 }
 
-export class OAuthProviderConfigError extends Schema.TaggedErrorClass<OAuthProviderConfigError>()(
+export class OAuthProviderConfigError extends Schema.TaggedError<OAuthProviderConfigError>()(
   "OAuthProviderConfigError",
   {
     reason: Schema.Literals([
@@ -425,7 +425,7 @@ export class OAuthProviderConfigError extends Schema.TaggedErrorClass<OAuthProvi
   },
 ) {}
 
-export class OAuthProviderNotFound extends Schema.TaggedErrorClass<OAuthProviderNotFound>()(
+export class OAuthProviderNotFound extends Schema.TaggedError<OAuthProviderNotFound>()(
   "OAuthProviderNotFound",
   {
     providerId: Schema.String,
@@ -449,7 +449,7 @@ export interface OAuthProviderIdentityResult {
   readonly tokenSet: OAuthTokenSet;
 }
 
-export class OAuthProviderClientError extends Schema.TaggedErrorClass<OAuthProviderClientError>()(
+export class OAuthProviderClientError extends Schema.TaggedError<OAuthProviderClientError>()(
   "OAuthProviderClientError",
   {
     reason: Schema.Literals([
@@ -473,7 +473,7 @@ export interface OidcValidationInput {
   readonly now?: number;
 }
 
-export class OidcValidationError extends Schema.TaggedErrorClass<OidcValidationError>()(
+export class OidcValidationError extends Schema.TaggedError<OidcValidationError>()(
   "OidcValidationError",
   {
     reason: Schema.Literals([
@@ -528,7 +528,7 @@ type DecodedJwt = {
 const isReadonlyRecord = (value: unknown): value is Readonly<Record<string, unknown>> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const decodeJsonString = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
+const decodeJsonString = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown));
 
 const decodeBase64UrlJson = (value: string): Effect.Effect<unknown, OidcValidationError> =>
   decodeJsonString(Buffer.from(value, "base64url").toString("utf8")).pipe(
@@ -595,7 +595,7 @@ const audienceClaim = (
   return undefined;
 };
 
-const jwkToJsonWebKey = (jwk: OidcJwkShape): webcrypto.JsonWebKey => ({
+const jwkToJsonWebKey = (jwk: OidcJwkShape): JsonWebKey => ({
   kty: jwk.kty,
   ...(jwk.kid === undefined ? {} : { kid: jwk.kid }),
   ...(jwk.use === undefined ? {} : { use: jwk.use }),
@@ -1096,7 +1096,7 @@ const isPlainOAuthProviderConfigInput = (
 const resolveProviderConfig = (
   input: OAuthProviderConfigLayerInput,
 ): Effect.Effect<OAuthProviderConfigInput, Config.ConfigError> =>
-  isPlainOAuthProviderConfigInput(input) ? Effect.succeed(input) : Config.unwrap(input).asEffect();
+  isPlainOAuthProviderConfigInput(input) ? Effect.succeed(input) : Config.unwrap(input);
 
 const validateExtraAuthorizationParams = (
   provider: OAuthProviderInput,
@@ -1283,7 +1283,7 @@ export interface OAuthStateCreateResult {
   readonly record: StoredOAuthState;
 }
 
-export class OAuthStateFailure extends Schema.TaggedErrorClass<OAuthStateFailure>()(
+export class OAuthStateFailure extends Schema.TaggedError<OAuthStateFailure>()(
   "OAuthStateFailure",
   {
     reason: Schema.Literals([
@@ -1549,7 +1549,7 @@ export interface OAuthAuthorizationStartResult {
   readonly flow: OAuthFlow;
 }
 
-export class OAuthStartError extends Schema.TaggedErrorClass<OAuthStartError>()("OAuthStartError", {
+export class OAuthStartError extends Schema.TaggedError<OAuthStartError>()("OAuthStartError", {
   reason: Schema.Literals([
     "UnknownProvider",
     "InvalidScope",
@@ -1589,7 +1589,7 @@ export interface OAuthLinkCallbackSuccess {
 
 export type OAuthCallbackSuccess = OAuthSignInCallbackSuccess | OAuthLinkCallbackSuccess;
 
-export class OAuthCallbackError extends Schema.TaggedErrorClass<OAuthCallbackError>()(
+export class OAuthCallbackError extends Schema.TaggedError<OAuthCallbackError>()(
   "OAuthCallbackError",
   {
     reason: Schema.Literals([

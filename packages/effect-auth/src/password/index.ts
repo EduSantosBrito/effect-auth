@@ -9,14 +9,14 @@ import type { NormalizedEmail, PasswordText } from "../domain/index.js";
 export const PasswordHash = Schema.RedactedFromValue(Schema.String, { label: "PasswordHash" });
 export type PasswordHash = typeof PasswordHash.Type;
 
-export class PasswordPolicyFailure extends Schema.TaggedErrorClass<PasswordPolicyFailure>()(
+export class PasswordPolicyFailure extends Schema.TaggedError<PasswordPolicyFailure>()(
   "PasswordPolicyFailure",
   {
     reason: Schema.Literals(["TooShort", "TooLong", "MatchesEmail", "MatchesEmailLocalPart"]),
   },
 ) {}
 
-export class PasswordHashFailure extends Schema.TaggedErrorClass<PasswordHashFailure>()(
+export class PasswordHashFailure extends Schema.TaggedError<PasswordHashFailure>()(
   "PasswordHashFailure",
   {
     reason: Schema.Literals(["UnsupportedRuntime", "MalformedHash", "HashingFailed"]),

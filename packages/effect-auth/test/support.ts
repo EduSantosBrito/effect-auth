@@ -99,7 +99,7 @@ import {
   VerificationTokenConfigLive,
 } from "../src/workflows/index";
 
-class MissingFixture extends Schema.TaggedErrorClass<MissingFixture>()("MissingFixture", {
+class MissingFixture extends Schema.TaggedError<MissingFixture>()("MissingFixture", {
   message: Schema.String,
 }) {}
 
@@ -107,7 +107,7 @@ const missingFixture = (message: string) => new MissingFixture({ message });
 const decodePasswordHash = Schema.decodeUnknownEffect(PasswordHash);
 const decodeSessionToken = Schema.decodeUnknownEffect(SessionToken);
 const decodeVerificationToken = Schema.decodeUnknownEffect(VerificationToken);
-const jsonString = Schema.encodeUnknownSync(Schema.UnknownFromJsonString);
+const jsonString = Schema.encodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const AuthHttp = {
   ...LegacyAuthHttp,
