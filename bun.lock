@@ -16,7 +16,7 @@
         "knip": "catalog:",
         "oxfmt": "catalog:",
         "oxlint": "catalog:",
-        "pkg-pr-new": "^0.0.86",
+        "pkg-pr-new": "^0.0.88",
         "vitest": "catalog:",
       },
     },
@@ -519,7 +519,7 @@
 
     "picomatch": ["picomatch@4.0.4", "", {}, "sha512-QP88BAKvMam/3NxH6vj2o21R6MjxZUAd6nlwAS/pnGvN9IVLocLHxGYIzFhg6fUQ+5th6P4dv4eW9jX3DSIj7A=="],
 
-    "pkg-pr-new": ["pkg-pr-new@0.0.86", "", { "bin": { "pkg-pr-new": "bin/cli.js" } }, "sha512-BwPsw/e1Be7F0SfpxhNc2VSxX7uHgCy46Ck+2Z/vqCwXoePhUBrX/VbcawpAlZgMvQe2iwGbZIQ6HSj9bmCk8A=="],
+    "pkg-pr-new": ["pkg-pr-new@0.0.88", "", { "bin": { "pkg-pr-new": "bin/cli.js" } }, "sha512-Xc6PMJ2gher0WZP+rtjefFk26hIb7V1PTLL30bmy1Z2vsRmSvqiss7Ag1XUdyplTGYzIlFNJp4L3vMNmK44N6g=="],
 
     "postcss": ["postcss@8.5.14", "", { "dependencies": { "nanoid": "^3.3.11", "picocolors": "^1.1.1", "source-map-js": "^1.2.1" } }, "sha512-SoSL4+OSEtR99LHFZQiJLkT59C5B1amGO1NzTwj7TT1qCUgUO6hxOvzkOYxD+vMrXBM3XJIKzokoERdqQq/Zmg=="],
 
