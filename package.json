@@ -46,7 +46,7 @@
     "@effect/vitest": "catalog:",
     "@types/bun": "catalog:",
     "@typescript/native-preview": "catalog:",
-    "drizzle-orm": "^0.45.2",
+    "drizzle-orm": "^0.45.3",
     "effect-rules": "catalog:",
     "knip": "catalog:",
     "oxfmt": "catalog:",
