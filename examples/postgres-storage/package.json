@@ -12,7 +12,7 @@
   },
   "dependencies": {
     "@effect/platform-bun": "catalog:",
-    "@effect/sql-pg": "4.0.0-rc.115",
+    "@effect/sql-pg": "4.0.1",
     "drizzle-orm": "^0.45.2",
     "effect": "catalog:",
     "effect-auth": "workspace:*"
