@@ -10,7 +10,7 @@
     ],
     "catalog": {
       "@effect/platform-bun": "^4.0.0-rc.115",
-      "@effect/tsgo": "0.5.2",
+      "@effect/tsgo": "0.51.1",
       "@effect/vitest": "^4.0.0-rc.115",
       "@types/bun": "latest",
       "@typescript/native-preview": "latest",
