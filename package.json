@@ -14,7 +14,7 @@
       "@effect/vitest": "^4.0.0-rc.115",
       "@types/bun": "latest",
       "@typescript/native-preview": "latest",
-      "effect": "^4.0.0-rc.115",
+      "effect": "^4.0.3",
       "effect-rules": "0.3.3",
       "knip": "^6.12.2",
       "oxfmt": "^0.48.0",
