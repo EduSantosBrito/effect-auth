@@ -41,7 +41,7 @@
   },
   "devDependencies": {
     "@effect/platform-bun": "catalog:",
-    "@effect/sql-pg": "4.0.0-rc.115",
+    "@effect/sql-pg": "4.0.3",
     "@effect/tsgo": "catalog:",
     "@effect/vitest": "catalog:",
     "@types/bun": "catalog:",
